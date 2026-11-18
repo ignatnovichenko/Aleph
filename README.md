@@ -22,11 +22,13 @@ Caddy provisions HTTPS. The application registers the Mini App in Telegram’s c
 
 ## Python development
 
-The Telegram server runs on Python 3.12. Hermes runs in a separate Python 3.14 environment. Install uv and run `deploy/install-hermes.sh` once, then start the server. Set ALEPH_HERMES_PYTHON if you installed Hermes to another directory. Set TELEGRAM_BOT_TOKEN and OPENCODE_API_KEY, or set TELEGRAM_BOT_TOKEN_FILE and OPENCODE_API_KEY_FILE to private files. Configure MINI_APP_URL with a publicly reachable HTTPS URL proxying to the service. An optional MINI_APP_URL_FILE supplies an updated URL on temporary installations.
+The Telegram server runs on Python 3.12. Hermes runs in a separate Python 3.14 environment. Install uv and run `deploy/install-hermes.sh` once. Use Node.js 24 or newer to build the Mini App and native widget scripts before starting the server. Set ALEPH_HERMES_PYTHON if you installed Hermes to another directory. Set TELEGRAM_BOT_TOKEN and OPENCODE_API_KEY, or set TELEGRAM_BOT_TOKEN_FILE and OPENCODE_API_KEY_FILE to private files. Configure MINI_APP_URL with a publicly reachable HTTPS URL proxying to the service. An optional MINI_APP_URL_FILE supplies an updated URL on temporary installations.
 
     python -m venv .venv
     . .venv/bin/activate
     pip install -r requirements-voice.txt
+    npm ci
+    npm run build
     python -m aleph
 
 Hermes is pinned to upstream v0.23.2. Each turn runs with a private temporary Hermes home. It receives just the selected project history and an authenticated loopback connection to the Aleph tool and provider broker. Aleph owns the SQLite checkpoints and model credentials. `ALEPH_ENGINE=direct` selects the previous engine for operator rollback.
@@ -37,12 +39,16 @@ The server listens on 127.0.0.1:8787 by default. Set BIND and PORT to change thi
 
 The main menu opens the live API-backed app. The API authenticates Telegram initData, rejects expired or invalid signatures, and scopes reads and writes to the signed account. Opening the web address in an ordinary browser shows a local demo. The frontend build contains no service credentials.
 
-Static hosting is optional. After enabling GitHub Pages (GitHub Actions source) in repository settings, manually run the optional Pages workflow. It publishes only web/. With MINI_APP_BRIDGE_URL set to the resulting HTTPS base, the bot can also open the static app using a Telegram keyboard button. A size-limited snapshot of the plan travels in the private button URL fragment. Changes from that view return to the bot through Telegram web_app_data and are validated using the sender’s account. The API-backed menu offers the full plan.
+Frontend logic lives in `frontend/` and uses strict TypeScript. The build combines it with HTML, styles and assets from `web/` and emits `dist/web/`. Docker builds these files in a dedicated stage. Rebuild and restart the Python process after changing the native widget script.
+
+Static hosting is optional. After enabling GitHub Pages (GitHub Actions source) in repository settings, manually run the optional Pages workflow. It builds and publishes `dist/web/`. With MINI_APP_BRIDGE_URL set to the resulting HTTPS base, the bot can also open the static app using a Telegram keyboard button. A size-limited snapshot of the plan travels in the private button URL fragment. Changes from that view return to the bot through Telegram web_app_data and are validated using the sender’s account. The API-backed menu offers the full plan.
 
 Telegram delivery queues and tool results are persisted before replies. A crash exactly after Telegram accepts a message but before its acknowledgement is saved can result in duplicate delivery. Scheduler notifications are delivered while the service is online. An active webhook on the token must be removed by the operator before running this polling implementation.
 
 ## Checks
 
+    npm ci
+    npm run build
     python -m unittest discover -s tests -v
 
 GET /healthz checks the HTTP process and SQLite. The Mini App API returns 401 without Telegram authentication. Data handling and the chat-based erasure procedure are described in [the privacy notice](web/privacy.html).

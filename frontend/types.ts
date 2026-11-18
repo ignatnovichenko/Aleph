@@ -1,0 +1,123 @@
+export interface TelegramUser {
+  id?: number;
+  first_name?: string;
+  language_code?: string;
+}
+
+interface TelegramWebApp {
+  platform: string;
+  colorScheme: "light" | "dark";
+  initData: string;
+  initDataUnsafe?: { user?: TelegramUser };
+  ready(): void;
+  expand(): void;
+  close(): void;
+  sendData(data: string): void;
+  isVersionAtLeast?(version: string): boolean;
+  onEvent?(event: "themeChanged", callback: () => void): void;
+  setHeaderColor?(color: string): void;
+  setBackgroundColor?(color: string): void;
+  setBottomBarColor?(color: string): void;
+  BackButton?: { show(): void; hide(): void; onClick(callback: () => void): void };
+  HapticFeedback?: { selectionChanged(): void; notificationOccurred(kind: "success"): void };
+}
+
+declare global {
+  interface Window {
+    Telegram?: { WebApp?: TelegramWebApp };
+    TelegramWidget?: TelegramWidget;
+  }
+}
+
+export type TaskStatus = "open" | "done";
+
+export interface Task {
+  id: number;
+  title: string;
+  notes: string;
+  status: TaskStatus;
+  due_at: string | null;
+  project_id?: number;
+}
+
+export interface Project {
+  id: number;
+  name: string;
+  context: string;
+}
+
+export interface Settings {
+  proactive: boolean;
+  timezone: string;
+  quiet_start: string;
+  quiet_end: string;
+  digest_time?: string;
+}
+
+export interface FeedSource {
+  title: string;
+  url: string;
+}
+
+export interface Feed extends FeedSource {
+  id: number;
+}
+
+export interface Routine {
+  title: string;
+  days: string;
+  time: string;
+  active: boolean | 0 | 1;
+}
+
+export interface WorkspaceState {
+  user: TelegramUser;
+  tasks: Task[];
+  settings: Settings;
+  feeds: Feed[];
+  feed_catalog: FeedSource[];
+  projects?: Project[];
+  active_project_id?: number;
+  routines?: Routine[];
+  snapshot_total?: number;
+  integrations?: { rss: boolean; calendar: boolean };
+}
+
+export interface WidgetState {
+  chat_data: string;
+}
+
+export interface TelegramWidget {
+  chatData: string | null;
+  ready(): void;
+  onEvent(kind: "chatDataChanged", callback: () => void): void;
+  request(action: string): Promise<{ result: string }>;
+}
+
+interface WidgetItem {
+  label: string;
+  detail?: string;
+}
+
+export type WidgetSpec = { title: string } & (
+  | { kind: "checklist"; items: WidgetItem[] }
+  | { kind: "compare"; items: WidgetItem[] }
+  | { kind: "chart"; items: (WidgetItem & { value: number })[]; unit: string }
+);
+
+export type Theme = "light" | "dark";
+
+export interface WidgetFrameConfig {
+  originKey: string;
+  chatData: string;
+}
+
+export type WidgetFrameRequest = { originKey: string } & (
+  | { type: "size"; height: number }
+  | { type: "action"; id: number; action: string }
+);
+
+export type WidgetFrameReply = { originKey: string } & (
+  | { type: "theme"; scheme: Theme }
+  | { type: "answer"; id: number; ok: boolean; chatData?: string }
+);

@@ -1,6 +1,7 @@
 """First-party HTML cards inside Telegram messages."""
 import json
 import math
+from functools import cache
 from pathlib import Path
 import re
 import zlib
@@ -8,6 +9,7 @@ import zlib
 from .links import widget_url
 
 TEMPLATE = Path(__file__).with_name("widget_template.html").read_text(encoding="utf-8")
+WIDGET_SCRIPT = Path(__file__).resolve().parent.parent / "dist" / "widget.js"
 KINDS = {"checklist": 6, "compare": 4, "chart": 7}
 TOOL = {"type": "function", "function": {
     "name": "create_widget",
@@ -62,12 +64,17 @@ def initialize(db):
     db.execute("UPDATE widgets SET fallback=1,message_id=NULL WHERE message_id=-1")
 
 
+@cache
+def compiled_widget():
+    return TEMPLATE.replace("__WIDGET_SCRIPT__", WIDGET_SCRIPT.read_text(encoding="utf-8"), 1)
+
+
 def render(spec):
     # No model-provided HTML or JavaScript enters the Telegram sandbox.
     payload = json.dumps(spec, ensure_ascii=False, separators=(",", ":"))
     for character in "<>&\u2028\u2029":
         payload = payload.replace(character, f"\\u{ord(character):04x}")
-    body = TEMPLATE.replace("__WIDGET_SPEC__", payload, 1)
+    body = compiled_widget().replace("__WIDGET_SPEC__", payload, 1)
     raw = body.encode("utf-8")
     if len(raw) > 32768 or len(zlib.compress(raw, 9)) > 4096:
         raise ValueError("Виджет слишком большой. Сократи подписи или детали.")

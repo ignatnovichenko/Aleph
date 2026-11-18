@@ -1,3 +1,12 @@
+FROM node:24-alpine AS frontend
+WORKDIR /app
+COPY package.json package-lock.json tsconfig.json ./
+RUN npm ci
+COPY frontend/ frontend/
+COPY scripts/ scripts/
+COPY web/ web/
+RUN npm run build
+
 FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 UV_PYTHON_INSTALL_DIR=/opt/uv-python ALEPH_HERMES_PYTHON=/opt/hermes/.venv/bin/python HF_HOME=/data/models ALEPH_DB=/data/aleph.sqlite3 BIND=0.0.0.0
 WORKDIR /app
@@ -7,7 +16,7 @@ RUN pip install --no-cache-dir uv
 COPY deploy/install-hermes.sh /usr/local/bin/install-hermes
 RUN install-hermes /opt/hermes
 COPY aleph/ aleph/
-COPY web/ web/
+COPY --from=frontend /app/dist/ dist/
 USER aleph
 EXPOSE 8787
 CMD ["python", "-m", "aleph"]

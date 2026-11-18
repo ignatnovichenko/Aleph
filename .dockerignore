@@ -3,6 +3,13 @@
 !aleph/**
 !web/
 !web/**
+!frontend/
+!frontend/**
+!scripts/
+!scripts/build-frontend.mts
+!package.json
+!package-lock.json
+!tsconfig.json
 !requirements*.txt
 !deploy/
 !deploy/install-hermes.sh

@@ -8,3 +8,6 @@ __pycache__/
 *.log
 data/
 .pytest_cache/
+node_modules/
+/dist/
+/.frontend-build-*/

@@ -13,9 +13,10 @@ from .links import mini_app_url
 from .bot import Telegram, TelegramError, run_bot
 from .scheduler import run_scheduler
 from .store import Store
+from .widgets import WIDGET_SCRIPT
 
 CONFIG = Path.home() / ".config/telegram-agent"
-WEB = Path(__file__).resolve().parent.parent / "web"
+WEB = WIDGET_SCRIPT.parent / "web"
 log = logging.getLogger("aleph")
 
 
@@ -67,6 +68,8 @@ def application(store, token):
 
 async def main():
     os.umask(0o077)
+    if not (WEB / "app.js").is_file() or not WIDGET_SCRIPT.is_file():
+        raise SystemExit("Build Aleph's frontend with npm ci and npm run build before starting the server.")
     token = secret("TELEGRAM_BOT_TOKEN", "bot-token")
     key = secret("OPENCODE_API_KEY", "opencode-key")
     path = os.getenv("ALEPH_DB") or str(Path.home() / ".local/share/aleph/aleph.sqlite3")

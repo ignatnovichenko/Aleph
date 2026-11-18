@@ -27,7 +27,9 @@ const paths = {
   download: '<path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/>',
   trash: '<path d="M4 6h16M9 6V3h6v3M6 6l1 14h10l1-14M10 10v6m4-6v6"/>',
 };
-export function icon(name) {
+export type IconName = keyof typeof paths;
+
+export function icon(name: IconName) {
   return (
     '<svg aria-hidden="true" class="icon" viewBox="0 0 24 24">' +
     paths[name] +

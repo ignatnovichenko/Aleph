@@ -1,7 +1,31 @@
+import { bridge, bridgeRequest } from "./bridge.js";
+import type { Feed, Project, Settings, Task, WidgetState, WorkspaceState } from "./types.js";
+
+export { bridge };
+
+type Reads = {
+  "/api/state": WorkspaceState;
+  "/api/calendar.ics": Blob;
+  [path: `/api/widgets/${string}`]: WidgetState & { html: string };
+};
+
+export type Writes = {
+  "/api/projects": Project;
+  [path: `/api/projects/${string}`]: Project;
+  "/api/tasks": Task;
+  [path: `/api/tasks/${string}`]: Task;
+  "/api/settings": Settings;
+  "/api/feeds": Feed;
+  [path: `/api/feeds/${string}`]: null;
+  [path: `/api/widgets/${string}`]: WidgetState;
+};
+
+export type WriteMethod = "POST" | "PATCH" | "DELETE";
+export interface RequestOptions { requestKey?: string | null }
+
 const hash = new URLSearchParams(location.hash.slice(1));
 export const signed = () =>
   window.Telegram?.WebApp?.initData || hash.get("tgWebAppData") || "";
-export const bridge = () => Boolean(window.AlephBridge?.active());
 export const demo = !bridge() && !signed() && !hash.has("tgWebAppVersion");
 export const demoKey = "aleph-demo-v2";
 export const catalog = [
@@ -14,8 +38,10 @@ export const catalog = [
     url: "https://feeds.bbci.co.uk/russian/rss.xml",
   },
 ];
-export async function request(path, method = "GET", body, {requestKey} = {}) {
-  if (bridge()) return window.AlephBridge.request(path, { method, body });
+export function request<Path extends keyof Reads>(path: Path): Promise<Reads[Path]>;
+export function request<Path extends keyof Writes>(path: Path, method: WriteMethod, body?: object, options?: RequestOptions): Promise<Writes[Path]>;
+export async function request(path: string, method: "GET" | WriteMethod = "GET", body?: object, { requestKey }: RequestOptions = {}): Promise<unknown> {
+  if (bridge()) return bridgeRequest(path, method, body);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 18000);
   try {
@@ -38,15 +64,15 @@ export async function request(path, method = "GET", body, {requestKey} = {}) {
     clearTimeout(timeout);
   }
 }
-function sampleDate(days, hour, minute) {
+function sampleDate(days: number, hour: number, minute: number) {
   const d = new Date();
   d.setDate(d.getDate() + days);
   d.setHours(hour, minute, 0, 0);
   return d.toISOString();
 }
-export function demoState(ru) {
+export function demoState(ru: boolean): WorkspaceState {
   try {
-    const value = JSON.parse(localStorage.getItem(demoKey));
+    const value = JSON.parse(localStorage.getItem(demoKey) || "null") as WorkspaceState | null;
     if (
       value?.settings &&
       Array.isArray(value.tasks) &&
@@ -100,27 +126,23 @@ export function demoState(ru) {
     integrations: { rss: true, calendar: true },
   };
 }
-export function saveDemo(state) {
+export function saveDemo(state: WorkspaceState) {
   try {
     localStorage.setItem(demoKey, JSON.stringify(state));
   } catch {
     /* Demo still works in memory. */
   }
 }
-export function escapeHtml(value) {
-  return String(value ?? "").replace(
-    /[&<>"']/g,
-    (c) =>
-      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[
-        c
-      ],
-  );
+const htmlEntities: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+export function escapeHtml(value: unknown): string {
+  return String(value ?? "").replace(/[&<>"']/g, (character) => htmlEntities[character]);
 }
-const wallClockFormatters = new Map();
-export function localDateTime(iso, zone) {
+const wallClockFormatters = new Map<string, Intl.DateTimeFormat>();
+export function localDateTime(iso: string | number | Date | null, zone: string) {
   if (!iso) return "";
-  if (!wallClockFormatters.has(zone)) {
-    wallClockFormatters.set(zone, new Intl.DateTimeFormat("en-CA", {
+  let formatter = wallClockFormatters.get(zone);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat("en-CA", {
       timeZone: zone,
       year: "numeric",
       month: "2-digit",
@@ -128,10 +150,11 @@ export function localDateTime(iso, zone) {
       hour: "2-digit",
       minute: "2-digit",
       hourCycle: "h23",
-    }));
+    });
+    wallClockFormatters.set(zone, formatter);
   }
   const parts = Object.fromEntries(
-    wallClockFormatters.get(zone).formatToParts(new Date(iso)).map((p) => [p.type, p.value]),
+    formatter.formatToParts(new Date(iso)).map((p) => [p.type, p.value]),
   );
   return (
     parts.year +
@@ -145,7 +168,7 @@ export function localDateTime(iso, zone) {
     parts.minute
   );
 }
-export function zonedISO(value, zone) {
+export function zonedISO(value: string, zone: string) {
   if (!value) return null;
   const utcParts = Date.parse(value + ":00Z");
   let candidate = utcParts;
@@ -156,19 +179,19 @@ export function zonedISO(value, zone) {
   }
   throw new Error("invalid-date");
 }
-export function demoCalendar(tasks) {
-  const safe = (text) =>
+export function demoCalendar(tasks: Task[]) {
+  const safe = (text: string) =>
     String(text)
       .replace(/\\/g, "\\\\")
       .replace(/\r?\n/g, "\\n")
       .replace(/[,;]/g, "\\$&");
-  const date = (v) =>
+  const date = (v: string | number) =>
     new Date(v)
       .toISOString()
       .replace(/[-:]/g, "")
       .replace(/\.\d{3}/, "");
   const events = tasks
-    .filter((x) => x.due_at && x.status === "open")
+    .filter((task): task is Task & { due_at: string } => Boolean(task.due_at) && task.status === "open")
     .flatMap((x) => [
       "BEGIN:VEVENT",
       "UID:" + x.id + "@aleph-demo",

@@ -1,6 +1,8 @@
 import { icon } from "./icons.js";
+import type { IconName } from "./icons.js";
+import type { RequestOptions, WriteMethod, Writes } from "./store.js";
+import type { Project, Task, TaskStatus, WorkspaceState } from "./types.js";
 import {
-  signed,
   bridge,
   demo,
   request,
@@ -12,25 +14,29 @@ import {
   demoCalendar,
 } from "./store.js";
 
-const app = document.querySelector("#app"),
-  sheet = document.querySelector("#sheet"),
-  toastEl = document.querySelector("#toast");
-let calendarFile;
-let state,
-  page = "home",
-  filter = "open",
-  ru = true,
-  pending = false,
-  modal = null,
-  toastTimer,
-  revision = 0,
-  returnFocus,
-  sdkBound = false;
-const t = (r, en) => (ru ? r : en),
-  locale = () => (ru ? "ru-RU" : "en-US");
+type Page = "home" | "projects" | "settings";
+
+function requiredElement<T extends HTMLElement>(scope: ParentNode, selector: string): T {
+  const node = scope.querySelector<T>(selector);
+  if (!node) throw new Error(`Missing Mini App element: ${selector}`);
+  return node;
+}
+
+const app = requiredElement(document, "#app");
+const sheet = requiredElement<HTMLDialogElement>(document, "#sheet");
+const toastEl = requiredElement(document, "#toast");
+let calendarFile: File | undefined;
+let state: WorkspaceState;
+let page: Page = "home";
+let filter: TaskStatus = "open";
+let ru = true, pending = false, revision = 0, sdkBound = false;
+let toastTimer: number | undefined;
+let returnFocus: HTMLElement | null = null;
+const t = (r: string, en: string) => (ru ? r : en);
+const locale = () => (ru ? "ru-RU" : "en-US");
 const webapp = () => window.Telegram?.WebApp;
 const zone = () => state?.settings.timezone || "UTC";
-const byId = (id) => state.tasks.find((x) => String(x.id) === String(id));
+const byId = (id?: string) => state.tasks.find((x) => String(x.id) === String(id));
 const scopedTasks = () => state.tasks.filter((task) => Number(task.project_id || 0) === activeId());
 const sorted = () =>
   scopedTasks().sort(
@@ -44,33 +50,38 @@ const dateFormats = {
   date: { weekday: "long", day: "numeric", month: "long" },
   day: { day: "numeric", month: "short" },
   clock: { hour: "2-digit", minute: "2-digit", hourCycle: "h23" },
-};
-const dateFormatters = new Map();
-function formatDate(kind, value) {
+} satisfies Record<string, Intl.DateTimeFormatOptions>;
+const dateFormatters = new Map<string, Intl.DateTimeFormat>();
+function formatDate(kind: keyof typeof dateFormats, value: string | number) {
   const language = locale(), timeZone = zone();
   const key = `${kind}/${language}/${timeZone}`;
-  if (!dateFormatters.has(key)) {
-    dateFormatters.set(key, new Intl.DateTimeFormat(language, { timeZone, ...dateFormats[kind] }));
+  let formatter = dateFormatters.get(key);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat(language, { timeZone, ...dateFormats[kind] });
+    dateFormatters.set(key, formatter);
   }
-  return dateFormatters.get(key).format(new Date(value));
+  return formatter.format(new Date(value));
 }
-const timeLabel = (time) => String(time || "").slice(0, 5);
-const navs = () => [
+const timeLabel = (time?: string) => String(time || "").slice(0, 5);
+const navs = (): [Page, string][] => [
   ["home", t("План", "Plan")],
   ["projects", t("Проекты", "Projects")],
   ["settings", t("Настройки", "Settings")],
 ];
-const isDark = () =>
-  webapp()?.platform && webapp().platform !== "unknown" && webapp().colorScheme
-    ? webapp().colorScheme === "dark"
+function isDark() {
+  const tg = webapp();
+  return tg?.platform && tg.platform !== "unknown" && tg.colorScheme
+    ? tg.colorScheme === "dark"
     : matchMedia("(prefers-color-scheme: dark)").matches;
+}
 function setTheme() {
   const dark = isDark();
   const root = document.documentElement;
   const tg = webapp();
   root.dataset.theme = dark ? "dark" : "light";
   const bg = dark ? "#000000" : "#edede8";
-  document.querySelector("meta[name=theme-color]").content = bg;
+  const meta = document.querySelector<HTMLMetaElement>("meta[name=theme-color]");
+  if (meta) meta.content = bg;
   try {
     tg?.setHeaderColor?.(bg);
     tg?.setBackgroundColor?.(bg);
@@ -98,41 +109,42 @@ function syncBack() {
   if (sheet.open || page !== "home") back.show();
   else back.hide();
 }
-function setLanguage(code) {
+function setLanguage(code?: string) {
   ru = !code || ["ru", "uk", "be"].includes(code.toLowerCase().split("-")[0]);
   document.documentElement.lang = ru ? "ru" : "en";
 }
-function dueDay(iso, today, tomorrow) {
+function dueDay(iso: string | null, today: string, tomorrow: string) {
   if (!iso) return t("Без срока", "No due date");
   const date = localDateTime(iso, zone()).slice(0, 10);
   if (date === today) return t("Сегодня", "Today");
   if (date === tomorrow) return t("Завтра", "Tomorrow");
   return formatDate("day", iso);
 }
-function message(text) {
+function message(text: string) {
   clearTimeout(toastTimer);
   toastEl.textContent = text;
   toastEl.classList.add("show");
-  toastTimer = setTimeout(() => toastEl.classList.remove("show"), 3300);
+  toastTimer = window.setTimeout(() => toastEl.classList.remove("show"), 3300);
 }
-function errorMessage(error) {
-  if (error.message === "static-plan") {
+function errorMessage(error: unknown) {
+  const reason = error instanceof Error ? error.message : "";
+  if (reason === "static-plan") {
     return t(
       "Напиши Алефу «открой план» и нажми появившуюся кнопку в чате.",
       "Send “open plan” to Aleph, then tap the button in your chat.",
     );
   }
-  if (error.message === "invalid-date")
+  if (reason === "invalid-date")
     return t(
       "Такого времени нет в выбранном часовом поясе. Выбери другое время.",
       "This time does not exist in this time zone. Choose a different time.",
     );
-  if (["401", "403"].includes(error.message))
+  if (["401", "403"].includes(reason))
     return t(
       "Открой приложение заново из чата с Aleph.",
       "Open the app again from your chat with Aleph.",
     );
-  if (error.message === "422" || error.message === "400")
+  if (reason === "422" || reason === "400")
     return t("Проверь введённые данные.", "Check the details and try again.");
   return t(
     "Не удалось выполнить запрос. Проверь соединение и попробуй ещё раз.",
@@ -145,15 +157,48 @@ function nav() {
   ).join("");
 }
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
-const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
-let stage, track, dock, lens, tabs, views, sizeObserver;
-let trackWidth, tabWidth, swipe, suppressTap, trackMotion, lensMotion;
-let closeTimer, closeListener, focusTarget, sheetDrag, refreshRunning = false;
-const activeView = () => views?.find((view) => view.key === page);
+const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+
+interface View {
+  key: Page;
+  index: number;
+  panel: HTMLElement;
+  heading: HTMLHeadingElement;
+  content: HTMLElement;
+  markup?: string;
+}
+
+interface Swipe {
+  pointerId: number;
+  onDock: boolean;
+  width: number;
+  index: number;
+  startX: number;
+  startY: number;
+  x: number;
+  time: number;
+  velocity: number;
+  frame: number;
+  locked: boolean;
+}
+
+let stage: HTMLElement | undefined;
+let track: HTMLElement, dock: HTMLElement, lens: HTMLElement, tabs: HTMLButtonElement[];
+let views: View[] = [];
+let sizeObserver: ResizeObserver | undefined;
+let trackWidth = 0, tabWidth = 0, suppressTap = false;
+let swipe: Swipe | undefined;
+let trackMotion: Animation | undefined, lensMotion: Animation | undefined;
+let closeTimer: number | undefined;
+let closeListener: ((event?: AnimationEvent) => void) | undefined;
+let focusTarget: string | null = null;
+let sheetDrag: { id: number; start: number; offset: number } | undefined;
+let refreshRunning = false;
+const activeView = () => views.find((view) => view.key === page);
 
 function selectionFeedback() {
   if (!demo && !reducedMotion.matches && webapp()?.isVersionAtLeast?.("6.1")) {
-    try { webapp().HapticFeedback?.selectionChanged(); } catch {}
+    try { webapp()?.HapticFeedback?.selectionChanged(); } catch {}
   }
 }
 
@@ -173,14 +218,15 @@ function mountShell() {
     <nav aria-label="${t("Навигация", "Navigation")}" class="dock">
       <span aria-hidden="true" class="dock-surface"></span><span aria-hidden="true" class="dock-lens"></span>${nav()}
     </nav>`;
-  stage = app.querySelector(".page-stage");
-  track = stage.querySelector(".page-track");
-  dock = app.querySelector(".dock");
-  lens = dock.querySelector(".dock-lens");
-  tabs = [...dock.querySelectorAll(".nav-item")];
-  views = [...track.children].map((panel, index) => ({
-    key: panel.dataset.view, index, panel, heading: panel.querySelector("h1"), content: panel.querySelector(".page-content"),
-  }));
+  stage = requiredElement(app, ".page-stage");
+  track = requiredElement(stage, ".page-track");
+  dock = requiredElement(app, ".dock");
+  lens = requiredElement(dock, ".dock-lens");
+  tabs = [...dock.querySelectorAll<HTMLButtonElement>(".nav-item")];
+  views = navs().map(([key], index) => {
+    const panel = requiredElement(track, `[data-view="${key}"]`);
+    return { key, index, panel, heading: requiredElement(panel, "h1"), content: requiredElement(panel, ".page-content") };
+  });
   sizeObserver?.disconnect();
   sizeObserver = new ResizeObserver((entries) => {
     for (const {target, contentRect} of entries) {
@@ -190,14 +236,14 @@ function mountShell() {
   });
   sizeObserver.observe(stage);
   sizeObserver.observe(dock);
-  showPage(activeView().index, 0);
+  showPage(activeView()?.index ?? 0, 0);
 }
 
 function render() {
   if (!state) return;
   if (!stage?.isConnected) mountShell();
   const date = formatDate("date", Date.now());
-  const kicker = track.querySelector(".page-kicker");
+  const kicker = requiredElement(track, ".page-kicker");
   if (kicker.textContent !== date) kicker.textContent = date;
   // Each view keeps its own scroller and stays mounted during navigation.
   for (const view of views) {
@@ -206,19 +252,20 @@ function render() {
     const restore = view.content.contains(document.activeElement) ? controlSelector(document.activeElement) : null;
     view.content.innerHTML = markup;
     view.markup = markup;
-    if (restore) view.content.querySelector(restore)?.focus({preventScroll: true});
+    if (restore) view.content.querySelector<HTMLElement>(restore)?.focus({preventScroll: true});
   }
   app.setAttribute("aria-busy", "false");
   syncBack();
 }
 
-const trackTransform = (position) => `translate3d(${-position * 100}%,0,0)`;
-const lensTransform = (position, speed = 0) =>
+const trackTransform = (position: number) => `translate3d(${-position * 100}%,0,0)`;
+const lensTransform = (position: number, speed = 0) =>
   `translate3d(${position * 100}%,0,0) scale(${1 + speed * .1},${1 - speed * .1})`;
 
-function showPage(index, duration) {
+function showPage(index: number, duration: number) {
   const previous = activeView();
   const current = views[index];
+  if (!previous || !current) return;
   const fromTrack = track.style.transform || trackTransform(previous.index);
   const fromLens = lens.style.transform || lensTransform(previous.index);
   trackMotion?.cancel();
@@ -254,8 +301,8 @@ function showPage(index, duration) {
   syncBack();
 }
 
-function navigate(id) {
-  const destination = views?.find((view) => view.key === id);
+function navigate(id: string) {
+  const destination = views.find((view) => view.key === id);
   if (!destination) return;
   if (swipe) cancelSwipe();
   if (id === page) {
@@ -268,7 +315,7 @@ function navigate(id) {
 function resetSwipe() {
   if (!swipe) return;
   const {frame, pointerId} = swipe;
-  swipe = null;
+  swipe = undefined;
   cancelAnimationFrame(frame);
   app.removeEventListener("touchmove", claimHorizontalTouch);
   if (app.hasPointerCapture?.(pointerId)) app.releasePointerCapture(pointerId);
@@ -298,26 +345,29 @@ function drawSwipe() {
   }
 }
 
-function startSwipe(event) {
+function startSwipe(event: PointerEvent) {
   if (!event.isPrimary) { cancelSwipe(); return; }
   suppressTap = false;
   if (swipe || !stage?.isConnected || sheet.open || pending || event.button !== 0) return;
   const target = event.target;
+  if (!(target instanceof Element)) return;
   const onDock = dock.contains(target);
   if (!onDock && (!stage.contains(target) || event.pointerType === "mouse")) return;
   if (target.closest("input,textarea,select,[contenteditable=true],a,[data-no-swipe]") || window.getSelection()?.isCollapsed === false) return;
   if (event.clientX < 24 || event.clientX > innerWidth - 24) return;
   const width = onDock ? tabWidth : trackWidth;
   if (!width) return;
-  swipe = {pointerId: event.pointerId, onDock, width, index: activeView().index,
-    startX: event.clientX, startY: event.clientY, x: event.clientX, time: event.timeStamp, velocity: 0};
+  const current = activeView();
+  if (!current) return;
+  swipe = {pointerId: event.pointerId, onDock, width, index: current.index,
+    startX: event.clientX, startY: event.clientY, x: event.clientX, time: event.timeStamp, velocity: 0, frame: 0, locked: false};
 }
 
-function claimHorizontalTouch(event) {
+function claimHorizontalTouch(event: TouchEvent) {
   if (event.touches.length === 1 && event.cancelable) event.preventDefault();
 }
 
-function moveSwipe(event) {
+function moveSwipe(event: PointerEvent) {
   const gesture = swipe;
   if (!gesture || gesture.pointerId !== event.pointerId) return;
   if (!gesture.locked) {
@@ -341,7 +391,7 @@ function moveSwipe(event) {
   if (!gesture.frame) gesture.frame = requestAnimationFrame(drawSwipe);
 }
 
-function releaseSwipe(event) {
+function releaseSwipe(event: PointerEvent) {
   const gesture = swipe;
   if (!gesture || event.pointerId !== gesture.pointerId) return;
   if (!gesture.locked) { resetSwipe(); return; }
@@ -379,9 +429,9 @@ app.addEventListener("click", (event) => {
   }
 }, true);
 app.addEventListener("keydown", (event) => {
-  if (!event.target.closest(".dock [data-page]") || event.altKey || event.ctrlKey || event.metaKey) return;
-  const index = activeView().index;
-  const shortcuts = {ArrowLeft: index - 1, ArrowRight: index + 1, Home: 0, End: tabs.length - 1};
+  if (!(event.target instanceof Element) || !event.target.closest(".dock [data-page]") || event.altKey || event.ctrlKey || event.metaKey) return;
+  const index = activeView()?.index ?? 0;
+  const shortcuts: Record<string, number> = {ArrowLeft: index - 1, ArrowRight: index + 1, Home: 0, End: tabs.length - 1};
   if (!Object.hasOwn(shortcuts, event.key)) return;
   event.preventDefault();
   const next = clamp(shortcuts[event.key], 0, tabs.length - 1);
@@ -389,13 +439,13 @@ app.addEventListener("keydown", (event) => {
   tabs[next].focus({preventScroll: true});
 });
 
-function controlSelector(el){
+function controlSelector(el: Element | null){
   if(!el?.matches("button")) return null;
   const attrs = ["data-action","data-page","data-filter","data-id"].filter(key=>el.hasAttribute(key));
-  return attrs.length ? "button"+attrs.map(key=>"["+key+'="'+CSS.escape(el.getAttribute(key))+'"]').join("") : null;
+  return attrs.length ? "button"+attrs.map(key=>"["+key+'="'+CSS.escape(el.getAttribute(key) ?? "")+'"]').join("") : null;
 }
 
-function taskRow(task) {
+function taskRow(task: Task) {
   const done = task.status === "done",
     late = !done && task.due_at && Date.parse(task.due_at) < Date.now();
   return `<div class="task-row ${done ? "done" : ""}"><button class="task-toggle" data-action="toggle-task" data-id="${e(task.id)}" aria-label="${e((done ? t("Вернуть в работу", "Reopen") : t("Завершить", "Complete")) + " · " + task.title)}" aria-pressed="${done}"><span class="ring">${done ? icon("check") : ""}</span></button><button class="task-body" data-action="edit-task" data-id="${e(task.id)}"><span class="task-title">${e(task.title)}</span>${task.due_at ? `<span class="task-date ${late ? "late" : ""}">${icon("clock")}${e(formatDate("clock", task.due_at))}</span>` : ""}</button><span class="arrow">${icon("arrow")}</span></div>`;
@@ -406,13 +456,13 @@ function taskEmpty(done = false) {
 function switcher() {
   return `<button class="switch" role="switch" aria-label="${t("Проактивность", "Proactive updates")}" aria-checked="${Boolean(state.settings.proactive)}" data-action="proactive"></button>`;
 }
-function glyph(symbol) {
+function glyph(symbol: IconName) {
   return `<span class="glyph">${icon(symbol)}</span>`;
 }
 function integrationRows() {
   return `<button class="integration-row" data-action="calendar">${glyph("calendar")}<span><span class="integration-label">${t("Календарь", "Calendar")}</span><small class="integration-info">${t("Экспорт поручений в .ics", "Export tasks as .ics")}</small></span><span class="tail">${icon("download")}</span></button><button class="integration-row" data-action="feeds">${glyph("rss")}<span><span class="integration-label">RSS</span><small class="integration-info">${state.feeds.length ? t("Подключено", "Connected") + " · " + state.feeds.length : t("Добавить источник", "Add a source")}</small></span><span class="tail">${icon("arrow")}</span></button>`;
 }
-function sectionHead(title) {
+function sectionHead(title: string) {
   return `<h2 class="section-title">${title}</h2>`;
 }
 function overview() {
@@ -422,11 +472,12 @@ function overview() {
   const today = localDateTime(Date.now(), zone()).slice(0, 10);
   const tomorrow = new Date(Date.parse(today + "T12:00Z") + 86400000).toISOString().slice(0, 10);
   const completed = tasks.length - tasks.filter((task) => task.status === "open").length;
-  const groups = new Map();
+  const groups = new Map<string, Task[]>();
   for (const item of visible) {
     const day = dueDay(item.due_at, today, tomorrow);
-    if (!groups.has(day)) groups.set(day, []);
-    groups.get(day).push(item);
+    const group = groups.get(day);
+    if (group) group.push(item);
+    else groups.set(day, [item]);
   }
   const filters = [["open", t("В работе", "Open")], ["done", t("Готово", "Done")]];
   return `<button class="context-row panel" data-page="projects">${glyph(current ? "projects" : "person")}<span class="context-copy">
@@ -447,7 +498,7 @@ function projectsPage() {
   const projects = state.projects || [];
   const current = currentProject();
   if (bridge()) return `<div class="panel"><div class="empty"><span class="empty-symbol">${icon("projects")}</span><strong>${t("Проекты в чате","Projects in chat")}</strong><p>${t("Напиши «покажи проекты», чтобы выбрать контекст разговора.","Send “show my projects” to choose a conversation context.")}</p><button class="button" data-action="chat">${t("В чат","Open chat")}</button></div></div>`;
-  const counts = new Map();
+  const counts = new Map<number, number>();
   for (const task of state.tasks) {
     const id = Number(task.project_id || 0);
     if (task.status === "open") counts.set(id, (counts.get(id) || 0) + 1);
@@ -469,8 +520,9 @@ function projectsPage() {
       </div><button class="button project-chat" data-action="chat">${icon("plane")}${t("Продолжить в чате", "Continue in chat")}</button></section>`
     : ""}`;
 }
-function projectSheet(item) {
-  openSheet("project", item ? t("О проекте", "About the project") : t("Новый проект", "New project"),
+function projectSheet(item?: Project) {
+  openSheet(
+    item ? t("О проекте", "About the project") : t("Новый проект", "New project"),
     `<form id="project-form" data-id="${e(item?.id || "")}">
       <label class="field">${t("Название", "Name")}<input name="name" maxlength="64" required value="${e(item?.name || "")}" dir="auto" placeholder="${t("Например, Lab One", "For example, Lab One")}"></label>
       <label class="field">${t("Контекст", "Context")}<textarea name="context" maxlength="10000" rows="6" dir="auto" placeholder="${t("Цели проекта, важные детали, ссылки…", "Goals, important details, links…")}">${e(item?.context || "")}</textarea></label>
@@ -481,7 +533,7 @@ function projectSheet(item) {
 function routinesPanel() {
   const items = state.routines || [];
   if (!items.length) return "";
-  const names = {
+  const names: Record<string, string> = {
     daily: t("Каждый день", "Daily"),
     weekdays: t("По будням", "Weekdays"),
     weekends: t("По выходным", "Weekends"),
@@ -507,22 +559,21 @@ function routinesPanel() {
 function settingsPage() {
   const s = state.settings;
   const detected = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  const row = (label, detail, val) =>
+  const row = (label: string, detail: string, val: string) =>
     `<button class="setting-row" data-action="schedule"><span class="setting-copy"><strong>${label}</strong><span class="setting-detail">${detail}</span></span><span class="setting-value">${e(val)}${icon("arrow")}</span></button>`;
   return `<div class="settings-grid"><section class="settings-block"><h2 class="settings-title">${t("Ритм дня", "Daily rhythm")}</h2><div class="panel"><div class="setting-row"><span><strong>${t("Проактивность", "Proactive updates")}</strong><span class="setting-detail">${t("Обзоры и инициативы в чате", "Briefings and check-ins in chat")}</span></span>${switcher()}</div>
   ${row(t("Утренний обзор", "Morning brief"), t("Когда присылать план на день", "When to send your daily plan"), timeLabel(s.digest_time))}${row(t("Тихие часы", "Quiet hours"), t("Время для отдыха", "Your time to disconnect"), timeLabel(s.quiet_start) + " – " + timeLabel(s.quiet_end))}${row(t("Часовой пояс", "Time zone"), t("Для поручений и обзоров", "For tasks and briefings"), zone())}</div>${zone() === "UTC" && detected && detected !== "UTC" ? `<button class="small-action tz-suggest" data-action="detected-zone">${icon("globe")}${t("Использовать часовой пояс устройства", "Use device time zone")} · ${e(detected)}</button>` : ""}</section>
   <section class="settings-block"><h2 class="settings-title">${t("Подключения", "Connections")}</h2><div class="panel">${integrationRows()}</div><a class="privacy-link" href="./privacy.html" target="_blank" rel="noopener noreferrer">${t("Конфиденциальность", "Privacy")}</a></section>${routinesPanel()}</div>`;
 }
-function openSheet(type, title, html) {
+function openSheet(title: string, html: string) {
   if (!sheet.open) {
-    returnFocus = document.activeElement;
+    returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     focusTarget = controlSelector(returnFocus);
   }
   clearTimeout(closeTimer);
   if (closeListener) sheet.removeEventListener("animationend",closeListener);
   sheet.classList.remove("closing");
   sheet.style.removeProperty("--sheet-release");
-  modal = type;
   sheet.innerHTML = `<div class="sheet-body"><div class="sheet-grab" aria-hidden="true"></div><div class="sheet-head"><h2 id="sheet-heading">${title}</h2><button class="icon-button" aria-label="${t("Закрыть", "Close")}" data-action="close">${icon("close")}</button></div>${html}</div>`;
   sheet.setAttribute("aria-labelledby", "sheet-heading");
   if (!sheet.open) sheet.showModal();
@@ -531,11 +582,11 @@ function openSheet(type, title, html) {
 function closeSheet() {
   if (!sheet.open || sheet.classList.contains("closing")) return;
   if (reducedMotion.matches) { sheet.close(); return; }
-  function finish(event) {
+  function finish(event?: AnimationEvent) {
     if (event && (event.target !== sheet || event.pseudoElement)) return;
     clearTimeout(closeTimer);
     sheet.removeEventListener("animationend", finish);
-    closeListener = null;
+    closeListener = undefined;
     sheet.close();
     sheet.classList.remove("closing");
     sheet.style.removeProperty("--sheet-release");
@@ -543,7 +594,7 @@ function closeSheet() {
   closeListener = finish;
   sheet.classList.add("closing");
   sheet.addEventListener("animationend", finish);
-  closeTimer=setTimeout(finish,220);
+  closeTimer=window.setTimeout(finish,220);
 }
 sheet.addEventListener("cancel", event=>{
   event.preventDefault();
@@ -551,7 +602,7 @@ sheet.addEventListener("cancel", event=>{
 });
 sheet.addEventListener("pointerdown", (event) => {
   if (pending || sheetDrag || sheet.classList.contains("closing") ||
-      !event.isPrimary || event.button !== 0 || !event.target.closest(".sheet-grab")) return;
+      !event.isPrimary || event.button !== 0 || !(event.target instanceof Element) || !event.target.closest(".sheet-grab")) return;
   sheetDrag = { id: event.pointerId, start: event.clientY, offset: 0 };
   sheet.setPointerCapture(event.pointerId);
   sheet.classList.add("dragging");
@@ -561,10 +612,10 @@ sheet.addEventListener("pointermove", (event) => {
   sheetDrag.offset = Math.max(0, event.clientY - sheetDrag.start);
   sheet.style.transform = `translateY(${sheetDrag.offset}px)`;
 });
-function releaseSheet(event) {
+function releaseSheet(event: PointerEvent) {
   if (sheetDrag?.id !== event.pointerId) return;
   const offset = sheetDrag.offset;
-  sheetDrag = null;
+  sheetDrag = undefined;
   sheet.classList.remove("dragging");
   sheet.style.removeProperty("transform");
   if (event.type === "pointerup" && offset > 70 && !pending) {
@@ -584,9 +635,8 @@ const saveLabel = () =>
 function submit(label = saveLabel()) {
   return `<p class="form-error" role="alert"></p><div class="submit-row"><button type="submit" class="button primary">${label}</button></div>`;
 }
-function taskSheet(task) {
+function taskSheet(task?: Task) {
   openSheet(
-    "task",
     task ? t("Поручение", "Task") : t("Новое поручение", "New task"),
     `<form id="task-form" data-id="${e(task?.id ?? "")}"><label class="field">${t("Что нужно сделать?", "What needs to happen?")}<input name="title" value="${e(task?.title || "")}" required maxlength="240" placeholder="${t("Например, сверить макеты", "For example, review the designs")}" dir="auto"></label><label class="field">${t("Срок", "Due")}<input name="due_at" type="datetime-local" value="${e(task?.due_at ? localDateTime(task.due_at, zone()) : "")}"><small>${t("Часовой пояс", "Time zone")} · ${e(zone())}</small></label>${task?.notes ? `<p class="sheet-desc" dir="auto">${e(task.notes)}</p>` : ""}${submit()}</form>`,
   );
@@ -615,14 +665,12 @@ function schedule() {
     ),
   ];
   openSheet(
-    "schedule",
     t("Расписание", "Schedule"),
-    `<form id="schedule-form">${[
+    `<form id="schedule-form">${([
       ["digest_time", t("Утренний обзор", "Morning brief")],
       ["quiet_start", t("Начало тихих часов", "Quiet hours start")],
       ["quiet_end", t("Конец тихих часов", "Quiet hours end")],
-    ]
-      .map(
+    ] as const).map(
         ([k, l]) =>
           `<label class="field">${l}<input type="time" required name="${k}" value="${e(timeLabel(s[k]))}"></label>`,
       )
@@ -635,14 +683,14 @@ function feedsSheet() {
   const catalog = state.feed_catalog || [],
     choices = catalog.filter((x) => !state.feeds.some((f) => f.url === x.url));
   openSheet(
-    "feeds",
     t("Источники RSS", "RSS sources"),
     `<p class="sheet-desc">${t("Выбери источники для новостей в утреннем обзоре.", "Choose news sources for your morning brief.")}</p>${state.feeds.length ? `<div class="feed-items">${state.feeds.map((f) => `<div class="feed-item"><span>${e(f.title || f.url)}</span><button class="feed-remove" aria-label="${e(t("Отключить", "Disconnect") + " " + (f.title || f.url))}" data-action="remove-feed" data-id="${e(f.id)}">${icon("trash")}</button></div>`).join("")}</div>` : ""}${choices.length ? `<form id="feed-form"><label class="field">${t("Источник", "Source")}<select name="url">${choices.map((c) => `<option value="${e(c.url)}">${e(c.title)}</option>`).join("")}</select></label>${submit(bridge() ? t("Подключить и вернуться в чат", "Connect and return to chat") : t("Подключить", "Connect"))}</form>` : `<p class="settings-note">${t("Все доступные источники подключены.", "All available sources are connected.")}</p>`}`,
   );
 }
 function openChat() {
-  if (!demo && webapp()?.close) {
-    webapp().close();
+  const tg = webapp();
+  if (!demo && tg?.close) {
+    tg.close();
     return;
   }
   window.open("https://t.me/AlephAgentBot", "_blank", "noopener,noreferrer");
@@ -662,13 +710,20 @@ async function load() {
   state.settings.digest_time ??= "09:00";
   render();
 }
-function mergeRecord(items, record) {
+function mergeRecord<T extends { id: number }>(items: T[], record: T) {
   const existing=items.find(item=>item.id===record.id);
   if(existing) Object.assign(existing,record);
   else items.unshift(record);
 }
 
-async function write(path, method, body, apply, success, options) {
+async function write<Path extends keyof Writes>(
+  path: Path,
+  method: WriteMethod,
+  body: object | undefined,
+  apply: (result: Writes[Path] | null) => void,
+  success: string,
+  options?: RequestOptions,
+) {
   if (pending) return false;
   pending = true;
   const origin=document.activeElement?.closest("button");
@@ -676,7 +731,7 @@ async function write(path, method, body, apply, success, options) {
   app.classList.add("saving");
   revision++;
   sheet
-    .querySelectorAll("button,input,select,textarea")
+    .querySelectorAll<HTMLInputElement | HTMLButtonElement | HTMLSelectElement | HTMLTextAreaElement>("button,input,select,textarea")
     .forEach((x) => (x.disabled = true));
   try {
     const result = demo ? null : await request(path, method, body, options);
@@ -700,7 +755,7 @@ async function write(path, method, body, apply, success, options) {
     pending = false;
     app.classList.remove("saving");
     sheet
-      .querySelectorAll("button,input,select,textarea")
+      .querySelectorAll<HTMLInputElement | HTMLButtonElement | HTMLSelectElement | HTMLTextAreaElement>("button,input,select,textarea")
       .forEach((x) => (x.disabled = false));
   }
 }
@@ -717,7 +772,6 @@ async function exportCalendar() {
     });
     if (navigator.canShare?.({ files: [calendarFile] })) {
       openSheet(
-        "calendar",
         t("Календарь готов", "Calendar ready"),
         `<p class="sheet-desc">${t("Открой файл в приложении календаря или сохрани копию.", "Open the file in your calendar or save a copy.")}</p><div class="submit-row"><button class="button" data-action="download-calendar">${t("Скачать", "Download")}</button><button class="button primary" data-action="share-calendar">${t("Поделиться", "Share")}</button></div>`,
       );
@@ -742,7 +796,7 @@ function downloadCalendar() {
   if (sheet.open) closeSheet();
   message(t("Календарь подготовлен", "Calendar prepared"));
 }
-async function act(action, id) {
+async function act(action: string, id?: string) {
   if (pending) return;
   switch (action) {
     case "close":
@@ -765,7 +819,7 @@ async function act(action, id) {
       await write("/api/projects/active", "PATCH", {project_id},
         chosen => {
           state.active_project_id = chosen?.id ?? project_id;
-          if (chosen?.id) mergeRecord(state.projects, chosen);
+          if (chosen?.id) mergeRecord(state.projects ??= [], chosen);
         },
         t("Контекст в чате обновлён", "Chat context updated"));
       break;
@@ -798,11 +852,12 @@ async function act(action, id) {
       await exportCalendar();
       break;
     case "share-calendar":
+      if (!calendarFile) break;
       try {
         await navigator.share({ files: [calendarFile], title: "Aleph" });
         closeSheet();
       } catch (error) {
-        if (error.name !== "AbortError")
+        if (!(error instanceof Error && error.name === "AbortError"))
           message(t("Используй кнопку «Скачать»", "Use the Download button"));
       }
       break;
@@ -814,7 +869,7 @@ async function act(action, id) {
       if (!item) return;
       const status = item.status === "done" ? "open" : "done";
       await write(
-        "/api/tasks/" + id,
+        `/api/tasks/${id}`,
         "PATCH",
         { status },
         task => Object.assign(item,task || {status}),
@@ -843,7 +898,7 @@ async function act(action, id) {
     case "remove-feed": {
       if (
         await write(
-          "/api/feeds/" + id,
+          `/api/feeds/${id}`,
           "DELETE",
           undefined,
           () =>
@@ -862,10 +917,10 @@ async function act(action, id) {
   }
 }
 document.addEventListener("click", (event) => {
-  const el = event.target.closest("button");
+  const el = event.target instanceof Element ? event.target.closest("button") : null;
   if (!el || el.disabled || sheet.classList.contains("closing")) return;
   if (el.dataset.page) navigate(el.dataset.page);
-  else if (el.dataset.filter) {
+  else if (el.dataset.filter === "open" || el.dataset.filter === "done") {
     if(filter===el.dataset.filter)return;
     selectionFeedback();
     filter = el.dataset.filter;
@@ -873,9 +928,8 @@ document.addEventListener("click", (event) => {
   } else if (el.dataset.action) void act(el.dataset.action, el.dataset.id);
 });
 sheet.addEventListener("close", () => {
-  modal = null;
   syncBack();
-  const target = returnFocus?.isConnected ? returnFocus : focusTarget ? app.querySelector(focusTarget) : null;
+  const target = returnFocus?.isConnected ? returnFocus : focusTarget ? app.querySelector<HTMLElement>(focusTarget) : null;
   (target || activeView()?.heading)?.focus({preventScroll:true});
   returnFocus=null;
   focusTarget=null;
@@ -893,31 +947,40 @@ sheet.addEventListener("click", (event) => {
 });
 sheet.addEventListener("submit", async (event) => {
   event.preventDefault();
-  if (pending) return;
-  const form = event.target,
-    data = Object.fromEntries(new FormData(form));
+  const form = event.target;
+  if (pending || !(form instanceof HTMLFormElement)) return;
+  const data = new FormData(form);
+  const field = (name: string) => {
+    const value = data.get(name);
+    return typeof value === "string" ? value : "";
+  };
   let ok = false;
   try {
     if (form.id === "project-form") {
-      const name = data.name.trim();
-      if (!name) { form.elements.name.value = ""; form.elements.name.reportValidity(); return; }
-      const context = data.context.trim();
+      const name = field("name").trim();
+      if (!name) {
+        const input = requiredElement<HTMLInputElement>(form, 'input[name="name"]');
+        input.value = "";
+        input.reportValidity();
+        return;
+      }
+      const context = field("context").trim();
       const id = Number(form.dataset.id);
-      ok = await write("/api/projects" + (id ? "/" + id : ""), id ? "PATCH" : "POST", {name, context}, result => {
+      ok = await write(id ? `/api/projects/${id}` : "/api/projects", id ? "PATCH" : "POST", {name, context}, result => {
         state.projects ||= [];
         const project=result || {id:id || Date.now(),name,context};
         mergeRecord(state.projects,project);
         if (!id) state.active_project_id=project.id;
       }, id ? t("Контекст сохранён", "Context saved") : t("Проект создан", "Project created"));
     } else if (form.id === "task-form") {
-      const title = data.title.trim();
+      const title = field("title").trim();
       if (!title) {
-        const input = form.elements.title;
+        const input = requiredElement<HTMLInputElement>(form, 'input[name="title"]');
         input.value = "";
         input.reportValidity();
         return;
       }
-      const body = { title, due_at: zonedISO(data.due_at, zone()) };
+      const body = { title, due_at: zonedISO(field("due_at"), zone()) };
       const id = form.dataset.id;
       const fields=id ? body : {...body,project_id:activeId()};
       // A retry after a dropped response must reuse the same creation on the server.
@@ -926,32 +989,41 @@ sheet.addEventListener("submit", async (event) => {
         form.dataset.requestKey=crypto.randomUUID?.() || (Date.now().toString(36)+Math.random().toString(36).slice(2));
       }
       ok = await write(
-        "/api/tasks" + (id ? "/" + id : ""),
+        id ? `/api/tasks/${id}` : "/api/tasks",
         id ? "PATCH" : "POST", fields,
         result => {
-          const record=result || (id ? {...byId(id),...body} : {
-            ...fields, id:Math.max(0,...state.tasks.map(x=>Number(x.id)))+1,status:"open",notes:""
+          const existing = byId(id);
+          const record: Task = result ?? (existing ? { ...existing, ...body } : {
+            ...fields, id: Math.max(0, ...state.tasks.map((task) => task.id)) + 1, status: "open", notes: "",
           });
-          mergeRecord(state.tasks,record);
+          mergeRecord(state.tasks, record);
         },
         t("Поручение сохранено","Task saved"),
         {requestKey: id ? null : form.dataset.requestKey}
       );
     } else if (form.id === "schedule-form") {
+      const schedule = {
+        digest_time: field("digest_time"),
+        quiet_start: field("quiet_start"),
+        quiet_end: field("quiet_end"),
+        timezone: field("timezone"),
+      };
       ok = await write(
         "/api/settings",
         "PATCH",
-        data,
-        settings => Object.assign(state.settings,settings || data),
+        schedule,
+        settings => Object.assign(state.settings, settings ?? schedule),
         t("Расписание обновлено", "Schedule updated"),
       );
     } else if (form.id === "feed-form") {
+      const url = field("url");
+      const catalogEntry = state.feed_catalog.find((source) => source.url === url);
       ok = await write(
         "/api/feeds",
         "POST",
-        { url: data.url },
+        { url },
         result => {
-          const source=result || {...state.feed_catalog.find(x=>x.url===data.url),id:Date.now()};
+          const source = result ?? { url, title: catalogEntry?.title ?? url, id: Date.now() };
           mergeRecord(state.feeds,source);
         },
         t("Источник подключён", "Source connected"),
@@ -969,10 +1041,10 @@ sheet.addEventListener("submit", async (event) => {
 });
 sheet.addEventListener("change", async (event) => {
   const picker = event.target;
-  if (picker.name !== "reference" || !picker.files?.[0]) return;
-  const note = picker.form.elements.context;
+  if (!(picker instanceof HTMLInputElement) || picker.name !== "reference" || !picker.form || !picker.files?.[0]) return;
+  const note = requiredElement<HTMLTextAreaElement>(picker.form, 'textarea[name="context"]');
   const file = picker.files[0];
-  const error = picker.form.querySelector(".form-error");
+  const error = requiredElement(picker.form, ".form-error");
   error.textContent = "";
   try {
     if (file.size > 40000) throw new Error();
@@ -997,8 +1069,8 @@ async function start() {
   } catch (error) {
     app.setAttribute("aria-busy", "false");
     sizeObserver?.disconnect();
-    stage = null;
-    views = null;
+    stage = undefined;
+    views = [];
     app.innerHTML = `<main class="failure"><img src="./aleph.webp" width="45" alt=""><h1>Aleph</h1><p>${e(errorMessage(error))}</p><div class="actions"><button class="button" data-action="retry">${t("Повторить", "Try again")}</button><button class="button primary" data-action="chat">${t("В чат", "Open chat")}</button></div></main>`;
   } finally {
     loading = false;
