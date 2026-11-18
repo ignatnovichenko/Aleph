@@ -12,6 +12,11 @@ DEFAULT_OPENCODE = "claude-haiku-5-5"
 PROVIDERS = ("chatgpt", "opencode")
 EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 CATALOG_TTL = 300
+PROVIDER_NAMES = {"chatgpt": "ChatGPT", "opencode": "OpenCode Go"}
+RUSSIAN_EFFORTS = {
+    "none": "выключен", "minimal": "минимальный", "low": "низкий", "medium": "средний",
+    "high": "высокий", "xhigh": "очень высокий", "max": "максимальный", "ultra": "ультра",
+}
 
 
 def model_option(provider, model, name, reasoning="", images=None):
@@ -40,6 +45,26 @@ def current(uid, provider, selections, opencode_model):
 def describe(store, uid, opencode_model):
     provider, selections, last = saved(store, uid)
     return {"active": current(uid, provider, selections, opencode_model), "last": last}
+
+
+def identity_reply(store, uid, opencode_model, *, russian):
+    status = describe(store, uid, opencode_model)
+    active, last = status["active"], status["last"]
+    provider = PROVIDER_NAMES[active["provider"]]
+    effort = active["reasoning"]
+    if russian:
+        reply = f"Сейчас выбрана модель {active['name']} через {provider}."
+        if effort:
+            reply += f" Уровень рассуждений — {RUSSIAN_EFFORTS.get(effort, effort)}."
+    else:
+        reply = f"The selected model is {active['name']} via {provider}."
+        if effort:
+            reply += f" Reasoning effort is {effort}."
+    if last and (last["provider"], last["model"]) != (active["provider"], active["model"]):
+        source = PROVIDER_NAMES[last["provider"]]
+        reply += (f"\n\nПоследний ответ от модели — {last['name']} через {source}." if russian else
+                  f"\n\nThe last AI-generated reply used {last['name']} via {source}.")
+    return reply
 
 
 def remember_reply(store, uid, model):

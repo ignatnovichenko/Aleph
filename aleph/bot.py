@@ -19,6 +19,17 @@ from . import media, memory, documents, widgets
 
 log = logging.getLogger(__name__)
 PLAN_ALIASES = {"/plan", "открой план", "открыть план", "открой мини-апп", "open plan", "open mini app"}
+MODEL_QUESTION_RU = re.compile(
+    r"(?:(?:привет|здравствуй|слушай)[,.!]?\s+)?"
+    r"(?:какая (?:ты модель|у тебя модель|модель у тебя|модель (?:сейчас )?работает|сейчас (?:у тебя )?модель)"
+    r"|на какой модели ты (?:сейчас )?работаешь|какую модель ты (?:сейчас )?используешь)[.!?]*",
+    re.IGNORECASE,
+)
+MODEL_QUESTION_EN = re.compile(
+    r"(?:(?:hi|hey|hello)[,.!]?\s+)?"
+    r"(?:what (?:ai )?model are you(?: (?:using|running))?|which model are you (?:using|running))[.!?]*",
+    re.IGNORECASE,
+)
 HELLO_RU = ("Привет, я Алеф. Можешь писать мне как обычно или отправить голосовое. "
             "Если что-то нужно запомнить, скажи, когда вернуться к этому, и я напомню здесь.\n\n"
             "Что сейчас на уме? Для напоминаний по местному времени можешь сразу назвать свой город.")
@@ -330,6 +341,10 @@ async def _compose(row, store, inbox, tg, agent):
             return None, str(error)
         if project_reply is not None:
             return None, project_reply
+    if not photo:
+        russian_question = MODEL_QUESTION_RU.fullmatch(query.strip())
+        if russian_question or MODEL_QUESTION_EN.fullmatch(query.strip()):
+            return query, models.identity_reply(store, uid, agent.model, russian=bool(russian_question))
     answer = await agent.respond(store, uid, query, photo, inbox, row["id"])
     historical = ("[Фото] " if photo else "") + query
     return historical, answer

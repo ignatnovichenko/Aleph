@@ -3,7 +3,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+import aiohttp
+
 from aleph import bot, models
+from aleph.hermes import HermesAleph
 from aleph.llm import Aleph, ChatGPTUnavailable, ModelRejectsPhoto
 from aleph.store import Store
 
@@ -82,6 +85,33 @@ class ModelSettingsTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ModelRejectsPhoto):
             await self.complete(1, content=[{"type": "image_url", "image_url": {"url": "example"}}])
         self.agent.completion.assert_not_awaited()
+
+    async def test_hermes_and_provider_use_the_same_pinned_model(self):
+        agent = HermesAleph(None, "synthetic-key", python=None)
+        agent.model = "claude-haiku-5-5"
+        response = {"role": "assistant", "content": "Ready.", "_model_id": "gpt-test-real"}
+
+        async def run_worker(turn, _broker):
+            self.assertEqual(turn["model"], "gpt-test")
+            await self.choose("opencode", "claude-test", "medium")
+            async with aiohttp.ClientSession() as session:
+                async with session.post(turn["endpoint"] + "/v1/chat/completions",
+                                        headers={"Authorization": "Bearer " + turn["key"]},
+                                        json={"model": turn["model"], "messages": turn["messages"]}) as reply:
+                    self.assertEqual(reply.status, 200)
+                    payload = await reply.json()
+            self.assertEqual(payload["model"], "gpt-test-real")
+            return payload["choices"][0]["message"]["content"]
+
+        with patch.object(models.plan, "record", return_value=self.record), patch.object(
+            models.plan, "complete", AsyncMock(return_value=response),
+        ) as complete, patch.object(agent, "run_hermes", side_effect=run_worker):
+            await self.choose("chatgpt", "gpt-test", "high")
+            self.ingest(1)
+            self.assertEqual(await agent.respond(self.store, OWNER, "Test", None, self.inbox, 1), "Ready.")
+        complete.assert_awaited_once()
+        self.assertEqual(complete.await_args.kwargs, {"model": "gpt-test", "reasoning": "high"})
+        self.assertIn("model gpt-test via ChatGPT", complete.await_args.args[3][0]["content"])
 
     async def test_selection_survives_reopening_the_database(self):
         with tempfile.TemporaryDirectory() as directory:

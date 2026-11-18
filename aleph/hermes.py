@@ -41,9 +41,10 @@ def create_agent(session, model_key):
 class TurnBroker:
     """A private, authenticated loopback endpoint for exactly one inbound update."""
 
-    def __init__(self, agent, store, uid, ledger, update_id, model, project_id):
+    def __init__(self, agent, store, uid, ledger, update_id, model, opencode_model, project_id):
         self.agent, self.store, self.uid = agent, store, uid
         self.ledger, self.update_id, self.model = ledger, update_id, model
+        self.opencode_model = opencode_model
         self.project_id = project_id
         self.token = secrets.token_urlsafe(32)
         self.step = 0
@@ -70,7 +71,7 @@ class TurnBroker:
                 reply = self.ledger.get_step(self.update_id, step)
                 if reply is None:
                     reply = await self.agent.complete_turn(
-                        data["messages"], self.model, tools=bool(data.get("tools")) and step < MAX_STEPS - 1,
+                        data["messages"], self.opencode_model, tools=bool(data.get("tools")) and step < MAX_STEPS - 1,
                         uid=self.uid, project_id=self.project_id, ledger=self.ledger, update_id=self.update_id, step=step,
                     )
                     self.ledger.save_step(self.update_id, step, reply)
@@ -86,7 +87,7 @@ class TurnBroker:
                 self.calls[call["id"]] = (step, n, call)
             return web.json_response({
                 "id": f"chatcmpl-aleph-{step}", "object": "chat.completion", "created": int(time.time()),
-                "model": self.model, "choices": [{"index": 0,
+                "model": reply.get("_aleph_model", {}).get("model") or self.model, "choices": [{"index": 0,
                     "message": {"role": "assistant", **{k: v for k, v in reply.items() if not k.startswith("_")}},
                     "finish_reason": "tool_calls" if calls else "stop"}],
             })
@@ -117,8 +118,10 @@ class HermesAleph(Aleph):
 
     async def respond(self, store, uid, text, photo, ledger, update_id):
         project_id = ledger.bind_project(update_id, uid)
-        messages, model = self.turn_context(store, uid, text, photo, project_id)
-        broker = TurnBroker(self, store, uid, ledger, update_id, model, project_id)
+        messages, opencode_model = self.turn_context(store, uid, text, photo, project_id)
+        choice, _ = self.bind_turn_model(uid, ledger, update_id, opencode_model)
+        model = choice["model"] or choice["provider"]
+        broker = TurnBroker(self, store, uid, ledger, update_id, model, opencode_model, project_id)
         app = web.Application(client_max_size=24 * 1024 * 1024)
         app.router.add_post("/v1/chat/completions", broker.complete)
         app.router.add_post("/tool", broker.tool)

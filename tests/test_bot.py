@@ -3,7 +3,7 @@ import time
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from aleph import bot
+from aleph import bot, models
 from aleph.llm import Aleph
 from aleph.store import Store
 
@@ -119,3 +119,31 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         parts = list(bot.chunks("🎉" * 10000))
         self.assertEqual("".join(parts), "🎉"*10000)
         self.assertTrue(all(len(p.encode("utf-16-le"))//2 <= 4096 for p in parts))
+
+    async def test_model_question_reads_saved_selection_after_voice_transcription(self):
+        uid = 24
+        self.store.ensure_user(uid)
+        catalog = models.ModelCatalogs("unused")
+        catalog.get = AsyncMock(return_value={"status": "ready", "models": [
+            {"id": "gpt-6.2-sol", "name": "GPT-6.2-Sol", "levels": ["high"], "images": True},
+        ]})
+        await catalog.choose(None, self.store, uid, {
+            "provider": "chatgpt", "model": "gpt-6.2-sol", "reasoning": "high",
+        })
+        previous = models.model_option("chatgpt", "gpt-6.2-sol", "GPT-6.2-Sol", "high")
+        models.remember_reply(self.store, uid, previous)
+        voice = update(1, uid, "")
+        del voice["message"]["text"]
+        voice["message"]["voice"] = {"file_id": "synthetic", "duration": 2}
+        self.tg.download = AsyncMock(return_value=b"audio")
+        self.inbox.ingest([voice, update(2, uid, "Какая модель сейчас работает?")])
+        with patch.object(bot.media, "transcribe", AsyncMock(return_value="Привет, какая ты модель?")) as transcribe:
+            for _ in range(2):
+                await bot._handle(self.inbox.pending()[0], self.store, self.inbox, self.tg, self.agent)
+        transcribe.assert_awaited_once_with(b"audio")
+        for message in self.tg.sent:
+            self.assertEqual(message["text"],
+                             "Сейчас выбрана модель GPT-6.2-Sol через ChatGPT. Уровень рассуждений — высокий.")
+        self.assertEqual(len(self.tg.sent), 2)
+        self.assertEqual(self.agent.calls, [])
+        self.assertEqual(models.describe(self.store, uid, "claude-haiku-5-5")["last"], previous)

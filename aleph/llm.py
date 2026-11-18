@@ -93,6 +93,17 @@ class ModelRejectsPhoto(ModelUnavailable):
     pass
 
 
+def _with_model_identity(messages, model, provider):
+    if not model:
+        return messages
+    identity = (f"Aleph routed this response to model {model} via {provider}. "
+                "Use this information for questions about the current model. "
+                "Model names in earlier messages describe earlier turns.")
+    if messages and messages[0].get("role") == "system" and isinstance(messages[0].get("content"), str):
+        return [{**messages[0], "content": messages[0]["content"] + "\n\n" + identity}, *messages[1:]]
+    return [{"role": "system", "content": identity}, *messages]
+
+
 class Aleph:
     def __init__(self, session, model_key):
         self.session = session
@@ -117,13 +128,16 @@ class Aleph:
                 self.unavailable_until[model] = time.monotonic() + 1800
         return await self._request(messages, self.fallback_model, tools=tools, session_id=session_id, reasoning="high")
 
-    async def complete_turn(self, messages, model, *, tools, uid, project_id, ledger, update_id, step):
+    def bind_turn_model(self, uid, ledger, update_id, opencode_model):
+        provider, selections, _ = models.saved(ledger.store, uid)
+        choice = models.current(uid, provider, selections, opencode_model)
+        client = models.plan.selected(uid) if choice["provider"] == "chatgpt" else None
+        return ledger.bind_model(update_id, uid, choice, client, opencode_model)
+
+    async def complete_turn(self, messages, opencode_model, *, tools, uid, project_id, ledger, update_id, step):
         from .chatgpt import ChatGPTError, plan
 
-        provider, selections, _ = models.saved(ledger.store, uid)
-        choice = models.current(uid, provider, selections, model)
-        client = plan.selected(uid) if choice["provider"] == "chatgpt" else None
-        choice, client = ledger.bind_model(update_id, uid, choice, client, model)
+        choice, client = self.bind_turn_model(uid, ledger, update_id, opencode_model)
         active_provider = choice["provider"]
         if choice["images"] is False and any(
             part.get("type") == "image_url" for message in messages
@@ -140,6 +154,7 @@ class Aleph:
                 if calls and output:
                     previous[calls[0]["id"]] = output
             try:
+                messages = _with_model_identity(messages, choice["model"], "ChatGPT")
                 reply = await plan.complete(self.session, uid, client, messages, TOOLS if tools else [], previous,
                                             model=choice["model"], reasoning=choice["reasoning"])
             except ChatGPTError as error:
@@ -156,6 +171,7 @@ class Aleph:
 
     async def _request(self, messages, model, *, tools, session_id, reasoning):
         messages = [{key: value for key, value in message.items() if key != "_aleph_model"} for message in messages]
+        messages = _with_model_identity(messages, model, "OpenCode Go")
         payload = {"model": model, "messages": messages, "max_tokens": 4096}
         if reasoning:
             payload["reasoning_effort"] = reasoning
