@@ -83,6 +83,21 @@ export interface WorkspaceState {
   integrations?: { rss: boolean; calendar: boolean };
 }
 
+export interface ChatGPTConnection {
+  available: boolean;
+  connected: boolean;
+  mode: "self_hosted";
+  needs_reauth?: boolean;
+  email?: string;
+  model?: string;
+  revoked?: boolean;
+}
+
+export interface ChatGPTPairing {
+  code: string;
+  expires_in: number;
+}
+
 export interface WidgetState {
   chat_data: string;
 }

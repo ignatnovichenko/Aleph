@@ -1,7 +1,7 @@
 import { icon } from "./icons.js";
 import type { IconName } from "./icons.js";
 import type { RequestOptions, WriteMethod, Writes } from "./store.js";
-import type { Project, Task, TaskStatus, WorkspaceState } from "./types.js";
+import type { ChatGPTConnection, ChatGPTPairing, Project, Task, TaskStatus, WorkspaceState } from "./types.js";
 import {
   bridge,
   demo,
@@ -27,8 +27,9 @@ const sheet = requiredElement<HTMLDialogElement>(document, "#sheet");
 const toastEl = requiredElement(document, "#toast");
 let calendarFile: File | undefined;
 let state: WorkspaceState;
-let page: Page = "home";
+let page: Page = new URLSearchParams(location.search).get("view") === "settings" ? "settings" : "home";
 let filter: TaskStatus = "open";
+let chatgpt: ChatGPTConnection | undefined;
 let ru = true, pending = false, revision = 0, sdkBound = false;
 let toastTimer: number | undefined;
 let returnFocus: HTMLElement | null = null;
@@ -462,6 +463,39 @@ function glyph(symbol: IconName) {
 function integrationRows() {
   return `<button class="integration-row" data-action="calendar">${glyph("calendar")}<span><span class="integration-label">${t("Календарь", "Calendar")}</span><small class="integration-info">${t("Экспорт поручений в .ics", "Export tasks as .ics")}</small></span><span class="tail">${icon("download")}</span></button><button class="integration-row" data-action="feeds">${glyph("rss")}<span><span class="integration-label">RSS</span><small class="integration-info">${state.feeds.length ? t("Подключено", "Connected") + " · " + state.feeds.length : t("Добавить источник", "Add a source")}</small></span><span class="tail">${icon("arrow")}</span></button>`;
 }
+
+function chatgptRow() {
+  if (!chatgpt?.available) return "";
+  const info = chatgpt.connected
+    ? chatgpt.email || t("Аккаунт подключён", "Account connected")
+    : chatgpt.needs_reauth ? t("Требуется повторный вход", "Sign in again")
+      : t("Войти со своим аккаунтом", "Sign in with your account");
+  return `<button class="integration-row" data-action="chatgpt">${glyph("person")}<span><span class="integration-label">ChatGPT</span><small class="integration-info">${e(info)}</small></span><span class="tail">${icon("arrow")}</span></button>`;
+}
+
+function chatgptSheet(pairing?: ChatGPTPairing) {
+  if (!chatgpt?.available) return;
+  if (chatgpt.connected) {
+    const account = [chatgpt.email, chatgpt.model].filter(Boolean).join(" · ");
+    openSheet("ChatGPT", `<p class="sheet-desc">${e(account || t("Аккаунт подключён", "Account connected"))}</p>
+      <p class="sheet-desc">${t("Ответы в чате используют твой тариф ChatGPT.", "Chat replies use your ChatGPT plan.")}</p>
+      <button class="button" data-action="disconnect-chatgpt">${t("Отключить аккаунт", "Disconnect account")}</button>`);
+    return;
+  }
+  const setup = `${chatgpt.needs_reauth ? `<p class="sheet-desc">${t("Срок действия подключения истёк. Войди в ChatGPT снова.", "Your connection expired. Sign in to ChatGPT again.")}</p>` : ""}
+    <p class="sheet-desc">${t("Подключи свой тариф ChatGPT для ответов Алефа. Запусти команду на компьютере и введи одноразовый код. Вход откроется в браузере.", "Connect your ChatGPT plan for Aleph’s replies. Run this command on your computer and enter the one-time code to sign in from your browser.")}</p>
+    <p class="sheet-desc"><code>python -m aleph.chatgpt_login connect</code></p>
+    <p class="sheet-desc"><a href="https://github.com/ignatnovichenko/OneBot#connect-chatgpt-on-a-self-hosted-instance" target="_blank" rel="noopener noreferrer">${t("Инструкция по подключению", "Connection instructions")}</a></p>`;
+  const code = pairing ? `<label class="field">${t("Одноразовый код", "One-time code")}<input id="chatgpt-pair-code" readonly value="${e(pairing.code)}" spellcheck="false" dir="ltr"></label>
+    <p class="sheet-desc">${t("Срок действия, мин.", "Valid for, min.")} ${Math.ceil(pairing.expires_in / 60)}</p>` : "";
+  const primary = pairing
+    ? `<button class="button primary" data-action="copy-chatgpt-code">${t("Скопировать код", "Copy code")}</button>`
+    : `<button class="button primary" data-action="pair-chatgpt">${t("Получить код", "Get code")}</button>`;
+  openSheet("ChatGPT", `${setup}${code}<div class="submit-row">${primary}
+    <button class="button" data-action="refresh-chatgpt">${t("Проверить вход", "Check sign-in")}</button></div>
+    ${pairing ? `<button class="small-action" data-action="pair-chatgpt">${t("Получить новый код", "Get a new code")}</button>` : ""}
+    ${chatgpt.needs_reauth ? `<button class="small-action" data-action="disconnect-chatgpt">${t("Отключить аккаунт", "Disconnect account")}</button>` : ""}`);
+}
 function sectionHead(title: string) {
   return `<h2 class="section-title">${title}</h2>`;
 }
@@ -563,7 +597,7 @@ function settingsPage() {
     `<button class="setting-row" data-action="schedule"><span class="setting-copy"><strong>${label}</strong><span class="setting-detail">${detail}</span></span><span class="setting-value">${e(val)}${icon("arrow")}</span></button>`;
   return `<div class="settings-grid"><section class="settings-block"><h2 class="settings-title">${t("Ритм дня", "Daily rhythm")}</h2><div class="panel"><div class="setting-row"><span><strong>${t("Проактивность", "Proactive updates")}</strong><span class="setting-detail">${t("Обзоры и инициативы в чате", "Briefings and check-ins in chat")}</span></span>${switcher()}</div>
   ${row(t("Утренний обзор", "Morning brief"), t("Когда присылать план на день", "When to send your daily plan"), timeLabel(s.digest_time))}${row(t("Тихие часы", "Quiet hours"), t("Время для отдыха", "Your time to disconnect"), timeLabel(s.quiet_start) + " – " + timeLabel(s.quiet_end))}${row(t("Часовой пояс", "Time zone"), t("Для поручений и обзоров", "For tasks and briefings"), zone())}</div>${zone() === "UTC" && detected && detected !== "UTC" ? `<button class="small-action tz-suggest" data-action="detected-zone">${icon("globe")}${t("Использовать часовой пояс устройства", "Use device time zone")} · ${e(detected)}</button>` : ""}</section>
-  <section class="settings-block"><h2 class="settings-title">${t("Подключения", "Connections")}</h2><div class="panel">${integrationRows()}</div><a class="privacy-link" href="./privacy.html" target="_blank" rel="noopener noreferrer">${t("Конфиденциальность", "Privacy")}</a></section>${routinesPanel()}</div>`;
+  <section class="settings-block"><h2 class="settings-title">${t("Подключения", "Connections")}</h2><div class="panel">${integrationRows()}${chatgptRow()}</div><a class="privacy-link" href="./privacy.html" target="_blank" rel="noopener noreferrer">${t("Конфиденциальность", "Privacy")}</a></section>${routinesPanel()}</div>`;
 }
 function openSheet(title: string, html: string) {
   if (!sheet.open) {
@@ -709,6 +743,23 @@ async function load() {
   state.feeds ??= [];
   state.settings.digest_time ??= "09:00";
   render();
+  if (!demo && !bridge()) void syncChatGPT();
+}
+
+async function syncChatGPT(showStatus = false) {
+  const sequence = revision;
+  try {
+    const connection = await request("/api/chatgpt");
+    if (sequence !== revision) return;
+    chatgpt = connection;
+    render();
+    if (showStatus) {
+      if (chatgpt.connected) chatgptSheet();
+      else message(t("Жду завершения входа в браузере", "Waiting for browser sign-in"));
+    }
+  } catch (error) {
+    if (showStatus) message(errorMessage(error));
+  }
 }
 function mergeRecord<T extends { id: number }>(items: T[], record: T) {
   const existing=items.find(item=>item.id===record.id);
@@ -847,6 +898,39 @@ async function act(action: string, id?: string) {
     }
     case "feeds":
       feedsSheet();
+      break;
+    case "chatgpt":
+      chatgptSheet();
+      break;
+    case "pair-chatgpt":
+      await write("/api/chatgpt/pair", "POST", undefined, (pairing) => {
+        if (pairing) chatgptSheet(pairing);
+      }, "");
+      break;
+    case "copy-chatgpt-code": {
+      const input = sheet.querySelector<HTMLInputElement>("#chatgpt-pair-code");
+      if (!input) break;
+      try {
+        await navigator.clipboard.writeText(input.value);
+        message(t("Код скопирован", "Code copied"));
+      } catch {
+        input.focus();
+        input.select();
+      }
+      break;
+    }
+    case "refresh-chatgpt":
+      await syncChatGPT(true);
+      break;
+    case "disconnect-chatgpt":
+      await write("/api/chatgpt", "DELETE", undefined, (connection) => {
+        if (!connection) return;
+        chatgpt = connection;
+        chatgptSheet();
+        message(connection.revoked === false
+          ? t("Отключено в Алефе. Отозвать разрешение можно в настройках ChatGPT.", "Disconnected from Aleph. Revoke access in your ChatGPT settings.")
+          : t("ChatGPT отключён в Алефе", "ChatGPT disconnected from Aleph"));
+      }, "");
       break;
     case "calendar":
       await exportCalendar();
@@ -1094,6 +1178,7 @@ async function refresh() {
     if (!pending && !sheet.open && !swipe?.locked && sequence === revision) {
       state = fresh;
       render();
+      if (chatgpt?.available) void syncChatGPT();
     }
   } catch {} finally { refreshRunning = false; }
 }
