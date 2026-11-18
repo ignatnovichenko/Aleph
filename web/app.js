@@ -386,6 +386,7 @@ async function load() {
 async function write(path, method, body, updateDemo, success) {
   if (pending) return false;
   pending = true;
+  app.classList.add("saving");
   revision++;
   sheet
     .querySelectorAll("button,input,select,textarea")
@@ -411,6 +412,7 @@ async function write(path, method, body, updateDemo, success) {
     return false;
   } finally {
     pending = false;
+    app.classList.remove("saving");
     sheet
       .querySelectorAll("button,input,select,textarea")
       .forEach((x) => (x.disabled = false));
@@ -455,7 +457,7 @@ function downloadCalendar() {
   message(t("Календарь подготовлен", "Calendar prepared"));
 }
 async function act(action, id) {
-  if (pending && action !== "chat") return;
+  if (pending) return;
   switch (action) {
     case "close":
       sheet.close();
@@ -569,7 +571,7 @@ async function act(action, id) {
 }
 document.addEventListener("click", (event) => {
   const el = event.target.closest("button");
-  if (!el || el.disabled) return;
+  if (!el || el.disabled || pending) return;
   if (el.dataset.page) navigate(el.dataset.page);
   else if (el.dataset.filter) {
     filter = el.dataset.filter;
