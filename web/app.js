@@ -67,19 +67,8 @@ function setTheme() {
   const dark = isDark();
   const root = document.documentElement;
   const tg = webapp();
-  const colors = tg?.platform && tg.platform !== "unknown" ? tg.themeParams || {} : {};
-  const mappings = {
-    "--tg-bg": colors.secondary_bg_color, "--tg-panel": colors.section_bg_color || colors.bg_color,
-    "--tg-text": colors.text_color, "--tg-hint": colors.hint_color, "--tg-accent": colors.accent_text_color || colors.link_color,
-    "--tg-button": colors.button_color, "--tg-button-text": colors.button_text_color,
-    "--tg-border": colors.section_separator_color,
-  };
   root.dataset.theme = dark ? "dark" : "light";
-  for (const [key, value] of Object.entries(mappings)) {
-    if (/^#[a-fA-F0-9]{6}$/.test(value || "")) root.style.setProperty(key, value);
-    else root.style.removeProperty(key);
-  }
-  const bg = colors.secondary_bg_color || (dark ? "#17212b" : "#f1f2f6");
+  const bg = dark ? "#000000" : "#edede8";
   document.querySelector("meta[name=theme-color]").content = bg;
   try {
     tg?.setHeaderColor?.(bg);
@@ -175,7 +164,7 @@ function render() {
   app.innerHTML = `
     <header class="toolbar">
       <div class="toolbar-inner">
-        <span class="wordmark"><img src="./aleph.webp" alt="" width="24" height="24">Aleph</span>
+        <span class="wordmark"><img src="./aleph.webp" alt="" width="29" height="29"><span>Aleph</span><small>LAB ONE</small></span>
         ${demo ? `<span class="demo-badge">${t("Демо", "Demo")}</span>` : ""}
         <button class="toolbar-action" data-action="${page === "projects" ? "new-project" : "chat"}">
           ${page === "projects" ? icon("plus") + t("Новый", "New") : icon("plane") + t("В чат", "Chat")}
@@ -223,7 +212,7 @@ function overview() {
   }
   const filters = [["open", t("В работе", "Open")], ["done", t("Готово", "Done")]];
   return `<button class="context-row panel" data-page="projects">${glyph(current ? "projects" : "person", "blue")}<span class="context-copy">
-      <small>${t("Контекст в чате", "Active in chat")}</small><strong>${e(current?.name || t("Личное", "Personal"))}</strong></span>${icon("arrow")}</button>
+      <small><i class="signal-dot"></i>${t("Контекст в чате", "Active in chat")}</small><strong>${e(current?.name || t("Личное", "Personal"))}</strong></span>${icon("arrow")}</button>
     <div class="task-tools">
       <div class="segmented" aria-label="${t("Статус поручений", "Task status")}">${filters.map(([key, label]) =>
         `<button aria-pressed="${filter === key}" data-filter="${key}" class="segment ${filter === key ? "active" : ""}">${label}<small>${tasks.filter((x) => x.status === key).length}</small></button>`).join("")}</div>
@@ -246,7 +235,7 @@ function projectsPage() {
       const selected = item.id === activeId();
       return `<button class="project-row" data-action="choose-project" data-id="${item.id}" ${selected ? 'aria-current="true"' : ""}>
         ${glyph(item.id ? "projects" : "person", item.id ? "violet" : "blue")}
-        <span class="setting-copy"><strong>${e(item.name)}</strong><small>${selected ? t("Активен в чате", "Active in chat") : item.open_tasks ? t("В работе", "Open") + " · " + Number(item.open_tasks) : t("Нет открытых поручений", "No open tasks")}</small></span>
+        <span class="setting-copy"><strong>${e(item.name)}</strong><small>${selected ? `<i class="signal-dot"></i>` + t("Активен в чате", "Active in chat") : item.open_tasks ? t("В работе", "Open") + " · " + Number(item.open_tasks) : t("Нет открытых поручений", "No open tasks")}</small></span>
         <span class="tail ${selected ? "selected" : ""}">${icon(selected ? "check" : "arrow")}</span>
       </button>`;
     }).join("")}</div>

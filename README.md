@@ -1,6 +1,6 @@
 # Aleph
 
-A personal Telegram agent by Lab One. The conversation lives in the bot. The Mini App is a separate plan and settings view, with Telegram theme colors, a glass tab bar and Russian and English interfaces. Hermes Agent runs the conversational tool loop.
+A personal Telegram agent by Lab One. The conversation lives in the bot. The Mini App is a separate plan and settings view, with Lab One’s Void and Paper themes, a glass tab bar and Russian and English interfaces. Hermes Agent runs the conversational tool loop.
 
 - Create projects with their own instructions, reference text, conversation history, tasks, schedules and saved facts. The Mini App shows which project is active in chat. Use “создай проект Lab One”, “переключись на проект Lab One” or “выйди из проекта” in chat. You can paste notes or add a text file to the project context in the Mini App. Existing user history and tasks belong to the Personal workspace.
 - Send text, voice, a photo, a PDF or a text document. The model can act on tasks, follow up on a schedule, and send TXT, Markdown, CSV and calendar files back to the chat.

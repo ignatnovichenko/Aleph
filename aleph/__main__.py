@@ -68,7 +68,7 @@ def application(store, token):
     async def asset(request):
         filename = request.match_info.get("filename", "index.html")
         path = WEB / filename
-        if not path.is_file() or path.suffix not in {".html", ".css", ".js", ".webp", ".svg", ".png", ".woff2"}:
+        if not path.is_file() or path.suffix not in {".html", ".css", ".js", ".webp", ".svg", ".png", ".woff2", ".txt"}:
             raise web.HTTPNotFound()
         return web.FileResponse(path, headers={"Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff",
                                              "Cache-Control": "no-cache"})
