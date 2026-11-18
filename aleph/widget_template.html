@@ -1,0 +1,129 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>
+:root{color-scheme:light dark}
+body{margin:0;color:var(--tg-theme-text-color,light-dark(#171717,#f3eee6));font:var(--tg-text-font-size,15px)/var(--tg-text-line-height,1.36) system-ui;overflow-wrap:anywhere}
+main{padding:13px 14px calc(11px + var(--tg-content-safe-area-inset-bottom,0px))}
+h1{font:italic 500 1.55em/1.12 Georgia,serif;margin:0 0 11px}
+#hint,small{display:block;color:var(--tg-theme-hint-color,light-dark(#555,#b1b1b1));font-size:.82em}
+#hint{margin-top:8px;min-height:1.2em}
+button{color:inherit;background:transparent;border:0;text-align:start;font:inherit;padding:8px 0;min-height:36px;width:100%;border-radius:0}
+.row{display:flex;gap:8px;align-items:center;border-bottom:1px solid light-dark(#0002,#fff3)}
+.content{flex:1;min-width:0}
+.content small{white-space:pre-wrap}
+.box{width:16px;height:16px;border:1px solid currentColor;flex-shrink:0;text-align:center;font:13px/16px ui-monospace,monospace}
+.check[aria-pressed="true"] .box{color:var(--tg-theme-bg-color,light-dark(#fff,#111));background:var(--tg-theme-text-color,light-dark(#222,#fff))}
+.check[aria-pressed="true"] .label{text-decoration:line-through}
+.choices{display:flex;gap:5px;flex-wrap:wrap}
+.tab{width:auto;max-width:100%;white-space:normal;padding:5px 8px;border:1px solid light-dark(#0003,#fff4)}
+.tab[aria-pressed="true"]{border-color:currentColor}
+.tab[aria-pressed="true"]::before,.bar[aria-pressed="true"] .name::before{content:"";display:inline-block;background:#ff3b1f;width:5px;height:5px;border-radius:50%;margin-right:5px;vertical-align:.19em}
+.detail{white-space:pre-wrap;margin:10px 0 0}
+.bar{padding:5px 0;min-height:31px;display:flex;flex-direction:column;gap:3px}
+.bar-line{position:relative;height:4px;background:light-dark(#0002,#fff3);display:block;width:100%}
+.fill{position:absolute;height:100%;display:block;background:currentColor}
+.name{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.num{font:500 .85em/1.25 ui-monospace,monospace;white-space:nowrap}
+.bar-label{display:flex;gap:6px;align-items:baseline;justify-content:space-between;width:100%}
+</style>
+<main><h1 id="title"></h1><div id="content"></div><small id="hint" aria-live="polite"></small></main>
+<script>
+"use strict";
+const spec=__WIDGET_SPEC__;
+const telegram=window.TelegramWidget;
+const host=document.getElementById("content");
+const hint=document.getElementById("hint");
+document.getElementById("title").textContent=spec.title;
+let selected=0, checked=0, waiting=false;
+const isRu=/[А-Яа-яЁё]/.test(spec.title);
+function element(tag,cls,text){
+  const node=document.createElement(tag);
+  if(cls)node.className=cls;
+  if(text!==undefined)node.textContent=text;
+  return node;
+}
+function sync(raw){
+  if(!raw)return false;
+  try{
+    const data=JSON.parse(raw);
+    if(typeof data.checked!=="number")return false;
+    checked=data.checked;
+    return true;
+  }catch(_){return false}
+}
+function requestCheck(index){
+  if(waiting)return;
+  const flag=(checked&(1<<index))?0:1;
+  if(!telegram){checked^=1<<index; draw();return;}
+  waiting=true;
+  telegram.request("check:"+index+":"+flag).then(
+    (answer)=>{
+      waiting=false;
+      if(sync(answer.result))draw();
+      else hint.textContent=isRu?"Отметка недоступна.":"Checklist unavailable.";
+    },
+    ()=>{
+      waiting=false;
+      hint.textContent=isRu?"Не сохранилось. Нажми ещё раз.":"Could not save. Tap to retry.";
+    });
+}
+function draw(){
+  host.textContent="";
+  hint.textContent="";
+  if(spec.kind==="checklist"){
+    let count=0;
+    spec.items.forEach((item,i)=>{
+      const on=!!(checked&(1<<i));
+      if(on)count++;
+      const btn=element("button","row check");
+      btn.setAttribute("aria-pressed",String(on));
+      btn.appendChild(element("span","box",on?"✓":""));
+      const copy=element("span","content");
+      copy.appendChild(element("span","label",item.label));
+      if(item.detail)copy.appendChild(element("small","",item.detail));
+      btn.appendChild(copy);
+      btn.addEventListener("click",()=>requestCheck(i));
+      host.appendChild(btn);
+    });
+    hint.textContent=count+" / "+spec.items.length;
+  }else if(spec.kind==="compare"){
+    const tabs=element("div","choices");
+    spec.items.forEach((item,i)=>{
+      const btn=element("button","tab",item.label);
+      btn.setAttribute("aria-pressed",String(i===selected));
+      btn.addEventListener("click",()=>{selected=i;draw()});
+      tabs.appendChild(btn);
+    });
+    host.appendChild(tabs);
+    host.appendChild(element("p","detail",spec.items[selected].detail));
+  }else{
+    const numbers=spec.items.map(x=>x.value);
+    const low=Math.min(0,...numbers), high=Math.max(0,...numbers);
+    const range=high-low||1;
+    spec.items.forEach((item,i)=>{
+      const btn=element("button","bar");
+      btn.setAttribute("aria-pressed",String(i===selected));
+      const label=element("span","bar-label");
+      label.appendChild(element("span","name",item.label));
+      label.appendChild(element("span","num",String(item.value)));
+      btn.appendChild(label);
+      const track=element("span","bar-line");
+      const fill=element("span","fill");
+      fill.style.left=((Math.min(0,item.value)-low)/range*100)+"%";
+      fill.style.width=(Math.abs(item.value)/range*100)+"%";
+      track.appendChild(fill);
+      btn.appendChild(track);
+      btn.addEventListener("click",()=>{selected=i;draw()});
+      host.appendChild(btn);
+    });
+    const item=spec.items[selected];
+    hint.textContent=item.label+" · "+item.value+(spec.unit?" "+spec.unit:"");
+  }
+}
+sync(telegram?.chatData);
+draw();
+if(telegram){
+  telegram.onEvent("chatDataChanged",()=>{if(sync(telegram.chatData))draw()});
+  telegram.ready();
+}
+</script>

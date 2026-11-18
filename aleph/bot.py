@@ -12,7 +12,7 @@ import aiohttp
 from .hermes import create_agent
 from . import projects
 from .llm import ModelUnavailable
-from . import media, memory, documents
+from . import media, memory, documents, widgets
 
 log = logging.getLogger(__name__)
 PLAN_ALIASES = {"/plan", "открой план", "открыть план", "открой мини-апп", "open plan", "open mini app"}
@@ -99,6 +99,8 @@ class Inbox:
             );
         """)
 
+        widgets.initialize(self.db)
+
         if "project_id" not in {r["name"] for r in self.db.execute("PRAGMA table_info(bot_inbox)")}:
             self.db.execute("ALTER TABLE bot_inbox ADD COLUMN project_id INTEGER")
 
@@ -163,7 +165,11 @@ class Inbox:
             if query:
                 scope = self.bind_project(row["id"], row["uid"])
                 self.store.add_history(row["uid"], "user", query, project_id=scope)
-                self.store.add_history(row["uid"], "assistant", reply, project_id=scope)
+                widget = widgets.for_update(self.store, row["id"])
+                context_reply = reply
+                if widget:
+                    context_reply += "\n\n[Виджет в сообщении]\n" + widgets.fallback_text(json.loads(widget["spec"]))
+                self.store.add_history(row["uid"], "assistant", context_reply, project_id=scope)
             self.db.execute("COMMIT")
         except BaseException:
             self.db.execute("ROLLBACK")
@@ -286,6 +292,33 @@ async def _compose(row, store, inbox, tg, agent):
     historical = ("[Фото] " if photo else "") + query
     return historical, answer
 
+async def _send_widget(store, tg, uid, update_id, reply, show_plan):
+    widget = widgets.for_update(store, update_id)
+    if not widget:
+        return reply
+    spec = json.loads(widget["spec"])
+    cap = reply if not show_plan and len(reply.encode("utf-16-le")) // 2 <= 850 else ""
+    message_id = widget["message_id"]
+    if message_id is None:
+        params = {"chat_id": uid, "html": widgets.render(spec), "protect_content": True}
+        if cap:
+            params["caption"] = cap
+        if spec["kind"] == "checklist":
+            params.update(allow_queries=True, chat_data=widgets.chat_state(widget["checked"]))
+        try:
+            sent = await tg.call("sendWidget", **params)
+            message_id = sent["message_id"]
+        except TelegramError as error:
+            if error.code not in (400, 404, 405):
+                raise
+            message_id = -1
+            log.warning("Telegram could not deliver native widget status=%s", error.code)
+        widgets.mark_sent(store, widget["key"], message_id)
+    if message_id == -1:
+        return reply + "\n\n" + widgets.fallback_text(spec)
+    return "" if cap else reply
+
+
 async def _handle(row, store, inbox, tg, agent):
     uid, update_id = row["uid"], row["id"]
     original = json.loads(row["message"])
@@ -316,7 +349,9 @@ async def _handle(row, store, inbox, tg, agent):
                     inbox.retry(row, 3)
                     return
                 saved = inbox.successful_mutations(update_id)
-                if saved:
+                if widgets.for_update(store, update_id):
+                    reply = "Подготовил виджет." if ru else "Here’s the widget."
+                elif saved:
                     reply = "Сохранил изменения: " + ", ".join(saved) + ". Подробности есть в плане."
                 elif error.status in (400, 422) and "photo" in original:
                     reply = "Модель сейчас не смогла разобрать фотографию. Напиши, что на ней нужно проверить." if ru else "I couldn’t read this image. Can you describe what you’d like me to check?"
@@ -342,6 +377,7 @@ async def _handle(row, store, inbox, tg, agent):
         command = (original.get("text") or "").strip().lower().split("@",1)[0].rstrip(".!")
         show_plan = (command.split(" ", 1)[0] in ("/start", "/help", "/plan") or command in PLAN_ALIASES
                      or bool(original.get("web_app_data")) or inbox.opened_plan(update_id))
+        reply = await _send_widget(store, tg, uid, update_id, reply, show_plan)
         for n, chunk in enumerate(chunks(reply)):
             if n < row["sent_chunks"]:
                 continue
@@ -393,6 +429,28 @@ async def _work(store, inbox, tg, agent, changed):
             task.cancel()
         await asyncio.gather(*active.values(), return_exceptions=True)
 
+async def _widget_updates(store, telegram, updates):
+    # Process independent messages concurrently. Serialize taps on one widget
+    # so an earlier edit cannot win after a later one.
+    lanes = {}
+    for update in updates:
+        query = update.get("widget_query")
+        if isinstance(query, dict) and isinstance(query.get("id"), str):
+            chat_id = (query.get("chat") or {}).get("id", 0)
+            lanes.setdefault((chat_id, query.get("message_id", 0)), []).append(query)
+    limit = asyncio.Semaphore(16)
+
+    async def lane(queries):
+        async with limit:
+            for query in queries:
+                try:
+                    await widgets.handle_query(store, telegram, query)
+                except TelegramError as error:
+                    log.warning("Widget update delivery status=%s", error.code)
+
+    await asyncio.gather(*(lane(queries) for queries in lanes.values()))
+
+
 async def run_bot(store, session, token, model_key):
     inbox = Inbox(store)
     telegram = Telegram(session, token)
@@ -405,10 +463,11 @@ async def run_bot(store, session, token, model_key):
             if worker.done():
                 await worker
             try:
-                updates = await telegram.call("getUpdates", offset=inbox.offset(), timeout=25, allowed_updates=["message"])
+                updates = await telegram.call("getUpdates", offset=inbox.offset(), timeout=25, allowed_updates=["message", "widget_query"])
                 if updates:
                     inbox.ingest(updates)
                     changed.set()
+                    await _widget_updates(store, telegram, updates)
             except TelegramError as error:
                 log.warning("Polling Telegram status=%s", error.code)
                 await asyncio.sleep(max(4, error.retry_after))
