@@ -49,16 +49,16 @@ Telegram delivery queues and tool results are persisted before replies. A crash 
 
 Aleph can use eligible ChatGPT Plus or Pro plan usage for the owner of a personal, self-hosted instance. Set `ALEPH_CHATGPT_OWNER_ID` to the owner's numeric Telegram user ID and restart Aleph. This follows the [OpenAI self-hosted VM flow](https://developers.openai.com/siwc/token-sharing-open-source/self-hosted-vms). An app that offers ChatGPT plan usage as a shared hosted service needs [OpenAI hosted-app access](https://developers.openai.com/siwc/token-sharing-open-source).
 
-1. On the computer where you plan to sign in, download Aleph and install its Python dependencies. If you already have the repository, start inside your existing `OneBot` directory.
+1. On the computer where you plan to sign in, download Aleph and install its Python dependencies. If you already have the repository, start inside the directory where you cloned it.
 
    ```sh
-   git clone https://github.com/ignatnovichenko/OneBot.git
-   cd OneBot
+   git clone https://github.com/ignatnovichenko/Aleph.git
+   cd Aleph
    python3 -m venv .venv
    .venv/bin/python -m pip install -r requirements.txt
    ```
 
-2. Open **Settings → Connections → ChatGPT** in the live Telegram Mini App and create a one-time code. Then run the helper from the `OneBot` directory.
+2. Open **Settings → Connections → ChatGPT** in the live Telegram Mini App and create a one-time code. Then run the helper from the cloned repository.
 
    ```sh
    .venv/bin/python -m aleph.chatgpt_login connect
@@ -66,9 +66,13 @@ Aleph can use eligible ChatGPT Plus or Pro plan usage for the owner of a persona
 
 3. Paste the setup code into the helper's hidden prompt. Sign in on the OpenAI page in your system browser, then allow Aleph to use your ChatGPT plan. Return to the Mini App to see the connected account and model.
 
-On Windows, use `py -m venv .venv` and `.venv\Scripts\python.exe` in place of `.venv/bin/python`. If Python reports `No module named 'aleph'`, check that your terminal is in `OneBot` before running the helper.
+On Windows, use `py -m venv .venv` and `.venv\Scripts\python.exe` in place of `.venv/bin/python`. If Python reports `No module named 'aleph'`, check that your terminal is in the cloned repository before running the helper.
 
 The helper completes OAuth locally and transfers the verified session to the instance in an encrypted packet. The code is valid for ten minutes and can be used once. Credentials and refresh tokens stay in the server's private directory. Set `ALEPH_CHATGPT_DIR` to select another directory. The Docker deployment keeps its session under `/data/chatgpt`. Settings can disconnect the session and link to [ChatGPT usage](https://chatgpt.com/settings/usage). Other Telegram users on the instance use OpenCode. When the owner's ChatGPT connection fails, Aleph shows the provider failure and offers reconnection or usage management.
+
+Once connected, the server refreshes the ChatGPT session as needed. Updates and restarts preserve the connection while the credential directory is preserved. Renew the connection after revoking access in ChatGPT, losing the session file or moving to a server without it.
+
+In **Settings → Chat replies**, the owner can choose ChatGPT or OpenCode, then select a model and a reasoning level from that provider's catalog. Aleph remembers the last selection for each provider in SQLite and shows the model used for its most recent model reply. Preferences apply to requests that start after saving.
 
 ## Checks
 

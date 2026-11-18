@@ -16,7 +16,7 @@ from .chatgpt_auth import ChatGPTError
 from .chatgpt_pair import IMPORT_PATH, MAX_PACKET, owner as chatgpt_owner
 from .feeds import feed_catalog
 from .links import mini_app_url
-from . import projects, widgets
+from . import models, projects, widgets
 from .store import UTC
 
 
@@ -82,7 +82,9 @@ def calendar_export(tasks, uid):
     return "\r\n".join(fold_ical(line) for line in lines) + "\r\n"
 
 
-def install_api(app, store, token):
+def install_api(app, store, token, model_key=None):
+    catalogs = models.ModelCatalogs(model_key)
+
     async def body(request):
         if request.content_type != "application/json":
             raise ValueError("Ожидается JSON.")
@@ -125,11 +127,14 @@ def install_api(app, store, token):
 
     async def state(request, user):
         uid = user["id"]
-        return web.json_response({"user": user, "tasks": store.list_tasks(uid),
+        result = {"user": user, "tasks": store.list_tasks(uid),
                                   "projects": projects.list_projects(store, uid), "active_project_id": projects.active(store, uid),
                                   "routines": store.list_routines(uid), "settings": store.get_settings(uid), "integrations": {"rss": True, "calendar": True},
                                   "feeds": store.list_feeds(uid), "feed_catalog": feed_catalog(),
-                                  "feed_items": store.feed_items(uid)})
+                                  "feed_items": store.feed_items(uid)}
+        if chatgpt_owner(uid):
+            result["model"] = models.describe(store, uid, catalogs.opencode_model)
+        return web.json_response(result)
 
     async def create(request, user):
         fields = await body(request)
@@ -205,7 +210,23 @@ def install_api(app, store, token):
         return web.json_response({"chat_data": widgets.chat_state(mask)})
 
     async def chatgpt_status(request, user):
-        return web.json_response(chatgpt.status(user["id"]))
+        uid = user["id"]
+        status = chatgpt.status(uid)
+        if status["available"]:
+            status["model_settings"] = models.describe(store, uid, catalogs.opencode_model)
+        return web.json_response(status)
+
+    async def model_settings(request, user):
+        uid = user["id"]
+        if not chatgpt_owner(uid):
+            raise KeyError("Выбор модели доступен владельцу бота.")
+        async with aiohttp.ClientSession(trust_env=True, headers={"User-Agent": "AlephAgent/1.0"}) as session:
+            if request.method == "PATCH":
+                return web.json_response(await catalogs.choose(session, store, uid, await body(request)))
+            providers = await catalogs.all(session, uid)
+        _, selections, _ = models.saved(store, uid)
+        return web.json_response({**models.describe(store, uid, catalogs.opencode_model),
+                                  "providers": providers, "selections": selections})
 
     async def chatgpt_pair(request, user):
         if not chatgpt_owner(user["id"]):
@@ -216,7 +237,10 @@ def install_api(app, store, token):
         if not chatgpt_owner(user["id"]):
             raise KeyError("ChatGPT connection is unavailable.")
         async with aiohttp.ClientSession(trust_env=True) as session:
-            return web.json_response(await chatgpt.disconnect(session, user["id"]))
+            status = await chatgpt.disconnect(session, user["id"])
+        models.disconnect_chatgpt(store, user["id"])
+        status["model_settings"] = models.describe(store, user["id"], catalogs.opencode_model)
+        return web.json_response(status)
 
     async def chatgpt_import(request):
         # The local CLI proves possession of the one-use code with the encrypted
@@ -247,6 +271,7 @@ def install_api(app, store, token):
               ("POST", "/api/feeds", add_feed), ("DELETE", r"/api/feeds/{id:\d{1,18}}", remove_feed)]
     routes += [("GET", r"/api/widgets/{id:\d{1,18}}", widget_view),
                ("PATCH", r"/api/widgets/{id:\d{1,18}}", widget_check),
+               ("GET", "/api/models", model_settings), ("PATCH", "/api/models", model_settings),
                ("GET", "/api/chatgpt", chatgpt_status), ("POST", "/api/chatgpt/pair", chatgpt_pair),
                ("DELETE", "/api/chatgpt", chatgpt_disconnect)]
     for method, path, handler in routes:

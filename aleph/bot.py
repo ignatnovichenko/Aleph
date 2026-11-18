@@ -13,8 +13,8 @@ from .chatgpt import plan as chatgpt
 from .chatgpt_pair import owner as chatgpt_owner
 from .hermes import create_agent
 from .links import settings_url
-from . import projects
-from .llm import ChatGPTUnavailable, ModelUnavailable
+from . import models, projects
+from .llm import ChatGPTUnavailable, ModelRejectsPhoto, ModelUnavailable, RegionUnavailable
 from . import media, memory, documents, widgets
 
 log = logging.getLogger(__name__)
@@ -111,6 +111,8 @@ class Inbox:
             self.db.execute("ALTER TABLE bot_inbox ADD COLUMN project_id INTEGER")
         if "chatgpt_client" not in columns:
             self.db.execute("ALTER TABLE bot_inbox ADD COLUMN chatgpt_client TEXT")
+        if "model_choice" not in columns:
+            self.db.execute("ALTER TABLE bot_inbox ADD COLUMN model_choice TEXT")
 
     def bind_project(self, update_id, uid):
         self.db.execute("UPDATE bot_inbox SET project_id=? WHERE id=? AND uid=? AND project_id IS NULL",
@@ -121,6 +123,21 @@ class Inbox:
         self.db.execute("UPDATE bot_inbox SET chatgpt_client=? WHERE id=? AND uid=? AND chatgpt_client IS NULL",
                         (client or "", update_id, uid))
         return self.db.execute("SELECT chatgpt_client FROM bot_inbox WHERE id=? AND uid=?", (update_id, uid)).fetchone()[0]
+
+    def bind_model(self, update_id, uid, choice, client, opencode_model):
+        row = self.db.execute("SELECT model_choice,chatgpt_client FROM bot_inbox WHERE id=? AND uid=?",
+                              (update_id, uid)).fetchone()
+        if row[0] is not None:
+            return json.loads(row[0]), row[1]
+        if row[1] is not None:
+            # Turns started before model selection kept their original billing source.
+            provider = "chatgpt" if row[1] else "opencode"
+            if choice["provider"] != provider:
+                choice = models.legacy_option(uid, provider, opencode_model)
+        client = self.bind_chatgpt(update_id, uid, client)
+        self.db.execute("UPDATE bot_inbox SET model_choice=? WHERE id=? AND uid=?",
+                        (json.dumps(choice), update_id, uid))
+        return choice, client
 
     def ingest(self, updates):
         if not updates:
@@ -176,6 +193,11 @@ class Inbox:
         try:
             self.db.execute("UPDATE bot_inbox SET reply=?,retries=0 WHERE id=?", (reply, row["id"]))
             if query:
+                last = self.db.execute("SELECT message FROM bot_steps WHERE update_id=? ORDER BY step DESC LIMIT 1", (row["id"],)).fetchone()
+                if last:
+                    step = json.loads(last[0])
+                    if step.get("_aleph_model") and not step.get("tool_calls"):
+                        models.remember_reply(self.store, row["uid"], step["_aleph_model"])
                 scope = self.bind_project(row["id"], row["uid"])
                 self.store.add_history(row["uid"], "user", query, project_id=scope)
                 widget = widgets.for_update(self.store, row["id"])
@@ -387,6 +409,12 @@ async def _handle(row, store, inbox, tg, agent):
                 elif using_chatgpt:
                     reply = ("ChatGPT сейчас не принял запрос. Проверь доступ к подписке в настройках Алефа." if ru else
                              "ChatGPT couldn't accept this request. Check your plan connection in Aleph settings.")
+                elif isinstance(error, ModelRejectsPhoto):
+                    reply = ("Выбранная модель принимает только текст. Для фото выбери модель с поддержкой изображений в настройках." if ru else
+                             "Your selected model accepts text only. Choose a model that supports images in Settings.")
+                elif isinstance(error, RegionUnavailable):
+                    reply = ("OpenCode отклонил модель из-за региональных настроек. Выбери другую модель в настройках Алефа." if ru else
+                             "OpenCode declined this model due to region settings. Choose another model in Aleph Settings.")
                 elif error.status in (400, 422) and "photo" in original:
                     reply = "Модель сейчас не смогла разобрать фотографию. Напиши, что на ней нужно проверить." if ru else "I couldn’t read this image. Can you describe what you’d like me to check?"
                 else:

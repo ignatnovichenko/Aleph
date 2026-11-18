@@ -128,9 +128,9 @@ class ChatGPTPlan:
             write_record(SESSION_FILE, record)
             return record
 
-    async def complete(self, session, uid, client, messages, tools, previous=None):
+    async def complete(self, session, uid, client, messages, tools, previous=None, *, model=None, reasoning=""):
         record = await self.active(session, uid, client)
-        payload = responses_payload(messages, record["model"], tools, previous or {})
+        payload = responses_payload(messages, model or record["model"], tools, previous, reasoning=reasoning)
         headers = {"Authorization": "Bearer " + record["access_token"], "Accept": "text/event-stream"}
         try:
             async with session.post(RESOURCE + "/responses", headers=headers, json=payload, allow_redirects=False,
@@ -146,7 +146,7 @@ class ChatGPTPlan:
             raise ChatGPTError() from error
 
 
-def responses_payload(messages, model, tools, previous=None):
+def responses_payload(messages, model, tools, previous=None, *, reasoning=""):
     previous = previous or {}
     instructions, items = [], []
     for message in messages:
@@ -173,9 +173,12 @@ def responses_payload(messages, model, tools, previous=None):
                            for part in content]
             items.append({"role": role, "content": content})
     payload = {"model": model, "input": items, "store": False, "stream": True}
+    if reasoning:
+        payload["reasoning"] = {"effort": reasoning}
     if instructions:
         payload["instructions"] = "\n\n".join(instructions)
     if tools:
+        payload["include"] = ["reasoning.encrypted_content"]
         payload["tools"] = [{"type": "namespace", "name": NAMESPACE, "description": "Aleph workspace tools.",
                              "tools": [{"type": "function", "strict": False, **tool["function"]} for tool in tools]}]
     return payload
@@ -189,7 +192,9 @@ async def completed_reply(lines):
         kind = event.get("type")
         response = event.get("response") or {}
         if kind == "response.completed":
-            return chat_message(response["output"])
+            reply = chat_message(response["output"])
+            reply["_model_id"] = response.get("model")
+            return reply
         if kind in {"response.failed", "response.incomplete", "error"}:
             code = error_code(response or event)
             status = {"subscription_sharing_usage_limit_exceeded": 429, "subscription_sharing_usage_unavailable": 503,

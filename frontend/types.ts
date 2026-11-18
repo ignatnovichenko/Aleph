@@ -81,6 +81,35 @@ export interface WorkspaceState {
   routines?: Routine[];
   snapshot_total?: number;
   integrations?: { rss: boolean; calendar: boolean };
+  model?: ModelSummary;
+}
+
+export type ModelProvider = "chatgpt" | "opencode";
+
+export interface ModelChoice {
+  provider: ModelProvider;
+  model: string;
+  name: string;
+  reasoning: string;
+}
+
+export interface ModelSummary {
+  active: ModelChoice;
+  last: ModelChoice | null;
+}
+
+export interface ProviderModel {
+  id: string;
+  name: string;
+  levels: string[];
+  default?: string;
+  images: boolean;
+  training?: boolean;
+}
+
+export interface ModelCatalog extends ModelSummary {
+  providers: Record<ModelProvider, { status: "ready" | "disconnected" | "unavailable"; models: ProviderModel[] }>;
+  selections: Partial<Record<ModelProvider, ModelChoice>>;
 }
 
 export interface ChatGPTConnection {
@@ -90,6 +119,7 @@ export interface ChatGPTConnection {
   needs_reauth?: boolean;
   email?: string;
   model?: string;
+  model_settings?: ModelSummary;
   revoked?: boolean;
 }
 

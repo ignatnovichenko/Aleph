@@ -11,11 +11,11 @@ from zoneinfo import ZoneInfo
 import aiohttp
 
 from .feeds import feed_catalog
-from . import memory, projects, widgets
+from . import memory, models, projects, widgets
 from .documents import DOCUMENT_TOOL, render_document
 
 BASE_URL = "https://opencode.ai/zen/go/v1"
-DEFAULT_MODEL = "claude-haiku-5-5"
+DEFAULT_MODEL = models.DEFAULT_OPENCODE
 SYSTEM = """You are Aleph, the user's personal AI in Telegram, built by Lab One.
 Talk naturally in the user's language (default Russian), use ты and masculine first-person grammar in Russian (запомнил, сделал), and match their brevity. Answer the actual request now. For casual conversation, just talk. No greeting every turn, no repetitive offers, no impersonating a human, no Markdown tables or headings. Plain text is rendered in Telegram; include raw URLs when citing a source.
 You can manage this user's tasks, reminders, timezone, proactive updates, RSS catalogue subscriptions and their cached news, fetch weather and look up Wikipedia. Use remember_fact only for personal facts or preferences the user asks to remember or explicitly gives as a continuing preference. A promise to remind about something belongs in a task. Offer to forget stored facts when asked, find the matching saved ID, and call forget_fact. Answer questions about saved memory only from the supplied current memory (including empty memory). Once forgotten, do not use an older chat mention to reintroduce the fact. Avoid storing credentials, sensitive guesses or incidental details. Chat, voice, notes and photos are private to this user's workspace. For requests to remember, schedule or change something, use the tools before confirming. If time/date is unambiguous in context, schedule it; if essential details are genuinely missing, ask one short question. Confirm the actual saved local date/time. For relative times use the supplied clock and timezone. If the timezone is still UTC and the user requests a wall-clock time without a zone, ask for their timezone once; a relative duration such as in ten minutes is unambiguous. Keep due_at in ISO 8601 with that timezone offset. For a task without a time, leave due_at empty. Explicit timed reminders are delivered at their due time, including quiet hours. Automatic morning digests include open tasks and subscribed RSS items when available, follow proactive settings, timezone and quiet hours. Enabling a subscription includes headlines in the morning digest, not instant alerts. For explicit recurring requests use create_routine for scheduled local delivery of weather, tasks, subscribed news or a reminder. A user can pause, resume or delete their routine. When asked for a downloadable text, Markdown, CSV or calendar file, prepare it with create_document and confirm it is attached. The mini app shows the plan, feed connections and calendar export. Only promise supported actions. Calendar export is not two-way external synchronization.
@@ -89,6 +89,10 @@ class RegionUnavailable(ModelUnavailable):
     pass
 
 
+class ModelRejectsPhoto(ModelUnavailable):
+    pass
+
+
 class Aleph:
     def __init__(self, session, model_key):
         self.session = session
@@ -103,36 +107,58 @@ class Aleph:
         self.fallback_model = os.getenv("OPENCODE_FALLBACK_MODEL", "").strip()
         self.unavailable_until = {}
 
-    async def completion(self, messages, model, *, tools=True, session_id="aleph-smoke"):
-        if not self.fallback_model or self.fallback_model == model:
-            return await self._request(messages, model, tools=tools, session_id=session_id)
+    async def completion(self, messages, model, *, tools=True, session_id="aleph-smoke", reasoning="high", fallback=True):
+        if not fallback or not self.fallback_model or self.fallback_model == model:
+            return await self._request(messages, model, tools=tools, session_id=session_id, reasoning=reasoning)
         if time.monotonic() >= self.unavailable_until.get(model, 0):
             try:
-                return await self._request(messages, model, tools=tools, session_id=session_id)
+                return await self._request(messages, model, tools=tools, session_id=session_id, reasoning=reasoning)
             except RegionUnavailable:
                 self.unavailable_until[model] = time.monotonic() + 1800
-        return await self._request(messages, self.fallback_model, tools=tools, session_id=session_id)
+        return await self._request(messages, self.fallback_model, tools=tools, session_id=session_id, reasoning="high")
 
     async def complete_turn(self, messages, model, *, tools, uid, project_id, ledger, update_id, step):
         from .chatgpt import ChatGPTError, plan
 
-        client = ledger.bind_chatgpt(update_id, uid, plan.selected(uid))
-        if not client:
-            return await self.completion(messages, model, tools=tools, session_id=f"aleph-chat-{uid}-{project_id}")
-        previous = {}
-        for number in range(step):
-            reply = ledger.get_step(update_id, number) or {}
-            calls, output = reply.get("tool_calls"), reply.get("_chatgpt_output")
-            if calls and output:
-                previous[calls[0]["id"]] = output
-        try:
-            return await plan.complete(self.session, uid, client, messages, TOOLS if tools else [], previous)
-        except ChatGPTError as error:
-            raise ChatGPTUnavailable(error) from error
+        provider, selections, _ = models.saved(ledger.store, uid)
+        choice = models.current(uid, provider, selections, model)
+        client = plan.selected(uid) if choice["provider"] == "chatgpt" else None
+        choice, client = ledger.bind_model(update_id, uid, choice, client, model)
+        active_provider = choice["provider"]
+        if choice["images"] is False and any(
+            part.get("type") == "image_url" for message in messages
+            if isinstance(message.get("content"), list) for part in message["content"]
+        ):
+            raise ModelRejectsPhoto(422)
+        if active_provider == "chatgpt":
+            if not client:
+                raise ChatGPTUnavailable(ChatGPTError(401, "reconnect"))
+            previous = {}
+            for number in range(step):
+                saved_reply = ledger.get_step(update_id, number) or {}
+                calls, output = saved_reply.get("tool_calls"), saved_reply.get("_chatgpt_output")
+                if calls and output:
+                    previous[calls[0]["id"]] = output
+            try:
+                reply = await plan.complete(self.session, uid, client, messages, TOOLS if tools else [], previous,
+                                            model=choice["model"], reasoning=choice["reasoning"])
+            except ChatGPTError as error:
+                raise ChatGPTUnavailable(error) from error
+        else:
+            reply = await self.completion(messages, choice["model"], tools=tools,
+                                          session_id=f"aleph-chat-{uid}-{project_id}", reasoning=choice["reasoning"],
+                                          fallback=choice["images"] is None)
+        model_id = reply.get("_model_id") or choice["model"]
+        last_model = models.model_option(active_provider, model_id,
+                                         choice["name"] if model_id == choice["model"] else model_id,
+                                         choice["reasoning"])
+        return {**{key: value for key, value in reply.items() if key != "_model_id"}, "_aleph_model": last_model}
 
-    async def _request(self, messages, model, *, tools, session_id):
-        payload = {"model": model, "messages": messages,
-                   "reasoning_effort": "high", "max_tokens": 4096}
+    async def _request(self, messages, model, *, tools, session_id, reasoning):
+        messages = [{key: value for key, value in message.items() if key != "_aleph_model"} for message in messages]
+        payload = {"model": model, "messages": messages, "max_tokens": 4096}
+        if reasoning:
+            payload["reasoning_effort"] = reasoning
         if tools:
             payload["tools"] = TOOLS
         headers = {"Authorization": f"Bearer {self.key}", "User-Agent": "AlephAgent/1.0",
@@ -158,7 +184,8 @@ class Aleph:
                     message = choice["message"]
                     if not isinstance(message, dict) or not (message.get("content") or message.get("tool_calls")):
                         raise ModelUnavailable(200)
-                    return {k: message[k] for k in ("role", "content", "tool_calls", "reasoning_content") if k in message}
+                    return {**{k: message[k] for k in ("role", "content", "tool_calls", "reasoning_content") if k in message},
+                            "_model_id": data.get("model") or model}
             except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
                 if attempt:
                     raise ModelUnavailable() from exc

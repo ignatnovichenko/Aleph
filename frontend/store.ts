@@ -1,5 +1,5 @@
 import { bridge, bridgeRequest } from "./bridge.js";
-import type { ChatGPTConnection, ChatGPTPairing, Feed, Project, Settings, Task, WidgetState, WorkspaceState } from "./types.js";
+import type { ChatGPTConnection, ChatGPTPairing, Feed, ModelCatalog, ModelSummary, Project, Settings, Task, WidgetState, WorkspaceState } from "./types.js";
 
 export { bridge };
 
@@ -7,6 +7,7 @@ type Reads = {
   "/api/state": WorkspaceState;
   "/api/calendar.ics": Blob;
   "/api/chatgpt": ChatGPTConnection;
+  "/api/models": ModelCatalog;
   [path: `/api/widgets/${string}`]: WidgetState & { html: string };
 };
 
@@ -19,6 +20,7 @@ export type Writes = {
   "/api/feeds": Feed;
   "/api/chatgpt": ChatGPTConnection;
   "/api/chatgpt/pair": ChatGPTPairing;
+  "/api/models": ModelSummary;
   [path: `/api/feeds/${string}`]: null;
   [path: `/api/widgets/${string}`]: WidgetState;
 };

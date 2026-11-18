@@ -45,9 +45,9 @@ async def update_menu(tg):
         await asyncio.sleep(30)
 
 
-def application(store, token):
+def application(store, token, model_key=None):
     app = web.Application(client_max_size=16384)
-    install_api(app, store, token)
+    install_api(app, store, token, model_key)
 
     async def health(_):
         store.db.execute("SELECT 1")
@@ -74,7 +74,7 @@ async def main():
     key = secret("OPENCODE_API_KEY", "opencode-key")
     path = os.getenv("ALEPH_DB") or str(Path.home() / ".local/share/aleph/aleph.sqlite3")
     store = Store(path)
-    runner = web.AppRunner(application(store, token), access_log=None)
+    runner = web.AppRunner(application(store, token, key), access_log=None)
     stopping = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):

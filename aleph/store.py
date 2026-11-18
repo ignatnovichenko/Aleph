@@ -82,6 +82,10 @@ class Store:
             );
             CREATE INDEX IF NOT EXISTS history_user ON history(user_id, id);
             CREATE TABLE IF NOT EXISTS runtime_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS model_settings (
+                user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                provider TEXT NOT NULL DEFAULT '', selections TEXT NOT NULL DEFAULT '{}', last_reply TEXT
+            );
             CREATE TABLE IF NOT EXISTS routines (
                 id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id),
                 title TEXT NOT NULL, kind TEXT NOT NULL, time TEXT NOT NULL, days TEXT NOT NULL,

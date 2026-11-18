@@ -1,7 +1,7 @@
 import { icon } from "./icons.js";
 import type { IconName } from "./icons.js";
 import type { RequestOptions, WriteMethod, Writes } from "./store.js";
-import type { ChatGPTConnection, ChatGPTPairing, Project, Task, TaskStatus, WorkspaceState } from "./types.js";
+import type { ChatGPTConnection, ChatGPTPairing, ModelCatalog, ModelChoice, ModelProvider, Project, ProviderModel, Task, TaskStatus, WorkspaceState } from "./types.js";
 import {
   bridge,
   demo,
@@ -30,6 +30,7 @@ let state: WorkspaceState;
 let page: Page = new URLSearchParams(location.search).get("view") === "settings" ? "settings" : "home";
 let filter: TaskStatus = "open";
 let chatgpt: ChatGPTConnection | undefined;
+let modelCatalog: ModelCatalog | undefined;
 let ru = true, pending = false, revision = 0, sdkBound = false;
 let toastTimer: number | undefined;
 let returnFocus: HTMLElement | null = null;
@@ -476,18 +477,20 @@ function chatgptRow() {
 function chatgptSheet(pairing?: ChatGPTPairing) {
   if (!chatgpt?.available) return;
   if (chatgpt.connected) {
-    const account = [chatgpt.email, chatgpt.model].filter(Boolean).join(" · ");
+    const account = chatgpt.email;
     openSheet("ChatGPT", `<p class="sheet-desc">${e(account || t("Аккаунт подключён", "Account connected"))}</p>
-      <p class="sheet-desc">${t("Ответы в чате используют твой тариф ChatGPT.", "Chat replies use your ChatGPT plan.")}</p>
+      <p class="sheet-desc">${state.model?.active.provider === "opencode"
+        ? t("ChatGPT можно выбрать в настройках модели.", "Select ChatGPT in the model settings.")
+        : t("Ответы в чате используют твой тариф ChatGPT.", "Chat replies use your ChatGPT plan.")}</p>
       <p class="sheet-desc"><a href="https://chatgpt.com/settings/usage" target="_blank" rel="noopener noreferrer">${t("Лимиты тарифа", "Plan usage")}</a></p>
       <button class="button" data-action="disconnect-chatgpt">${t("Отключить аккаунт", "Disconnect account")}</button>`);
     return;
   }
   const setup = `${chatgpt.needs_reauth ? `<p class="sheet-desc">${t("Срок действия подключения истёк. Войди в ChatGPT снова.", "Your connection expired. Sign in to ChatGPT again.")}</p>` : ""}
     <p class="sheet-desc">${pairing
-      ? t("Запусти помощник из папки OneBot и вставь код. Страница входа в ChatGPT откроется в браузере.", "Run the helper from the OneBot folder and paste the code. The ChatGPT sign-in page will open in your browser.")
+      ? t("Запусти помощник из папки Алефа и вставь код. Страница входа в ChatGPT откроется в браузере.", "Run the helper from the Aleph folder and paste the code. The ChatGPT sign-in page will open in your browser.")
       : t("При первом подключении сначала скачай Aleph и установи зависимости на компьютере. Получи одноразовый код, когда помощник будет готов к запуску.", "For your first connection, download Aleph and install its dependencies on your computer. Generate the one-time code when you are ready to run the helper.")}</p>
-    <p class="sheet-desc"><a href="https://github.com/ignatnovichenko/OneBot#connect-chatgpt-on-a-self-hosted-instance" target="_blank" rel="noopener noreferrer">${t("Инструкция по подключению", "Connection instructions")}</a></p>`;
+    <p class="sheet-desc"><a href="https://github.com/ignatnovichenko/Aleph#connect-chatgpt-on-a-self-hosted-instance" target="_blank" rel="noopener noreferrer">${t("Инструкция по подключению", "Connection instructions")}</a></p>`;
   const code = pairing ? `<label class="field">${t("Одноразовый код", "One-time code")}<input id="chatgpt-pair-code" readonly value="${e(pairing.code)}" spellcheck="false" dir="ltr"></label>
     <p class="sheet-desc">${t("Срок действия, мин.", "Valid for, min.")} ${Math.ceil(pairing.expires_in / 60)}</p>` : "";
   const primary = pairing
@@ -497,6 +500,77 @@ function chatgptSheet(pairing?: ChatGPTPairing) {
     <button class="button" data-action="refresh-chatgpt">${t("Проверить вход", "Check sign-in")}</button></div>
     ${pairing ? `<button class="small-action" data-action="pair-chatgpt">${t("Получить новый код", "Get a new code")}</button>` : ""}
     ${chatgpt.needs_reauth ? `<button class="small-action" data-action="disconnect-chatgpt">${t("Отключить аккаунт", "Disconnect account")}</button>` : ""}`);
+}
+
+const providerName = (provider: ModelProvider) => provider === "chatgpt" ? "ChatGPT" : "OpenCode Go";
+
+function reasoningName(effort: string) {
+  const labels: Record<string, [string, string]> = {
+    "": ["По умолчанию", "Default"], none: ["Без рассуждений", "None"], minimal: ["Минимальный", "Minimal"],
+    low: ["Низкий", "Low"], medium: ["Средний", "Medium"], high: ["Высокий", "High"],
+    xhigh: ["Очень высокий", "Extra high"], max: ["Максимальный", "Maximum"], ultra: ["Ультра", "Ultra"],
+  };
+  const label = labels[effort];
+  return label ? t(...label) : effort;
+}
+
+function modelSummary(choice: ModelChoice) {
+  return `${providerName(choice.provider)} · ${choice.name} · ${reasoningName(choice.reasoning)}`;
+}
+
+function modelSettingsBlock() {
+  const active = state.model?.active;
+  if (!active) return "";
+  return `<section class="settings-block"><h2 class="settings-title">${t("Ответы в чате", "Chat replies")}</h2>
+    <div class="panel"><button class="setting-row" data-action="model-settings"><span class="setting-copy">
+      <strong>${e(active.name)}</strong><span class="setting-detail">${e(providerName(active.provider) + " · " + reasoningName(active.reasoning))}</span></span>
+      <span class="tail">${icon("arrow")}</span></button></div></section>`;
+}
+
+function reasoningFields(model: ProviderModel, selected = "") {
+  const chosen = model.levels.includes(selected) ? selected : "";
+  const standard = reasoningName("") + (model.default ? " · " + reasoningName(model.default) : "");
+  const training = model.training ? `<p class="sheet-desc">${t("Провайдер может использовать запросы к этой модели для обучения.", "The provider may use requests to this model for training.")}</p>` : "";
+  return `<label class="field">${t("Рассуждения", "Reasoning")}<select name="reasoning"><option value="">${e(standard)}</option>${model.levels.map((level) =>
+    `<option value="${e(level)}" ${level === chosen ? "selected" : ""}>${e(reasoningName(level))}</option>`).join("")}</select></label>
+    <p class="sheet-desc">${model.images ? t("Принимает текст и фото", "Accepts text and images") : t("Принимает текст", "Accepts text")}</p>${training}`;
+}
+
+function modelFields(catalog: ModelCatalog, provider: ModelProvider) {
+  const available = catalog.providers[provider];
+  if (!available.models.length) {
+    const hint = available.status === "disconnected"
+      ? t("Подключи аккаунт, чтобы загрузить модели.", "Connect the account to load models.")
+      : t("Список моделей временно недоступен. Попробуй обновить.", "The model list is temporarily unavailable. Try refreshing.");
+    return `<p class="sheet-desc">${hint}</p><button type="button" class="button" data-action="${provider === "chatgpt" && available.status === "disconnected" ? "chatgpt" : "model-settings"}">${
+      provider === "chatgpt" && available.status === "disconnected" ? t("Подключить ChatGPT", "Connect ChatGPT") : t("Обновить список", "Refresh list")}</button>`;
+  }
+  const prior = catalog.selections[provider] || (catalog.active.provider === provider ? catalog.active : undefined);
+  const model = available.models.find((item) => item.id === prior?.model) || available.models[0];
+  return `<label class="field">${t("Модель", "Model")}<select name="model">${available.models.map((item) =>
+    `<option value="${e(item.id)}" ${item.id === model.id ? "selected" : ""}>${e(item.name)}</option>`).join("")}</select></label>
+    <div data-model-reasoning>${reasoningFields(model, prior?.model === model.id ? prior.reasoning : "")}</div>${submit()}`;
+}
+
+async function openModelSettings() {
+  const title = t("Модель и рассуждения", "Model and reasoning");
+  openSheet(title, `<p data-model-loading class="sheet-desc" role="status">${t("Загружаю доступные модели…", "Loading available models…")}</p>`);
+  const loading = sheet.querySelector("[data-model-loading]");
+  try {
+    const catalog = await request("/api/models");
+    if (!sheet.open || !loading?.isConnected || sheet.classList.contains("closing")) return;
+    modelCatalog = catalog;
+    state.model = catalog;
+    render();
+    const provider = catalog.active.provider;
+    const last = catalog.last ? `<p class="sheet-desc">${t("Последний ответ модели", "Last model reply")}<br>${e(modelSummary(catalog.last))}</p>` : "";
+    openSheet(title, `<form id="model-form"><label class="field">${t("Провайдер", "Provider")}<select name="provider">
+      <option value="chatgpt" ${provider === "chatgpt" ? "selected" : ""}>ChatGPT</option>
+      <option value="opencode" ${provider === "opencode" ? "selected" : ""}>OpenCode Go</option></select></label>
+      <div data-model-fields>${modelFields(catalog, provider)}</div></form>${last}`);
+  } catch (error) {
+    if (loading?.isConnected) loading.textContent = errorMessage(error);
+  }
 }
 function sectionHead(title: string) {
   return `<h2 class="section-title">${title}</h2>`;
@@ -597,7 +671,7 @@ function settingsPage() {
   const detected = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const row = (label: string, detail: string, val: string) =>
     `<button class="setting-row" data-action="schedule"><span class="setting-copy"><strong>${label}</strong><span class="setting-detail">${detail}</span></span><span class="setting-value">${e(val)}${icon("arrow")}</span></button>`;
-  return `<div class="settings-grid"><section class="settings-block"><h2 class="settings-title">${t("Ритм дня", "Daily rhythm")}</h2><div class="panel"><div class="setting-row"><span><strong>${t("Проактивность", "Proactive updates")}</strong><span class="setting-detail">${t("Обзоры и инициативы в чате", "Briefings and check-ins in chat")}</span></span>${switcher()}</div>
+  return `<div class="settings-grid">${modelSettingsBlock()}<section class="settings-block"><h2 class="settings-title">${t("Ритм дня", "Daily rhythm")}</h2><div class="panel"><div class="setting-row"><span><strong>${t("Проактивность", "Proactive updates")}</strong><span class="setting-detail">${t("Обзоры и инициативы в чате", "Briefings and check-ins in chat")}</span></span>${switcher()}</div>
   ${row(t("Утренний обзор", "Morning brief"), t("Когда присылать план на день", "When to send your daily plan"), timeLabel(s.digest_time))}${row(t("Тихие часы", "Quiet hours"), t("Время для отдыха", "Your time to disconnect"), timeLabel(s.quiet_start) + " – " + timeLabel(s.quiet_end))}${row(t("Часовой пояс", "Time zone"), t("Для поручений и обзоров", "For tasks and briefings"), zone())}</div>${zone() === "UTC" && detected && detected !== "UTC" ? `<button class="small-action tz-suggest" data-action="detected-zone">${icon("globe")}${t("Использовать часовой пояс устройства", "Use device time zone")} · ${e(detected)}</button>` : ""}</section>
   <section class="settings-block"><h2 class="settings-title">${t("Подключения", "Connections")}</h2><div class="panel">${integrationRows()}${chatgptRow()}</div><a class="privacy-link" href="./privacy.html" target="_blank" rel="noopener noreferrer">${t("Конфиденциальность", "Privacy")}</a></section>${routinesPanel()}</div>`;
 }
@@ -754,6 +828,7 @@ async function syncChatGPT(showStatus = false) {
     const connection = await request("/api/chatgpt");
     if (sequence !== revision) return;
     chatgpt = connection;
+    if (connection.model_settings) state.model = connection.model_settings;
     render();
     if (showStatus) {
       if (chatgpt.connected) chatgptSheet();
@@ -904,6 +979,9 @@ async function act(action: string, id?: string) {
     case "chatgpt":
       chatgptSheet();
       break;
+    case "model-settings":
+      await openModelSettings();
+      break;
     case "pair-chatgpt":
       await write("/api/chatgpt/pair", "POST", undefined, (pairing) => {
         if (pairing) chatgptSheet(pairing);
@@ -928,6 +1006,7 @@ async function act(action: string, id?: string) {
       await write("/api/chatgpt", "DELETE", undefined, (connection) => {
         if (!connection) return;
         chatgpt = connection;
+        if (connection.model_settings) state.model = connection.model_settings;
         chatgptSheet();
         message(connection.revoked === false
           ? t("Отключено в Алефе. Отозвать разрешение можно в настройках ChatGPT.", "Disconnected from Aleph. Revoke access in your ChatGPT settings.")
@@ -1087,6 +1166,12 @@ sheet.addEventListener("submit", async (event) => {
         t("Поручение сохранено","Task saved"),
         {requestKey: id ? null : form.dataset.requestKey}
       );
+    } else if (form.id === "model-form") {
+      ok = await write("/api/models", "PATCH", {
+        provider: field("provider"), model: field("model"), reasoning: field("reasoning"),
+      }, (result) => {
+        if (result) state.model = result;
+      }, t("Настройки модели сохранены", "Model settings saved"));
     } else if (form.id === "schedule-form") {
       const schedule = {
         digest_time: field("digest_time"),
@@ -1127,6 +1212,19 @@ sheet.addEventListener("submit", async (event) => {
 });
 sheet.addEventListener("change", async (event) => {
   const picker = event.target;
+  if (picker instanceof HTMLSelectElement && picker.form?.id === "model-form" && modelCatalog) {
+    if (picker.name === "provider" && (picker.value === "chatgpt" || picker.value === "opencode")) {
+      requiredElement(picker.form, "[data-model-fields]").innerHTML = modelFields(modelCatalog, picker.value);
+    } else if (picker.name === "model") {
+      const provider = picker.form.querySelector<HTMLSelectElement>('[name="provider"]')?.value;
+      if (provider !== "chatgpt" && provider !== "opencode") return;
+      const model = modelCatalog.providers[provider].models.find((item) => item.id === picker.value);
+      const prior = modelCatalog.selections[provider];
+      if (model) requiredElement(picker.form, "[data-model-reasoning]").innerHTML =
+        reasoningFields(model, prior?.model === model.id ? prior.reasoning : "");
+    }
+    return;
+  }
   if (!(picker instanceof HTMLInputElement) || picker.name !== "reference" || !picker.form || !picker.files?.[0]) return;
   const note = requiredElement<HTMLTextAreaElement>(picker.form, 'textarea[name="context"]');
   const file = picker.files[0];

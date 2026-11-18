@@ -87,7 +87,7 @@ class TurnBroker:
             return web.json_response({
                 "id": f"chatcmpl-aleph-{step}", "object": "chat.completion", "created": int(time.time()),
                 "model": self.model, "choices": [{"index": 0,
-                    "message": {"role": "assistant", **{k: v for k, v in reply.items() if k != "_chatgpt_output"}},
+                    "message": {"role": "assistant", **{k: v for k, v in reply.items() if not k.startswith("_")}},
                     "finish_reason": "tool_calls" if calls else "stop"}],
             })
 
