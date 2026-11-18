@@ -10,6 +10,7 @@ from urllib.parse import parse_qsl
 from aiohttp import web
 
 from .feeds import feed_catalog
+from . import projects
 from .store import UTC
 
 
@@ -119,19 +120,21 @@ def install_api(app, store, token):
     async def state(request, user):
         uid = user["id"]
         return web.json_response({"user": user, "tasks": store.list_tasks(uid),
+                                  "projects": projects.list_projects(store, uid), "active_project_id": projects.active(store, uid),
                                   "routines": store.list_routines(uid), "settings": store.get_settings(uid), "integrations": {"rss": True, "calendar": True},
                                   "feeds": store.list_feeds(uid), "feed_catalog": feed_catalog(),
                                   "feed_items": store.feed_items(uid)})
 
     async def create(request, user):
         fields = await body(request)
-        if fields.keys() - {"title", "notes", "due_at"}:
+        if fields.keys() - {"title", "notes", "due_at", "project_id"}:
             raise ValueError("Неизвестное поле задачи.")
         request_key = request.headers.get("Idempotency-Key", "")
         if request_key and not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", request_key):
             raise ValueError("Проверь идентификатор запроса.")
         task = store.create_task(user["id"], fields.get("title"), fields.get("due_at"),
-                                 fields.get("notes", ""), "api:" + request_key if request_key else None)
+                                 fields.get("notes", ""), "api:" + request_key if request_key else None,
+                                 project_id=fields.get("project_id", 0))
         return web.json_response(task, status=201)
 
     async def update(request, user):
@@ -156,8 +159,28 @@ def install_api(app, store, token):
         store.delete_feed(user["id"], int(request.match_info["id"]))
         return web.Response(status=204)
 
+    async def create_project(request, user):
+        fields = await body(request)
+        if fields.keys() - {"name", "context"}:
+            raise ValueError("Неизвестное поле проекта.")
+        uid = user["id"]
+        item = projects.create(store, uid, fields.get("name"), fields.get("context", ""))
+        projects.choose(store, uid, item["id"])
+        return web.json_response(item, status=201)
+
+    async def update_project(request, user):
+        return web.json_response(projects.edit(store, user["id"], int(request.match_info["id"]), await body(request)))
+
+    async def choose_project(request, user):
+        fields = await body(request)
+        if set(fields) != {"project_id"}:
+            raise ValueError("Выбери проект.")
+        return web.json_response(projects.choose(store, user["id"], fields["project_id"]))
+
     routes = [("GET", "/api/state", state), ("POST", "/api/tasks", create),
               ("PATCH", r"/api/tasks/{id:\d{1,18}}", update), ("PATCH", "/api/settings", settings),
+              ("POST", "/api/projects", create_project), ("PATCH", "/api/projects/active", choose_project),
+              ("PATCH", r"/api/projects/{id:\d{1,18}}", update_project),
               ("GET", "/api/calendar.ics", calendar), ("GET", "/api/feeds", list_feeds),
               ("POST", "/api/feeds", add_feed), ("DELETE", r"/api/feeds/{id:\d{1,18}}", remove_feed)]
     for method, path, handler in routes:

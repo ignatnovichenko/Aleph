@@ -1,7 +1,8 @@
 # Aleph
 
-A personal Telegram agent by Lab One. The conversation lives in the bot. The Mini App is a separate plan and settings view, with light and dark themes and Russian and English interfaces.
+A personal Telegram agent by Lab One. The conversation lives in the bot. The Mini App is a separate plan and settings view, with Telegram theme colors, a glass tab bar and Russian and English interfaces. Hermes Agent runs the conversational tool loop.
 
+- Create projects with their own instructions, reference text, conversation history, tasks, schedules and saved facts. The Mini App shows which project is active in chat. Use “создай проект Lab One”, “переключись на проект Lab One” or “выйди из проекта” in chat. You can paste notes or add a text file to the project context in the Mini App. Existing user history and tasks belong to the Personal workspace.
 - Send text, voice, a photo, a PDF or a text document. The model can act on tasks, follow up on a schedule, and send TXT, Markdown, CSV and calendar files back to the chat.
 - Ask it to remember a preference, recall it across conversations, or forget it. A recent conversation window and explicitly saved memories are stored separately.
 - Set a one-off reminder or a recurring routine in plain language. Weather, RSS and agenda routines fetch fresh data when they run. The morning brief appears when there is something to report. Disable proactive briefs or set quiet hours in the Mini App. Explicit one-off reminders follow their requested times.
@@ -20,12 +21,14 @@ Caddy provisions HTTPS. The application registers the Mini App in Telegram’s c
 
 ## Python development
 
-Python 3.12 is supported. Set TELEGRAM_BOT_TOKEN and OPENCODE_API_KEY, or set TELEGRAM_BOT_TOKEN_FILE and OPENCODE_API_KEY_FILE to private files. Configure MINI_APP_URL with a publicly reachable HTTPS URL proxying to the service. An optional MINI_APP_URL_FILE supplies an updated URL on temporary installations.
+The Telegram server runs on Python 3.12. Hermes runs in a separate Python 3.14 environment. Install uv and run `deploy/install-hermes.sh` once, then start the server. Set ALEPH_HERMES_PYTHON if you installed Hermes to another directory. Set TELEGRAM_BOT_TOKEN and OPENCODE_API_KEY, or set TELEGRAM_BOT_TOKEN_FILE and OPENCODE_API_KEY_FILE to private files. Configure MINI_APP_URL with a publicly reachable HTTPS URL proxying to the service. An optional MINI_APP_URL_FILE supplies an updated URL on temporary installations.
 
     python -m venv .venv
     . .venv/bin/activate
     pip install -r requirements-voice.txt
     python -m aleph
+
+Hermes is pinned to upstream v0.23.2. Each turn runs with a private temporary Hermes home. It receives just the selected project history and an authenticated loopback connection to the Aleph tool and provider broker. Aleph owns the SQLite checkpoints and model credentials. `ALEPH_ENGINE=direct` selects the previous engine for operator rollback.
 
 The server listens on 127.0.0.1:8787 by default. Set BIND and PORT to change this. ALEPH_DB selects the SQLite file. WHISPER_PYTHON may point to a separate interpreter with faster-whisper installed. The model client uses OpenCode Go, requests high reasoning effort, and supplies a stable, opaque session identifier per conversation. The default model is deepseek-v4.1-flash. Set OPENCODE_MODEL and optionally OPENCODE_VISION_MODEL to compatible models available under your account’s regional settings. The Cloud instance keeps DeepSeek as its first choice and uses OPENCODE_FALLBACK_MODEL=gpt-6-luna when the provider rejects DeepSeek for this account’s region. It retries the primary model after 30 minutes.
 

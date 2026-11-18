@@ -4,4 +4,6 @@
 !web/
 !web/**
 !requirements*.txt
+!deploy/
+!deploy/install-hermes.sh
 **/__pycache__/

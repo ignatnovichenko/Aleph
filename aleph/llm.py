@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 import aiohttp
 
 from .feeds import feed_catalog
-from . import memory
+from . import memory, projects
 from .documents import DOCUMENT_TOOL, render_document
 
 BASE_URL = "https://opencode.ai/zen/go/v1"
@@ -40,6 +40,7 @@ TASK_FIELDS = {
 ID = {"type": "integer", "description": "Existing item ID returned by the workspace"}
 TOOLS = [
     DOCUMENT_TOOL,
+    _tool("set_project_context", "Update the active project context only on user request. Provide the complete revised context.", {"text": _string("Complete updated project context")}, ["text"]),
     _tool("create_routine", "Create a recurring local-time delivery explicitly requested by the user.",
           {"title": _string("Concise reminder message or meaningful routine name"),
            "kind": _string("What to deliver", enum=["weather","agenda","news","reminder"]),
@@ -187,7 +188,7 @@ class Aleph:
         return [{"title": p["title"], "url": base + "/wiki/" + quote(p["title"].replace(" ", "_")),
                  "summary": p.get("extract", "")[:1200]} for p in data.get("query", {}).get("pages", [])]
 
-    async def use_tool(self, store, uid, name, args, request_key):
+    async def use_tool(self, store, uid, name, args, request_key, *, project_id=0):
         if not isinstance(args, dict):
             raise ValueError("Tool input must be an object.")
         if name == "create_document":
@@ -206,29 +207,36 @@ class Aleph:
             raise ValueError("Invalid tool arguments.")
         for key, value in args.items():
             valid_type = {"integer": int, "string": str, "boolean": bool}[fields[key]["type"]]
-            if type(value) is not valid_type or (isinstance(value, str) and len(value) > 3000):
+            if type(value) is not valid_type or (isinstance(value, str) and len(value) > (10000 if name == "set_project_context" else 3000)):
                 raise ValueError("Invalid field type or length.")
+        if name == "set_project_context":
+            return projects.edit(store, uid, project_id, {"context": args["text"]})
         if name == "create_routine":
-            return store.create_routine(uid, **args, request_key=request_key)
+            return store.create_routine(uid, **args, request_key=request_key, project_id=project_id)
+        if name in {"set_routine_active", "delete_routine"}:
+            if store.get_routine(uid, args["id"])["project_id"] != project_id:
+                raise KeyError("Расписание не найдено в этом проекте.")
         if name == "set_routine_active":
             return store.set_routine_active(uid, args["id"], args["active"])
         if name == "delete_routine":
             store.delete_routine(uid, args["id"])
             return {"deleted": args["id"]}
         if name == "remember_fact":
-            return memory.remember(store.db, uid, args["text"])
+            return projects.remember(store, uid, project_id, args["text"]) if project_id else memory.remember(store.db, uid, args["text"])
         if name == "forget_fact":
-            return memory.forget(store.db, uid, args["id"])
+            return projects.forget(store, uid, project_id, args["id"]) if project_id else memory.forget(store.db, uid, args["id"])
         if name == "open_plan":
             bridge = bool(os.getenv("MINI_APP_BRIDGE_URL"))
             return {"action": "open_plan", "instruction": "Tap the plan button below the chat" if bridge else "Tap the mini app menu button at the bottom of the chat"}
         if name == "workspace":
-            tasks = store.list_tasks(uid)
+            tasks = store.list_tasks(uid, project_id=project_id)
             return {"tasks": (sorted(tasks, key=lambda t: (t["status"] == "done", t.get("due_at") or "9999"))[:60]),
-                    "settings": store.get_settings(uid), "feeds": store.list_feeds(uid), "available_feeds": feed_catalog(), "routines": store.list_routines(uid)}
+                    "settings": store.get_settings(uid), "feeds": store.list_feeds(uid), "available_feeds": feed_catalog(), "routines": [r for r in store.list_routines(uid) if r["project_id"] == project_id]}
         if name == "create_task":
-            return store.create_task(uid, args["title"], args.get("due_at") or None, args.get("notes", ""), request_key=request_key)
+            return store.create_task(uid, args["title"], args.get("due_at") or None, args.get("notes", ""), request_key=request_key, project_id=project_id)
         if name == "update_task":
+            if store.get_task(uid, args["id"])["project_id"] != project_id:
+                raise KeyError("Задача не найдена в этом проекте.")
             patch = {k: v for k, v in args.items() if k != "id"}
             if patch.get("due_at") == "":
                 patch["due_at"] = None
@@ -246,23 +254,31 @@ class Aleph:
             return await self.weather(**args)
         return await self.reference_search(**args)
 
-    async def respond(self, store, uid, text, photo, ledger, update_id):
+    def turn_context(self, store, uid, text, photo, project_id):
         settings = store.get_settings(uid)
         local_now = datetime.now(timezone.utc).astimezone(ZoneInfo(settings["timezone"]))
         instructions = SYSTEM + f"\nLocal clock now: {local_now.isoformat(timespec='minutes')} ({settings['timezone']})."
+        instructions += ("\nActive project and its user-specified context: " + json.dumps(projects.get(store, uid, project_id), ensure_ascii=False)
+                         if project_id else "\nActive workspace: Personal.")
+        instructions += "\nWork only in the active workspace. Switching projects is done by a separate Telegram message such as «переключись на проект Название» or the Mini App."
         messages = [{"role": "system", "content": instructions}]
-        facts = memory.list_memories(store.db, uid)
+        facts = projects.facts(store, uid, project_id) if project_id else memory.list_memories(store.db, uid)
         messages.append({"role": "user", "content": "[Saved personal context you may use when relevant]\n" + json.dumps(facts, ensure_ascii=False)})
-        messages.extend(store.history(uid, limit=20))
+        messages.extend(store.history(uid, limit=20, project_id=project_id))
         content = text
         if photo:
             content = [{"type": "text", "text": text}, {"type": "image_url", "image_url": {"url": photo}}]
         messages.append({"role": "user", "content": content})
         model = self.vision_model if photo else self.model
+        return messages, model
+
+    async def respond(self, store, uid, text, photo, ledger, update_id):
+        project_id = ledger.bind_project(update_id, uid)
+        messages, model = self.turn_context(store, uid, text, photo, project_id)
         for step in range(6):
             reply = ledger.get_step(update_id, step)
             if reply is None:
-                reply = await self.completion(messages, model, tools=step < 5, session_id=f"aleph-chat-{uid}")
+                reply = await self.completion(messages, model, tools=step < 5, session_id=f"aleph-chat-{uid}-{project_id}")
                 ledger.save_step(update_id, step, reply)
             calls = reply.get("tool_calls") or []
             if not calls:
@@ -274,31 +290,36 @@ class Aleph:
                 return "Поручение получилось слишком большим. Можешь разделить его на две части?"
             messages.append(reply)
             for n, call in enumerate(calls):
-                tool_name = call.get("function", {}).get("name", "")
-                key = f"tg:{update_id}:{step}:{n}"
-                result = ledger.get_tool(key)
-                if result is None:
-                    local = tool_name not in {"reference_search", "weather"}
-                    if local:
-                        store.db.execute("SAVEPOINT chat_action")
-                    try:
-                        try:
-                            args = json.loads(call["function"]["arguments"])
-                            result = await self.use_tool(store, uid, tool_name, args, key)
-                        except (KeyError, ValueError, TypeError) as exc:
-                            if local:
-                                store.db.execute("ROLLBACK TO chat_action")
-                            result = {"error": str(exc)[:220]}
-                        except (aiohttp.ClientError, TimeoutError):
-                            result = {"error": "Source temporarily unavailable."}
-                        ledger.save_tool(key, update_id, result)
-                    except BaseException:
-                        if local:
-                            store.db.execute("ROLLBACK TO chat_action")
-                        raise
-                    finally:
-                        if local:
-                            store.db.execute("RELEASE chat_action")
+                result = await self.call_tool(store, uid, ledger, update_id, step, n, call, project_id=project_id)
                 messages.append({"role": "tool", "tool_call_id": call["id"], "content":
                     json.dumps(result, ensure_ascii=False, default=str)[:26000]})
         raise ModelUnavailable()
+
+
+    async def call_tool(self, store, uid, ledger, update_id, step, n, call, *, project_id=0):
+        tool_name = call.get("function", {}).get("name", "")
+        key = f"tg:{update_id}:{step}:{n}"
+        result = ledger.get_tool(key)
+        if result is None:
+            local = tool_name not in {"reference_search", "weather"}
+            if local:
+                store.db.execute("SAVEPOINT chat_action")
+            try:
+                try:
+                    args = json.loads(call["function"]["arguments"])
+                    result = await self.use_tool(store, uid, tool_name, args, key, project_id=project_id)
+                except (KeyError, ValueError, TypeError) as exc:
+                    if local:
+                        store.db.execute("ROLLBACK TO chat_action")
+                    result = {"error": str(exc)[:220]}
+                except (aiohttp.ClientError, TimeoutError):
+                    result = {"error": "Source temporarily unavailable."}
+                ledger.save_tool(key, update_id, result)
+            except BaseException:
+                if local:
+                    store.db.execute("ROLLBACK TO chat_action")
+                raise
+            finally:
+                if local:
+                    store.db.execute("RELEASE chat_action")
+        return result

@@ -63,6 +63,27 @@ class BackendAPI(unittest.IsolatedAsyncioTestCase):
         added = await (await self.client.post("/api/feeds", headers=headers, json={"url":next(iter(CATALOG))})).json()
         self.assertEqual((await self.client.delete(f"/api/feeds/{added['id']}", headers=self.headers(2))).status, 404)
 
+    async def test_project_routes_and_ownership(self):
+        owner, stranger = self.headers(1), self.headers(2)
+        created = await self.client.post("/api/projects", headers=owner,
+                                         json={"name": "Lab One", "context": "Редактируем отчёт."})
+        self.assertEqual(created.status, 201)
+        project_id = (await created.json())["id"]
+        state = await (await self.client.get("/api/state", headers=owner)).json()
+        self.assertEqual(state["active_project_id"], project_id)
+        self.assertEqual(state["projects"][0]["context"], "Редактируем отчёт.")
+        self.assertEqual((await self.client.patch("/api/projects/active", headers=stranger,
+                                                 json={"project_id": project_id})).status, 404)
+        self.assertEqual((await self.client.patch(f"/api/projects/{project_id}", headers=stranger,
+                                                 json={"context":"Перезапись"})).status, 404)
+        self.assertEqual((await self.client.post("/api/tasks", headers=stranger,
+                                                json={"title": "Чужая задача", "project_id": project_id})).status, 404)
+        self.assertEqual((await self.client.post("/api/tasks", headers=owner,
+                                                json={"title": "Сверить отчёт", "project_id": project_id})).status, 201)
+        state = await (await self.client.get("/api/state", headers=stranger)).json()
+        self.assertEqual(state["projects"], [])
+        self.assertEqual(state["tasks"], [])
+
     async def test_reject_invalid_signed_requests(self):
         for value in [auth(at=int(time.time())-90000), auth(at=int(time.time())+900),
                       auth() + "&user=another", auth().replace("user=", "fake=")]:

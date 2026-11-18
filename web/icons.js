@@ -1,9 +1,9 @@
 const paths = {
-  home: '<rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/>',
-  tasks:
-    '<rect x="4" y="4" width="16" height="16" rx="4"/><path d="m8 12 3 3 5-6"/>',
-  settings:
-    '<path d="M3 6h4m6 0h8M3 12h10m6 0h2M3 18h2m6 0h10"/><circle cx="10" cy="6" r="3"/><circle cx="16" cy="12" r="3"/><circle cx="8" cy="18" r="3"/>',
+  home: '<rect x="4.5" y="5" width="15" height="16" rx="3"/><path d="M8 3v4m8-4v4M4.5 10h15m-12 5 2.5 2.5 4.5-4.5"/>',
+  projects: '<path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/><path d="M3 10h18"/>',
+  settings: '<circle cx="12" cy="12" r="2.7"/><path d="M10 3.7h4l.6 2.2 1.5.9 2.2-.6 2 3.4-1.6 1.5v1.8l1.6 1.5-2 3.4-2.2-.6-1.5.9-.6 2.2h-4l-.6-2.2-1.5-.9-2.2.6-2-3.4 1.6-1.5v-1.8L3.7 9.6l2-3.4 2.2.6 1.5-.9z"/>',
+  person: '<circle cx="12" cy="8" r="3.3"/><path d="M5.5 20v-1.5a5 5 0 0 1 5-5h3a5 5 0 0 1 5 5V20"/>',
+  edit: '<path d="m14.5 6 3.5 3.5M5 19l3.6-.7L19 8A2.5 2.5 0 1 0 15.5 4.5L5.8 14.8z"/>',
   arrow: '<path d="m9 5 7 7-7 7"/>',
   right: '<path d="M4 12h15m-6-6 6 6-6 6"/>',
   up: '<path d="M6 18 18 6M7 6h11v11"/>',

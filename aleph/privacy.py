@@ -13,8 +13,8 @@ def privacy_reply(store, uid, text, update_id):
     db.execute("CREATE TABLE IF NOT EXISTS erasure_requests (user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE, expires INTEGER NOT NULL)")
     if request:
         db.execute("INSERT OR REPLACE INTO erasure_requests VALUES(?,?)", (uid, int(time.time()) + 600))
-        return ("Удалить план, расписания, память и историю Алефа? Если да, в течение 10 минут отправь «удалить мои данные навсегда»."
-                if ru else "Erase your Aleph plan, routines, memory and history? To confirm, send “permanently delete my data” within 10 minutes.")
+        return ("Удалить проекты, план, расписания, память и историю Алефа? Если да, в течение 10 минут отправь «удалить мои данные навсегда»."
+                if ru else "Erase your Aleph projects, plan, routines, memory and history? To confirm, send “permanently delete my data” within 10 minutes.")
     row = db.execute("SELECT expires FROM erasure_requests WHERE user_id=?", (uid,)).fetchone()
     if not row or row[0] < time.time():
         return ("Сначала напиши «удали мои данные»." if ru else "First send “delete my data”.")

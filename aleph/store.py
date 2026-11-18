@@ -7,6 +7,7 @@ import sqlite3
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .feeds import CATALOG
+from . import projects
 from .routines import day_names
 
 UTC = timezone.utc
@@ -101,6 +102,8 @@ class Store:
         if "routine_id" not in {row["name"] for row in self.db.execute("PRAGMA table_info(deliveries)")}:
             self.db.execute("ALTER TABLE deliveries ADD COLUMN routine_id INTEGER REFERENCES routines(id)")
 
+        projects.initialize(self.db)
+
     def close(self):
         self.db.close()
 
@@ -150,21 +153,26 @@ class Store:
         self.db.execute(f"UPDATE users SET {sql} WHERE id=?", (*fields.values(), uid))
         return self.get_settings(uid)
 
-    def list_tasks(self, uid, include_done=True):
+    def list_tasks(self, uid, include_done=True, *, project_id=None):
         condition = "" if include_done else " AND status='open'"
-        rows = self.db.execute("""SELECT id,title,notes,due_at,status,created_at,updated_at
+        args = (uid,)
+        if project_id is not None:
+            condition += " AND project_id=?"
+            args += (project_id,)
+        rows = self.db.execute("""SELECT id,title,notes,due_at,status,created_at,updated_at,project_id
             FROM tasks WHERE user_id=?""" + condition + """
-            ORDER BY status='done', due_at IS NULL, due_at, id DESC""", (uid,))
+            ORDER BY status='done', due_at IS NULL, due_at, id DESC""", args)
         return [dict(row) for row in rows]
 
     def get_task(self, uid, task_id):
-        row = self.db.execute("""SELECT id,title,notes,due_at,status,created_at,updated_at
+        row = self.db.execute("""SELECT id,title,notes,due_at,status,created_at,updated_at,project_id
             FROM tasks WHERE user_id=? AND id=?""", (uid, task_id)).fetchone()
         if row is None:
             raise KeyError("Задача не найдена.")
         return dict(row)
 
-    def create_task(self, uid, title, due_at=None, notes="", request_key=None):
+    def create_task(self, uid, title, due_at=None, notes="", request_key=None, *, project_id=0):
+        projects.get(self, uid, project_id)
         title = bounded_text(title, 300, required=True)
         notes = bounded_text(notes, 4000)
         due_at = parse_due(due_at, self.get_settings(uid)["timezone"])
@@ -175,9 +183,9 @@ class Store:
                 return self.get_task(uid, row["id"])
         if self.db.execute("SELECT COUNT(*) FROM tasks WHERE user_id=? AND status='open'", (uid,)).fetchone()[0] >= 500:
             raise ValueError("Достигнут лимит в 500 открытых задач.")
-        self.db.execute("""INSERT INTO tasks(user_id,title,notes,due_at,created_at,updated_at,request_key)
-            VALUES(?,?,?,?,?,?,?) ON CONFLICT(user_id,request_key) DO NOTHING""",
-            (uid, title, notes, due_at, now, now, request_key))
+        self.db.execute("""INSERT INTO tasks(user_id,title,notes,due_at,created_at,updated_at,request_key,project_id)
+            VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(user_id,request_key) DO NOTHING""",
+            (uid, title, notes, due_at, now, now, request_key, project_id))
         if request_key:
             task_id = self.db.execute("SELECT id FROM tasks WHERE user_id=? AND request_key=?", (uid, request_key)).fetchone()[0]
         else:
@@ -203,18 +211,19 @@ class Store:
         return self.get_task(uid, task_id)
 
     def list_routines(self, uid):
-        rows = self.db.execute("""SELECT id,title,kind,time,days,city,country_code,active FROM routines
+        rows = self.db.execute("""SELECT id,title,kind,time,days,city,country_code,active,project_id FROM routines
             WHERE user_id=? AND deleted=0 ORDER BY time,id""", (uid,))
         return [{**dict(row), "active":bool(row["active"])} for row in rows]
 
     def get_routine(self, uid, routine_id):
-        row = self.db.execute("""SELECT id,title,kind,time,days,city,country_code,active FROM routines
+        row = self.db.execute("""SELECT id,title,kind,time,days,city,country_code,active,project_id FROM routines
             WHERE id=? AND user_id=? AND deleted=0""", (routine_id,uid)).fetchone()
         if not row:
             raise KeyError("Расписание не найдено.")
         return {**dict(row), "active":bool(row["active"])}
 
-    def create_routine(self, uid, title, kind, time, days="daily", city="", country_code="", request_key=None):
+    def create_routine(self, uid, title, kind, time, days="daily", city="", country_code="", request_key=None, *, project_id=0):
+        projects.get(self, uid, project_id)
         title = bounded_text(title,300,required=True)
         if kind not in ("weather","agenda","news","reminder"):
             raise ValueError("Выбери прогноз погоды, план, новости или напоминание.")
@@ -230,9 +239,9 @@ class Store:
                 return self.get_routine(uid,existing["id"])
         if len(self.list_routines(uid)) >= 25:
             raise ValueError("Достигнут лимит в 25 расписаний.")
-        self.db.execute("""INSERT INTO routines(user_id,title,kind,time,days,city,country_code,active_since,request_key)
-            VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id,request_key) DO NOTHING""",
-            (uid,title,kind,time,days,city,country_code.upper(),timestamp(),request_key))
+        self.db.execute("""INSERT INTO routines(user_id,title,kind,time,days,city,country_code,active_since,request_key,project_id)
+            VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id,request_key) DO NOTHING""",
+            (uid,title,kind,time,days,city,country_code.upper(),timestamp(),request_key,project_id))
         if request_key:
             rid = self.db.execute("SELECT id FROM routines WHERE user_id=? AND request_key=?", (uid,request_key)).fetchone()[0]
         else:
@@ -272,16 +281,16 @@ class Store:
             results.append({"title": row["title"], "url": row["url"], "items": json.loads(row["items"]), "refreshed_at":row["refreshed_at"]})
         return results
 
-    def history(self, uid, limit=16):
-        rows = self.db.execute("SELECT role,content FROM history WHERE user_id=? ORDER BY id DESC LIMIT ?", (uid, limit))
+    def history(self, uid, limit=16, *, project_id=0):
+        rows = self.db.execute("SELECT role,content FROM history WHERE user_id=? AND project_id=? ORDER BY id DESC LIMIT ?", (uid, project_id, limit))
         return list(reversed([dict(row) for row in rows]))
 
-    def add_history(self, uid, role, content):
+    def add_history(self, uid, role, content, *, project_id=0):
         if role not in ("user", "assistant"):
             raise ValueError("Invalid history role")
-        self.db.execute("INSERT INTO history(user_id,role,content) VALUES(?,?,?)", (uid, role, content[:18000]))
-        self.db.execute("""DELETE FROM history WHERE user_id=? AND id < (SELECT id FROM history
-            WHERE user_id=? ORDER BY id DESC LIMIT 1 OFFSET 79)""", (uid, uid))
+        self.db.execute("INSERT INTO history(user_id,role,content,project_id) VALUES(?,?,?,?)", (uid, role, content[:18000], project_id))
+        self.db.execute("""DELETE FROM history WHERE user_id=? AND project_id=? AND id < (SELECT id FROM history
+            WHERE user_id=? AND project_id=? ORDER BY id DESC LIMIT 1 OFFSET 79)""", (uid, project_id, uid, project_id))
 
     def get_offset(self):
         row = self.db.execute("SELECT value FROM runtime_state WHERE key='telegram_offset'").fetchone()

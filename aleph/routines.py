@@ -125,7 +125,7 @@ async def format_routine(store, routine, now, weather):
     tz = ZoneInfo(routine["timezone"])
     today = now.astimezone(tz).date()
     result = []
-    for task in store.list_tasks(uid, include_done=False):
+    for task in store.list_tasks(uid, include_done=False, project_id=routine["project_id"]):
         if task["due_at"]:
             due = datetime.fromisoformat(task["due_at"]).astimezone(tz)
             if due.date() > today:

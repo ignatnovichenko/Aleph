@@ -9,7 +9,9 @@ import time
 
 import aiohttp
 
-from .llm import Aleph, ModelUnavailable
+from .hermes import create_agent
+from . import projects
+from .llm import ModelUnavailable
 from . import media, memory, documents
 
 log = logging.getLogger(__name__)
@@ -97,6 +99,14 @@ class Inbox:
             );
         """)
 
+        if "project_id" not in {r["name"] for r in self.db.execute("PRAGMA table_info(bot_inbox)")}:
+            self.db.execute("ALTER TABLE bot_inbox ADD COLUMN project_id INTEGER")
+
+    def bind_project(self, update_id, uid):
+        self.db.execute("UPDATE bot_inbox SET project_id=? WHERE id=? AND uid=? AND project_id IS NULL",
+                        (projects.active(self.store, uid), update_id, uid))
+        return self.db.execute("SELECT project_id FROM bot_inbox WHERE id=? AND uid=?", (update_id, uid)).fetchone()[0]
+
     def ingest(self, updates):
         if not updates:
             return
@@ -151,8 +161,9 @@ class Inbox:
         try:
             self.db.execute("UPDATE bot_inbox SET reply=?,retries=0 WHERE id=?", (reply, row["id"]))
             if query:
-                self.store.add_history(row["uid"], "user", query)
-                self.store.add_history(row["uid"], "assistant", reply)
+                scope = self.bind_project(row["id"], row["uid"])
+                self.store.add_history(row["uid"], "user", query, project_id=scope)
+                self.store.add_history(row["uid"], "assistant", reply, project_id=scope)
             self.db.execute("COMMIT")
         except BaseException:
             self.db.execute("ROLLBACK")
@@ -176,8 +187,8 @@ class Inbox:
             for i, call in enumerate(json.loads(row["message"]).get("tool_calls") or []):
                 name = call.get("function", {}).get("name")
                 result = self.get_tool(f"tg:{update_id}:{row['step']}:{i}")
-                if name in {"create_task","update_task","change_settings","subscribe_feed","unsubscribe_feed","remember_fact","forget_fact","create_routine","set_routine_active","delete_routine","create_document"} and isinstance(result, dict) and "error" not in result:
-                    results.append(result.get("title") or {"change_settings": "Настройки", "remember_fact": "Память", "forget_fact": "Память", "create_document": "Файл", "delete_routine": "Расписание", "set_routine_active": "Расписание"}.get(name, "Подписка"))
+                if name in {"create_task","update_task","change_settings","subscribe_feed","unsubscribe_feed","remember_fact","forget_fact","create_routine","set_routine_active","delete_routine","create_document","set_project_context"} and isinstance(result, dict) and "error" not in result:
+                    results.append(result.get("title") or {"change_settings": "Настройки", "remember_fact": "Память", "forget_fact": "Память", "create_document": "Файл", "delete_routine": "Расписание", "set_routine_active": "Расписание", "set_project_context": "Контекст проекта"}.get(name, "Подписка"))
         return results
 
 async def _typing(telegram, uid):
@@ -241,6 +252,12 @@ async def _compose(row, store, inbox, tg, agent):
     erasure = privacy_reply(store, uid, msg.get("text") or "", row["id"])
     if erasure:
         return None, erasure
+    try:
+        project_reply = projects.chat_command(store, uid, msg.get("text"), _uses_russian(msg))
+    except (KeyError, ValueError) as error:
+        return None, str(error)
+    if project_reply is not None:
+        return None, project_reply
     web_data = msg.get("web_app_data")
     if web_data:
         if not bridge_url:
@@ -258,6 +275,13 @@ async def _compose(row, store, inbox, tg, agent):
     if command in ("/start", "/help"):
         return None, HELLO_RU if _uses_russian(msg) else HELLO_EN
     query, photo = await _message_text(tg, msg)
+    if "voice" in msg:
+        try:
+            project_reply = projects.chat_command(store, uid, query, _uses_russian(msg))
+        except (KeyError, ValueError) as error:
+            return None, str(error)
+        if project_reply is not None:
+            return None, project_reply
     answer = await agent.respond(store, uid, query, photo, inbox, row["id"])
     historical = ("[Фото] " if photo else "") + query
     return historical, answer
@@ -373,7 +397,9 @@ async def run_bot(store, session, token, model_key):
     inbox = Inbox(store)
     telegram = Telegram(session, token)
     changed = asyncio.Event()
-    worker = asyncio.create_task(_work(store, inbox, telegram, Aleph(session, model_key), changed))
+    agent = create_agent(session, model_key)
+    log.info("Telegram conversation engine: %s", type(agent).__name__)
+    worker = asyncio.create_task(_work(store, inbox, telegram, agent, changed))
     try:
         while True:
             if worker.done():

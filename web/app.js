@@ -31,13 +31,15 @@ const t = (r, en) => (ru ? r : en),
 const webapp = () => window.Telegram?.WebApp;
 const zone = () => state?.settings.timezone || "UTC";
 const byId = (id) => state.tasks.find((x) => String(x.id) === String(id));
+const scopedTasks = () => state.tasks.filter((task) => Number(task.project_id || 0) === activeId());
 const sorted = () =>
-  [...state.tasks].sort(
+  scopedTasks().sort(
     (a, b) =>
       (a.due_at ? Date.parse(a.due_at) : Infinity) -
         (b.due_at ? Date.parse(b.due_at) : Infinity) || b.id - a.id,
   );
-const openTasks = () => sorted().filter((x) => x.status === "open");
+const activeId = () => Number(state.active_project_id || 0);
+const currentProject = () => (state.projects || []).find((item) => item.id === activeId());
 const readableDay = (iso) =>
   new Intl.DateTimeFormat(locale(), {
     timeZone: zone(),
@@ -53,23 +55,36 @@ const clock = (iso) =>
   }).format(new Date(iso));
 const timeLabel = (time) => String(time || "").slice(0, 5);
 const navs = () => [
-  ["home", t("Обзор", "Overview")],
-  ["tasks", t("Поручения", "Tasks")],
+  ["home", t("План", "Plan")],
+  ["projects", t("Проекты", "Projects")],
   ["settings", t("Настройки", "Settings")],
 ];
 const isDark = () =>
-  webapp()?.colorScheme
+  webapp()?.platform && webapp().platform !== "unknown" && webapp().colorScheme
     ? webapp().colorScheme === "dark"
     : matchMedia("(prefers-color-scheme: dark)").matches;
 function setTheme() {
   const dark = isDark();
-  document.documentElement.dataset.theme = dark ? "dark" : "light";
-  document.querySelector("meta[name=theme-color]").content = dark
-    ? "#11161e"
-    : "#f5f6f9";
+  const root = document.documentElement;
+  const tg = webapp();
+  const colors = tg?.platform && tg.platform !== "unknown" ? tg.themeParams || {} : {};
+  const mappings = {
+    "--tg-bg": colors.secondary_bg_color, "--tg-panel": colors.section_bg_color || colors.bg_color,
+    "--tg-text": colors.text_color, "--tg-hint": colors.hint_color, "--tg-accent": colors.accent_text_color || colors.link_color,
+    "--tg-button": colors.button_color, "--tg-button-text": colors.button_text_color,
+    "--tg-border": colors.section_separator_color,
+  };
+  root.dataset.theme = dark ? "dark" : "light";
+  for (const [key, value] of Object.entries(mappings)) {
+    if (/^#[a-fA-F0-9]{6}$/.test(value || "")) root.style.setProperty(key, value);
+    else root.style.removeProperty(key);
+  }
+  const bg = colors.secondary_bg_color || (dark ? "#17212b" : "#f1f2f6");
+  document.querySelector("meta[name=theme-color]").content = bg;
   try {
-    webapp()?.setHeaderColor?.(dark ? "#11161e" : "#f5f6f9");
-    webapp()?.setBackgroundColor?.(dark ? "#11161e" : "#f5f6f9");
+    tg?.setHeaderColor?.(bg);
+    tg?.setBackgroundColor?.(bg);
+    tg?.setBottomBarColor?.(bg);
   } catch {}
 }
 function initTelegram() {
@@ -142,19 +157,10 @@ function errorMessage(error) {
     "Could not complete the request. Check your connection and try again.",
   );
 }
-function brand() {
-  return `<button class="brand" data-page="home" aria-label="${t("Aleph, обзор", "Aleph, overview")}"><img alt="" src="./aleph.svg"><span class="brand-text">Aleph<small class="brand-credit">by Lab One</small></span></button>`;
-}
 function nav() {
-  return navs()
-    .map(
-      ([id, label]) =>
-        `<button class="nav-item ${page === id ? "active" : ""}" data-page="${id}" ${page === id ? 'aria-current="page"' : ""}>${icon(id)}<span>${label}</span></button>`,
-    )
-    .join("");
-}
-function chatButton() {
-  return `<button class="button mobile-chat" data-action="chat">${icon("plane")} ${t("В чат", "Open chat")}</button>`;
+  return navs().map(([id, label]) =>
+    `<button class="nav-item ${page === id ? "active" : ""}" data-page="${id}" ${page === id ? 'aria-current="page"' : ""}>${icon(id)}<span>${label}</span></button>`
+  ).join("");
 }
 function navigate(id) {
   if (!navs().some(([key]) => key === id)) return;
@@ -166,31 +172,31 @@ function navigate(id) {
 function render() {
   if (!state) return;
   const title = navs().find((x) => x[0] === page)[1];
-  const date = new Intl.DateTimeFormat(locale(), {
-    timeZone: zone(),
-    weekday: "long",
-    day: "numeric",
-    month: "long",
-  }).format(new Date());
-  const firstName = String(state.user.first_name || "Telegram");
-  app.innerHTML = `<aside class="sidebar">${brand()}<nav aria-label="${t("Навигация", "Navigation")}" class="nav">${nav()}</nav><div class="sidebar-footer"><span class="identity">${e(firstName.charAt(0))}</span><div class="who">${e(firstName)}<small>${demo ? t("Демо-режим", "Demo mode") : t("Telegram-аккаунт", "Telegram account")}</small></div></div></aside>
-  <main class="workspace"><div class="main-inner"><div class="mobile-brand"><div class="actions">${brand()}${demo ? `<span class="demo-tag">${t("Демо", "Demo")}</span>` : ""}</div>${chatButton()}</div>
-  <header class="page-head"><div><div class="dateline"><i class="date-dot"></i>${e(date)}</div><h1 class="page-title">${title}</h1></div><div class="header-actions">${chatButton()}</div></header>
-  ${page === "home" ? overview() : page === "tasks" ? tasksPage() : settingsPage()}</div></main>
-  <nav aria-label="${t("Навигация", "Navigation")}" class="dock">${nav()}</nav>`;
+  app.innerHTML = `
+    <header class="toolbar">
+      <div class="toolbar-inner">
+        <span class="wordmark"><img src="./aleph.webp" alt="" width="24" height="24">Aleph</span>
+        ${demo ? `<span class="demo-badge">${t("Демо", "Demo")}</span>` : ""}
+        <button class="toolbar-action" data-action="${page === "projects" ? "new-project" : "chat"}">
+          ${page === "projects" ? icon("plus") + t("Новый", "New") : icon("plane") + t("В чат", "Chat")}
+        </button>
+      </div>
+    </header>
+    <main class="workspace">
+      <header class="page-head"><h1 class="page-title">${title}</h1></header>
+      ${page === "home" ? overview() : page === "projects" ? projectsPage() : settingsPage()}
+    </main>
+    <nav aria-label="${t("Навигация", "Navigation")}" class="dock glass">${nav()}</nav>`;
   app.setAttribute("aria-busy", "false");
   syncBack();
 }
 function taskRow(task) {
   const done = task.status === "done",
     late = !done && task.due_at && Date.parse(task.due_at) < Date.now();
-  return `<div class="task-row ${done ? "done" : ""}"><button class="task-toggle" data-action="toggle-task" data-id="${e(task.id)}" aria-label="${e((done ? t("Вернуть в работу", "Reopen") : t("Завершить", "Complete")) + " · " + task.title)}" aria-pressed="${done}"><span class="ring">${done ? icon("check") : ""}</span></button><button class="task-body" data-action="edit-task" data-id="${e(task.id)}"><span class="task-title">${e(task.title)}</span><span class="task-date ${late ? "late" : ""}">${task.due_at ? icon("clock") : ""}${e(due(task.due_at))}</span></button><span class="arrow">${icon("arrow")}</span></div>`;
+  return `<div class="task-row ${done ? "done" : ""}"><button class="task-toggle" data-action="toggle-task" data-id="${e(task.id)}" aria-label="${e((done ? t("Вернуть в работу", "Reopen") : t("Завершить", "Complete")) + " · " + task.title)}" aria-pressed="${done}"><span class="ring">${done ? icon("check") : ""}</span></button><button class="task-body" data-action="edit-task" data-id="${e(task.id)}"><span class="task-title">${e(task.title)}</span>${task.due_at ? `<span class="task-date ${late ? "late" : ""}">${icon("clock")}${e(clock(task.due_at))}</span>` : ""}</button><span class="arrow">${icon("arrow")}</span></div>`;
 }
 function taskEmpty(done = false) {
   return `<div class="empty"><strong>${done ? t("Завершённых поручений пока нет", "No completed tasks yet") : t("Пока всё свободно", "Nothing on the list yet")}</strong><p>${done ? t("Здесь появятся отмеченные галочкой задачи.", "Tasks you check off will appear here.") : t("Напиши Алефу в чате или добавь поручение здесь.", "Message Aleph in chat or add a task here.")}</p></div>`;
-}
-function addLine() {
-  return `<button class="add-line" data-action="new-task">${icon("plus")}${t("Добавить поручение", "Add task")}</button>`;
 }
 function switcher() {
   return `<button class="switch" role="switch" aria-label="${t("Проактивность", "Proactive updates")}" aria-checked="${Boolean(state.settings.proactive)}" data-action="proactive"></button>`;
@@ -205,40 +211,60 @@ function sectionHead(title, action = "", label = "") {
   return `<div class="section-head"><h2>${title}</h2>${action ? `<button class="small-action" data-page="${action}">${label}${icon("right")}</button>` : ""}</div>`;
 }
 function overview() {
-  const tasks = openTasks(),
-    focus = tasks[0];
-  return `<article class="hero"><img class="hero-art" alt="" src="./orbit.webp" fetchpriority="high"><div class="hero-label">${icon("sparkle")}${focus ? t("В фокусе", "In focus") : "ALEPH"}</div><h2>${focus ? e(focus.title) : t("Что у тебя в планах?", "What’s on your mind?")}</h2><p class="hero-meta">${focus ? e(due(focus.due_at)) : t("Расскажи Алефу, о чём нужно позаботиться.", "Tell Aleph what you’d like to get done.")}</p><button class="hero-button" data-action="${focus ? "edit-task" : "chat"}" ${focus ? `data-id="${e(focus.id)}"` : ""}>${focus ? t("Открыть поручение", "View task") : t("Перейти в чат", "Open chat")}${icon("up")}</button></article>
-  <div class="overview-columns"><section>${sectionHead(t("Мои поручения", "My tasks"), "tasks", t("Все", "View all"))}<div class="panel">${tasks.length ? tasks.slice(0, 4).map(taskRow).join("") : taskEmpty()}${addLine()}</div>${snapshotNotice()}</section>
-  <div class="right-side"><section class="right-section">${sectionHead(t("Ритм дня", "Daily rhythm"))}<div class="panel summary-panel"><div class="summary-top">${glyph("activity", "violet")}<div><strong>${t("Проактивность", "Proactive updates")}</strong><small>${state.settings.proactive ? t("Включена", "On") : t("На паузе", "Paused")}</small></div>${switcher()}</div>
-  <div class="stat-line"><span>${icon("sun")}${t("Утренний обзор", "Morning brief")}</span><b>${e(timeLabel(state.settings.digest_time))}</b></div><div class="stat-line"><span>${icon("moon")}${t("Тихие часы", "Quiet hours")}</span><b>${e(timeLabel(state.settings.quiet_start))} – ${e(timeLabel(state.settings.quiet_end))}</b></div></div></section>
-  <section class="right-section">${sectionHead(t("Подключения", "Connections"))}<div class="panel">${integrationRows()}</div></section></div></div>`;
-}
-function snapshotNotice() {
-  if (!bridge() || Number(state.snapshot_total || 0) <= state.tasks.length)
-    return "";
-  return `<p class="snapshot-note">${t("В этом плане показано", "This plan shows")} ${state.tasks.length} ${t("из", "of")} ${Number(state.snapshot_total)} ${t("поручений. Полный список можно получить в чате.", "tasks. Ask in chat for the full list.")}</p>`;
-}
-function tasksPage() {
-  const tasks = sorted(),
-    visible = tasks.filter((x) => x.status === filter),
-    groups = new Map();
-  for (const task of visible) {
-    const key = due(task.due_at, false);
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(task);
+  const current = currentProject();
+  const tasks = sorted();
+  const visible = tasks.filter((item) => item.status === filter);
+  const today = due(Date.now(), false);
+  const groups = new Map();
+  for (const item of visible) {
+    const day = due(item.due_at, false);
+    if (!groups.has(day)) groups.set(day, []);
+    groups.get(day).push(item);
   }
-  return `<div class="task-tools"><div class="segmented" aria-label="${t("Статус поручений", "Task status")}">${[
-    ["open", t("В работе", "Open")],
-    ["done", t("Готово", "Done")],
-  ]
-    .map(
-      ([key, name]) =>
-        `<button aria-pressed="${filter === key}" data-filter="${key}" class="segment ${filter === key ? "active" : ""}">${name}<small>${tasks.filter((x) => x.status === key).length}</small></button>`,
-    )
-    .join(
-      "",
-    )}</div><button class="button" data-action="new-task">${icon("plus")}${t("Добавить", "Add task")}</button></div>
-  ${visible.length ? [...groups].map(([k, list]) => `<section class="task-group"><h2 class="group-label">${e(k)}</h2><div class="panel">${list.map(taskRow).join("")}</div></section>`).join("") : `<div class="panel">${taskEmpty(filter === "done")}</div>`}${snapshotNotice()}`;
+  const filters = [["open", t("В работе", "Open")], ["done", t("Готово", "Done")]];
+  return `<button class="context-row panel" data-page="projects">${glyph(current ? "projects" : "person", "blue")}<span class="context-copy">
+      <small>${t("Контекст в чате", "Active in chat")}</small><strong>${e(current?.name || t("Личное", "Personal"))}</strong></span>${icon("arrow")}</button>
+    <div class="task-tools">
+      <div class="segmented" aria-label="${t("Статус поручений", "Task status")}">${filters.map(([key, label]) =>
+        `<button aria-pressed="${filter === key}" data-filter="${key}" class="segment ${filter === key ? "active" : ""}">${label}<small>${tasks.filter((x) => x.status === key).length}</small></button>`).join("")}</div>
+      <button class="action-plus glass" aria-label="${t("Добавить поручение", "Add task")}" data-action="new-task">${icon("plus")}</button>
+    </div>
+    ${groups.size ? [...groups].map(([day, items]) => `<section class="task-group"><h2 class="group-label ${day === today ? "today" : ""}">${e(day)}</h2><div class="panel">${items.map(taskRow).join("")}</div></section>`).join("")
+      : `<div class="panel">${taskEmpty(filter === "done")}</div>`}
+    ${bridge() && Number(state.snapshot_total || 0) > tasks.length ? `<p class="settings-note">${t("Полный список доступен в чате.", "See the complete list in chat.")}</p>` : ""}
+    <section class="brief-section">${sectionHead(t("Уведомления", "Notifications"))}
+      <div class="panel"><button class="integration-row" data-page="settings">${glyph("bell", "green")}<span><span class="integration-label">${t("Утренний обзор", "Morning brief")}</span><small class="integration-info">${state.settings.proactive ? e(timeLabel(state.settings.digest_time)) + " · " + t("В чате с Алефом", "In Aleph chat") : t("На паузе", "Paused")}</small></span><span class="tail">${icon("arrow")}</span></button></div>
+    </section>`;
+}
+function projectsPage() {
+  const projects = state.projects || [];
+  const current = currentProject();
+  if (bridge()) return `<div class="panel">${taskEmpty()}</div><button class="button" data-action="chat">${t("Управлять проектами в чате", "Manage projects in chat")}</button>`;
+  const workspaces = [{ id: 0, name: t("Личное", "Personal"), open_tasks: state.tasks.filter(x => !x.project_id && x.status === "open").length }, ...projects];
+  return `<p class="page-intro">${t("Выбранный проект задаёт контекст разговора с Алефом.", "Your selected project sets the context for your conversation with Aleph.")}</p>
+    <div class="panel workspace-list">${workspaces.map((item) => {
+      const selected = item.id === activeId();
+      return `<button class="project-row" data-action="choose-project" data-id="${item.id}" ${selected ? 'aria-current="true"' : ""}>
+        ${glyph(item.id ? "projects" : "person", item.id ? "violet" : "blue")}
+        <span class="setting-copy"><strong>${e(item.name)}</strong><small>${selected ? t("Активен в чате", "Active in chat") : item.open_tasks ? t("В работе", "Open") + " · " + Number(item.open_tasks) : t("Нет открытых поручений", "No open tasks")}</small></span>
+        <span class="tail ${selected ? "selected" : ""}">${icon(selected ? "check" : "arrow")}</span>
+      </button>`;
+    }).join("")}</div>
+    ${current ? `<section class="project-context">${sectionHead(t("Контекст проекта", "Project context"))}
+      <div class="panel">
+        <p class="context-text" dir="auto">${current.context ? e(current.context) : t("Добавь цели, материалы и то, что Алефу важно учитывать.", "Add goals, reference material and anything Aleph should keep in mind.")}</p>
+        <button class="add-line" data-action="edit-project" data-id="${current.id}">${icon("edit")}${t("Редактировать контекст", "Edit context")}</button>
+      </div><button class="button project-chat" data-action="chat">${icon("plane")}${t("Продолжить в чате", "Continue in chat")}</button></section>`
+    : `<button class="button project-chat" data-action="new-project">${icon("plus")}${t("Создать проект", "Create project")}</button>`}`;
+}
+function projectSheet(item) {
+  openSheet("project", item ? t("О проекте", "About the project") : t("Новый проект", "New project"),
+    `<form id="project-form" data-id="${e(item?.id || "")}">
+      <label class="field">${t("Название", "Name")}<input name="name" maxlength="64" required value="${e(item?.name || "")}" dir="auto" placeholder="${t("Например, Lab One", "For example, Lab One")}"></label>
+      <label class="field">${t("Контекст", "Context")}<textarea name="context" maxlength="10000" rows="6" dir="auto" placeholder="${t("Цели проекта, важные детали, ссылки…", "Goals, important details, links…")}">${e(item?.context || "")}</textarea></label>
+      <label class="file-label">${icon("plus")}${t("Добавить текстовый файл", "Add a text file")}<input type="file" accept=".txt,.md,.csv,.json,.tsv" name="reference"></label>
+      ${submit(item ? saveLabel() : t("Создать и открыть", "Create and open"))}
+    </form>`);
 }
 function routinesPanel() {
   const items = state.routines || [];
@@ -278,7 +304,7 @@ function settingsPage() {
 function openSheet(type, title, html) {
   returnFocus = document.activeElement;
   modal = type;
-  sheet.innerHTML = `<div class="sheet-body"><div class="sheet-head"><h2 id="sheet-heading">${title}</h2><button class="icon-button" aria-label="${t("Закрыть", "Close")}" data-action="close">${icon("close")}</button></div>${html}</div>`;
+  sheet.innerHTML = `<div class="sheet-body"><div class="sheet-grab" aria-hidden="true"></div><div class="sheet-head"><h2 id="sheet-heading">${title}</h2><button class="icon-button" aria-label="${t("Закрыть", "Close")}" data-action="close">${icon("close")}</button></div>${html}</div>`;
   sheet.setAttribute("aria-labelledby", "sheet-heading");
   if (!sheet.open) sheet.showModal();
   syncBack();
@@ -373,7 +399,7 @@ async function write(path, method, body, updateDemo, success) {
   pending = true;
   revision++;
   sheet
-    .querySelectorAll("button,input,select")
+    .querySelectorAll("button,input,select,textarea")
     .forEach((x) => (x.disabled = true));
   try {
     if (demo) {
@@ -397,7 +423,7 @@ async function write(path, method, body, updateDemo, success) {
   } finally {
     pending = false;
     sheet
-      .querySelectorAll("button,input,select")
+      .querySelectorAll("button,input,select,textarea")
       .forEach((x) => (x.disabled = false));
   }
 }
@@ -448,6 +474,22 @@ async function act(action, id) {
     case "chat":
       openChat();
       break;
+    case "new-project":
+      if (bridge()) openChat();
+      else projectSheet();
+      break;
+    case "edit-project":
+      if (bridge()) openChat();
+      else projectSheet((state.projects || []).find((p) => String(p.id) === String(id)));
+      break;
+    case "choose-project": {
+      const project_id = Number(id);
+      if (project_id === activeId()) break;
+      await write("/api/projects/active", "PATCH", {project_id},
+        () => (state.active_project_id = project_id),
+        t("Контекст в чате обновлён", "Chat context updated"));
+      break;
+    }
     case "new-task":
       taskSheet();
       break;
@@ -568,7 +610,21 @@ sheet.addEventListener("submit", async (event) => {
     data = Object.fromEntries(new FormData(form));
   let ok = false;
   try {
-    if (form.id === "task-form") {
+    if (form.id === "project-form") {
+      const name = data.name.trim();
+      if (!name) { form.elements.name.value = ""; form.elements.name.reportValidity(); return; }
+      const context = data.context.trim();
+      const id = Number(form.dataset.id);
+      ok = await write("/api/projects" + (id ? "/" + id : ""), id ? "PATCH" : "POST", {name, context}, () => {
+        state.projects ||= [];
+        if (id) Object.assign(state.projects.find((item) => item.id === id), {name, context});
+        else {
+          const newId = Date.now();
+          state.projects.unshift({id: newId, name, context, open_tasks: 0});
+          state.active_project_id = newId;
+        }
+      }, id ? t("Контекст сохранён", "Context saved") : t("Проект создан", "Project created"));
+    } else if (form.id === "task-form") {
       const title = data.title.trim();
       if (!title) {
         const input = form.elements.title;
@@ -581,12 +637,13 @@ sheet.addEventListener("submit", async (event) => {
       ok = await write(
         "/api/tasks" + (id ? "/" + id : ""),
         id ? "PATCH" : "POST",
-        body,
+        id ? body : {...body, project_id: activeId()},
         () => {
           if (id) Object.assign(byId(id), body);
           else
             state.tasks.push({
               ...body,
+              project_id: activeId(),
               id: Math.max(0, ...state.tasks.map((x) => Number(x.id))) + 1,
               status: "open",
               notes: "",
@@ -624,6 +681,23 @@ sheet.addEventListener("submit", async (event) => {
     if (node) node.textContent = errorMessage(error);
   }
 });
+sheet.addEventListener("change", async (event) => {
+  const picker = event.target;
+  if (picker.name !== "reference" || !picker.files?.[0]) return;
+  const note = picker.form.elements.context;
+  const file = picker.files[0];
+  const error = picker.form.querySelector(".form-error");
+  error.textContent = "";
+  try {
+    if (file.size > 40000) throw new Error();
+    const text = await file.text();
+    const combined = [note.value.trim(), file.name + "\n" + text.trim()].filter(Boolean).join("\n\n");
+    if (combined.length > 10000 || text.includes("\u0000")) throw new Error();
+    note.value = combined;
+  } catch {
+    error.textContent = t("Контекст должен быть текстом до 10 000 символов. Выбери файл поменьше.", "Use a text file that keeps the context under 10,000 characters.");
+  } finally { picker.value = ""; }
+});
 let loading = false;
 async function start() {
   if (loading) return;
@@ -636,7 +710,7 @@ async function start() {
     await load();
   } catch (error) {
     app.setAttribute("aria-busy", "false");
-    app.innerHTML = `<main class="failure"><img src="./aleph.svg" width="45" alt=""><h1>Aleph</h1><p>${e(errorMessage(error))}</p><div class="actions"><button class="button" data-action="retry">${t("Повторить", "Try again")}</button><button class="button primary" data-action="chat">${t("В чат", "Open chat")}</button></div></main>`;
+    app.innerHTML = `<main class="failure"><img src="./aleph.webp" width="45" alt=""><h1>Aleph</h1><p>${e(errorMessage(error))}</p><div class="actions"><button class="button" data-action="retry">${t("Повторить", "Try again")}</button><button class="button primary" data-action="chat">${t("В чат", "Open chat")}</button></div></main>`;
   } finally {
     loading = false;
   }
