@@ -14,7 +14,7 @@ export const catalog = [
     url: "https://feeds.bbci.co.uk/russian/rss.xml",
   },
 ];
-export async function request(path, method = "GET", body) {
+export async function request(path, method = "GET", body, {requestKey} = {}) {
   if (bridge()) return window.AlephBridge.request(path, { method, body });
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 18000);
@@ -26,6 +26,7 @@ export async function request(path, method = "GET", body) {
       cache: "no-store",
       headers: {
         Authorization: "tma " + signed(),
+        ...(requestKey ? {"Idempotency-Key":requestKey} : {}),
         ...(body ? { "Content-Type": "application/json" } : {}),
       },
       ...(body ? { body: JSON.stringify(body) } : {}),
@@ -80,6 +81,8 @@ export function demoState(ru) {
       quiet_end: "08:00",
       digest_time: "09:00",
     },
+    active_project_id: 0,
+    projects: [{id:1,name:"Lab One",context:ru ? "Подготовить первый прототип и собрать отзывы команды." : "Prepare the first prototype and gather feedback from the team."}],
     tasks: texts.map((title, i) => ({
       id: i + 1,
       title,

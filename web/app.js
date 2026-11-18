@@ -86,7 +86,7 @@ function initTelegram() {
   tg.onEvent?.("themeChanged", setTheme);
   tg.BackButton?.onClick(() => {
     if (sheet.open) {
-      sheet.close();
+      if (!pending) closeSheet();
     } else navigate("home");
   });
   syncBack();
@@ -151,41 +151,101 @@ function nav() {
     `<button class="nav-item ${page === id ? "active" : ""}" data-page="${id}" ${page === id ? 'aria-current="page"' : ""}>${icon(id)}<span>${label}</span></button>`
   ).join("");
 }
+const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+const scrollByPage = new Map();
+let workspace, pageContent, dock, toolbarAction, mountedPage, lastContent, refreshRunning = false;
+let closeTimer, closeListener, focusTarget, sheetDrag;
+
+function selectionFeedback() {
+  if (!demo && !reducedMotion.matches && webapp()?.isVersionAtLeast?.("6.1")) {
+    try { webapp().HapticFeedback?.selectionChanged(); } catch {}
+  }
+}
+
 function navigate(id) {
   if (!navs().some(([key]) => key === id)) return;
+  if (page === id) {
+    window.scrollTo({top: 0, behavior: reducedMotion.matches ? "auto" : "smooth"});
+    return;
+  }
+  scrollByPage.set(page, window.scrollY);
   page = id;
+  selectionFeedback();
   render();
-  window.scrollTo({ top: 0, behavior: "instant" });
-  syncBack();
+  window.scrollTo({top: scrollByPage.get(id) || 0, behavior: "instant"});
 }
+
+function mountShell() {
+  app.innerHTML = `
+    <header class="toolbar"><div class="toolbar-inner">
+      <span class="wordmark"><img src="./aleph.webp" alt="" width="29" height="29"><span>Aleph</span><small>LAB ONE</small></span>
+      ${demo ? `<span class="demo-badge">${t("Демо", "Demo")}</span>` : ""}
+      <button class="toolbar-action"></button>
+    </div></header>
+    <main class="workspace" id="view"><header class="page-head"><div><h1 class="page-title" tabindex="-1"></h1><p class="page-kicker" hidden></p></div></header><div class="page-content"></div></main>
+    <nav aria-label="${t("Навигация", "Navigation")}" class="dock glass"><span aria-hidden="true" class="dock-lens"></span>${nav()}</nav>`;
+  workspace = app.querySelector("#view");
+  pageContent = workspace.querySelector(".page-content");
+  dock = app.querySelector(".dock");
+  toolbarAction = app.querySelector(".toolbar-action");
+}
+
+// Keep both the native navigation surface and its lens mounted as content changes.
 function render() {
   if (!state) return;
-  const title = navs().find((x) => x[0] === page)[1];
-  app.innerHTML = `
-    <header class="toolbar">
-      <div class="toolbar-inner">
-        <span class="wordmark"><img src="./aleph.webp" alt="" width="29" height="29"><span>Aleph</span><small>LAB ONE</small></span>
-        ${demo ? `<span class="demo-badge">${t("Демо", "Demo")}</span>` : ""}
-        <button class="toolbar-action" data-action="${page === "projects" ? "new-project" : "chat"}">
-          ${page === "projects" ? icon("plus") + t("Новый", "New") : icon("plane") + t("В чат", "Chat")}
-        </button>
-      </div>
-    </header>
-    <main class="workspace">
-      <header class="page-head"><h1 class="page-title">${title}</h1></header>
-      ${page === "home" ? overview() : page === "projects" ? projectsPage() : settingsPage()}
-    </main>
-    <nav aria-label="${t("Навигация", "Navigation")}" class="dock glass">${nav()}</nav>`;
-  app.setAttribute("aria-busy", "false");
+  if (!workspace?.isConnected) mountShell();
+  const tabs = navs(), index = tabs.findIndex(([key]) => key === page);
+  if (page !== mountedPage) {
+    const previous = tabs.findIndex(([key]) => key === mountedPage);
+    workspace.classList.remove("view-enter-forward","view-enter-backward");
+    if (mountedPage && !reducedMotion.matches) {
+      void workspace.offsetWidth;
+      workspace.classList.add(index > previous ? "view-enter-forward" : "view-enter-backward");
+    }
+    const title = tabs[index][1];
+    workspace.querySelector("h1").textContent = title;
+    document.title = title + " · Aleph";
+    dock.style.setProperty("--tab-index", index);
+    for(const tab of dock.querySelectorAll("[data-page]")){
+      const selected = tab.dataset.page === page;
+      tab.classList.toggle("active",selected);
+      if(selected) tab.setAttribute("aria-current","page");
+      else tab.removeAttribute("aria-current");
+    }
+    const projectAction = page === "projects" && !bridge();
+    toolbarAction.dataset.action = projectAction ? "new-project" : "chat";
+    toolbarAction.innerHTML = projectAction ? icon("plus") + t("Новый","New") : icon("plane") + t("В чат","Chat");
+    mountedPage = page;
+  }
+  const kicker = workspace.querySelector(".page-kicker");
+  kicker.hidden = page !== "home";
+  if (!kicker.hidden) {
+    kicker.textContent = new Intl.DateTimeFormat(locale(), {timeZone:zone(), weekday:"long",day:"numeric",month:"long"}).format(new Date());
+  }
+  const markup = page === "home" ? overview() : page === "projects" ? projectsPage() : settingsPage();
+  if (markup !== lastContent) {
+    const restore = pageContent.contains(document.activeElement) ? controlSelector(document.activeElement) : null;
+    pageContent.innerHTML = markup;
+    lastContent = markup;
+    if(restore) pageContent.querySelector(restore)?.focus({preventScroll:true});
+  }
+  app.setAttribute("aria-busy","false");
   syncBack();
 }
+
+function controlSelector(el){
+  if(!el?.matches("button")) return null;
+  const attrs = ["data-action","data-page","data-filter","data-id"].filter(key=>el.hasAttribute(key));
+  return attrs.length ? "button"+attrs.map(key=>"["+key+'="'+CSS.escape(el.getAttribute(key))+'"]').join("") : null;
+}
+
 function taskRow(task) {
   const done = task.status === "done",
     late = !done && task.due_at && Date.parse(task.due_at) < Date.now();
   return `<div class="task-row ${done ? "done" : ""}"><button class="task-toggle" data-action="toggle-task" data-id="${e(task.id)}" aria-label="${e((done ? t("Вернуть в работу", "Reopen") : t("Завершить", "Complete")) + " · " + task.title)}" aria-pressed="${done}"><span class="ring">${done ? icon("check") : ""}</span></button><button class="task-body" data-action="edit-task" data-id="${e(task.id)}"><span class="task-title">${e(task.title)}</span>${task.due_at ? `<span class="task-date ${late ? "late" : ""}">${icon("clock")}${e(clock(task.due_at))}</span>` : ""}</button><span class="arrow">${icon("arrow")}</span></div>`;
 }
 function taskEmpty(done = false) {
-  return `<div class="empty"><strong>${done ? t("Завершённых поручений пока нет", "No completed tasks yet") : t("Пока всё свободно", "Nothing on the list yet")}</strong><p>${done ? t("Здесь появятся отмеченные галочкой задачи.", "Tasks you check off will appear here.") : t("Напиши Алефу в чате или добавь поручение здесь.", "Message Aleph in chat or add a task here.")}</p></div>`;
+  return `<div class="empty"><span class="empty-symbol" aria-hidden="true">${icon(done ? "check" : "calendar")}</span><strong>${done ? t("Завершённых поручений пока нет", "No completed tasks yet") : t("Пока всё свободно", "Nothing on the list yet")}</strong><p>${done ? t("Здесь появятся отмеченные галочкой задачи.", "Tasks you check off will appear here.") : t("Напиши Алефу в чате или добавь поручение здесь.", "Message Aleph in chat or add a task here.")}</p></div>`;
 }
 function switcher() {
   return `<button class="switch" role="switch" aria-label="${t("Проактивность", "Proactive updates")}" aria-checked="${Boolean(state.settings.proactive)}" data-action="proactive"></button>`;
@@ -218,9 +278,9 @@ function overview() {
         `<button aria-pressed="${filter === key}" data-filter="${key}" class="segment ${filter === key ? "active" : ""}">${label}<small>${tasks.filter((x) => x.status === key).length}</small></button>`).join("")}</div>
       <button class="action-plus glass" aria-label="${t("Добавить поручение", "Add task")}" data-action="new-task">${icon("plus")}</button>
     </div>
-    ${groups.size ? [...groups].map(([day, items]) => `<section class="task-group"><h2 class="group-label ${day === today ? "today" : ""}">${e(day)}</h2><div class="panel">${items.map(taskRow).join("")}</div></section>`).join("")
+    ${groups.size ? `<div class="agenda panel">${[...groups].map(([day,items]) => `<section class="task-group"><h2 class="group-label ${day === today ? "today" : ""}">${e(day)}</h2>${items.map(taskRow).join("")}</section>`).join("")}</div>`
       : `<div class="panel">${taskEmpty(filter === "done")}</div>`}
-    ${bridge() && Number(state.snapshot_total || 0) > tasks.length ? `<p class="settings-note">${t("Полный список доступен в чате.", "See the complete list in chat.")}</p>` : ""}
+    ${bridge() && Number(state.snapshot_total || 0) > state.tasks.length ? `<p class="settings-note">${t("Полный список доступен в чате.", "See the complete list in chat.")}</p>` : ""}
     <section class="brief-section">${sectionHead(t("Уведомления", "Notifications"))}
       <div class="panel"><button class="integration-row" data-page="settings">${glyph("bell", "green")}<span><span class="integration-label">${t("Утренний обзор", "Morning brief")}</span><small class="integration-info">${state.settings.proactive ? e(timeLabel(state.settings.digest_time)) + " · " + t("В чате с Алефом", "In Aleph chat") : t("На паузе", "Paused")}</small></span><span class="tail">${icon("arrow")}</span></button></div>
     </section>`;
@@ -228,14 +288,19 @@ function overview() {
 function projectsPage() {
   const projects = state.projects || [];
   const current = currentProject();
-  if (bridge()) return `<div class="panel">${taskEmpty()}</div><button class="button" data-action="chat">${t("Управлять проектами в чате", "Manage projects in chat")}</button>`;
-  const workspaces = [{ id: 0, name: t("Личное", "Personal"), open_tasks: state.tasks.filter(x => !x.project_id && x.status === "open").length }, ...projects];
+  if (bridge()) return `<div class="panel"><div class="empty"><span class="empty-symbol">${icon("projects")}</span><strong>${t("Проекты в чате","Projects in chat")}</strong><p>${t("Напиши «покажи проекты», чтобы выбрать контекст разговора.","Send “show my projects” to choose a conversation context.")}</p><button class="button" data-action="chat">${t("В чат","Open chat")}</button></div></div>`;
+  const counts = new Map();
+  for (const task of state.tasks) {
+    const id = Number(task.project_id || 0);
+    if (task.status === "open") counts.set(id, (counts.get(id) || 0) + 1);
+  }
+  const workspaces = [{ id:0, name:t("Личное","Personal") }, ...projects];
   return `<p class="page-intro">${t("Выбранный проект задаёт контекст разговора с Алефом.", "Your selected project sets the context for your conversation with Aleph.")}</p>
     <div class="panel workspace-list">${workspaces.map((item) => {
       const selected = item.id === activeId();
       return `<button class="project-row" data-action="choose-project" data-id="${item.id}" ${selected ? 'aria-current="true"' : ""}>
         ${glyph(item.id ? "projects" : "person", item.id ? "violet" : "blue")}
-        <span class="setting-copy"><strong>${e(item.name)}</strong><small>${selected ? `<i class="signal-dot"></i>` + t("Активен в чате", "Active in chat") : item.open_tasks ? t("В работе", "Open") + " · " + Number(item.open_tasks) : t("Нет открытых поручений", "No open tasks")}</small></span>
+        <span class="setting-copy"><strong>${e(item.name)}</strong><small>${selected ? `<i class="signal-dot"></i>` + t("Активен в чате", "Active in chat") : counts.has(item.id) ? t("В работе", "Open") + " · " + counts.get(item.id) : t("Нет открытых поручений", "No open tasks")}</small></span>
         <span class="tail ${selected ? "selected" : ""}">${icon(selected ? "check" : "arrow")}</span>
       </button>`;
     }).join("")}</div>
@@ -244,7 +309,7 @@ function projectsPage() {
         <p class="context-text" dir="auto">${current.context ? e(current.context) : t("Добавь цели, материалы и то, что Алефу важно учитывать.", "Add goals, reference material and anything Aleph should keep in mind.")}</p>
         <button class="add-line" data-action="edit-project" data-id="${current.id}">${icon("edit")}${t("Редактировать контекст", "Edit context")}</button>
       </div><button class="button project-chat" data-action="chat">${icon("plane")}${t("Продолжить в чате", "Continue in chat")}</button></section>`
-    : `<button class="button project-chat" data-action="new-project">${icon("plus")}${t("Создать проект", "Create project")}</button>`}`;
+    : ""}`;
 }
 function projectSheet(item) {
   openSheet("project", item ? t("О проекте", "About the project") : t("Новый проект", "New project"),
@@ -291,13 +356,69 @@ function settingsPage() {
   <section class="settings-block"><h2 class="settings-title">${t("Подключения", "Connections")}</h2><div class="panel">${integrationRows()}</div>${demo ? `<p class="settings-note">${t("Демо-режим. Изменения сохраняются в этом браузере.", "Demo mode. Changes are saved in this browser.")}</p>` : ""}<a class="privacy-link" href="./privacy.html" target="_blank" rel="noopener noreferrer">${t("Конфиденциальность", "Privacy")}</a></section>${routinesPanel()}</div>`;
 }
 function openSheet(type, title, html) {
-  returnFocus = document.activeElement;
+  if (!sheet.open) {
+    returnFocus = document.activeElement;
+    focusTarget = controlSelector(returnFocus);
+  }
+  clearTimeout(closeTimer);
+  if (closeListener) sheet.removeEventListener("animationend",closeListener);
+  sheet.classList.remove("closing");
+  sheet.style.removeProperty("--sheet-release");
   modal = type;
   sheet.innerHTML = `<div class="sheet-body"><div class="sheet-grab" aria-hidden="true"></div><div class="sheet-head"><h2 id="sheet-heading">${title}</h2><button class="icon-button" aria-label="${t("Закрыть", "Close")}" data-action="close">${icon("close")}</button></div>${html}</div>`;
   sheet.setAttribute("aria-labelledby", "sheet-heading");
   if (!sheet.open) sheet.showModal();
   syncBack();
 }
+function closeSheet() {
+  if (!sheet.open || sheet.classList.contains("closing")) return;
+  if (reducedMotion.matches) { sheet.close(); return; }
+  function finish(event) {
+    if (event && (event.target !== sheet || event.pseudoElement)) return;
+    clearTimeout(closeTimer);
+    sheet.removeEventListener("animationend", finish);
+    closeListener = null;
+    sheet.close();
+    sheet.classList.remove("closing");
+    sheet.style.removeProperty("--sheet-release");
+  }
+  closeListener = finish;
+  sheet.classList.add("closing");
+  sheet.addEventListener("animationend", finish);
+  closeTimer=setTimeout(finish,220);
+}
+sheet.addEventListener("cancel", event=>{
+  event.preventDefault();
+  if(!pending) closeSheet();
+});
+sheet.addEventListener("pointerdown", (event) => {
+  if (pending || sheetDrag || sheet.classList.contains("closing") ||
+      !event.isPrimary || event.button !== 0 || !event.target.closest(".sheet-grab")) return;
+  sheetDrag = { id: event.pointerId, start: event.clientY, offset: 0 };
+  sheet.setPointerCapture(event.pointerId);
+  sheet.classList.add("dragging");
+});
+sheet.addEventListener("pointermove", (event) => {
+  if (sheetDrag?.id !== event.pointerId) return;
+  sheetDrag.offset = Math.max(0, event.clientY - sheetDrag.start);
+  sheet.style.transform = `translateY(${sheetDrag.offset}px)`;
+});
+function releaseSheet(event) {
+  if (sheetDrag?.id !== event.pointerId) return;
+  const offset = sheetDrag.offset;
+  sheetDrag = null;
+  sheet.classList.remove("dragging");
+  sheet.style.removeProperty("transform");
+  if (event.type === "pointerup" && offset > 70 && !pending) {
+    sheet.style.setProperty("--sheet-release", `${offset}px`);
+    closeSheet();
+  } else if (offset && !reducedMotion.matches) {
+    sheet.animate([{transform:`translateY(${offset}px)`},{transform:"translateY(0)"}],
+                  {duration:175,easing:"cubic-bezier(.2,.8,.2,1)"});
+  }
+}
+sheet.addEventListener("pointerup", releaseSheet);
+sheet.addEventListener("pointercancel", releaseSheet);
 const saveLabel = () =>
   bridge()
     ? t("Сохранить и вернуться в чат", "Save and return to chat")
@@ -383,22 +504,28 @@ async function load() {
   state.settings.digest_time ??= "09:00";
   render();
 }
-async function write(path, method, body, updateDemo, success) {
+function mergeRecord(items, record) {
+  const existing=items.find(item=>item.id===record.id);
+  if(existing) Object.assign(existing,record);
+  else items.unshift(record);
+}
+
+async function write(path, method, body, apply, success, options) {
   if (pending) return false;
   pending = true;
+  const origin=document.activeElement?.closest("button");
+  origin?.setAttribute("aria-busy","true");
   app.classList.add("saving");
   revision++;
   sheet
     .querySelectorAll("button,input,select,textarea")
     .forEach((x) => (x.disabled = true));
   try {
-    if (demo) {
-      updateDemo();
-      saveDemo(state);
+    const result = demo ? null : await request(path, method, body, options);
+    if (!bridge()) {
+      apply(result);
+      if (demo) saveDemo(state);
       render();
-    } else {
-      await request(path, method, body);
-      if (!bridge()) await load();
     }
     try {
       if (!demo) webapp()?.HapticFeedback?.notificationOccurred("success");
@@ -411,6 +538,7 @@ async function write(path, method, body, updateDemo, success) {
     else message(errorMessage(error));
     return false;
   } finally {
+    origin?.removeAttribute("aria-busy");
     pending = false;
     app.classList.remove("saving");
     sheet
@@ -453,14 +581,14 @@ function downloadCalendar() {
   link.click();
   link.remove();
   setTimeout(() => URL.revokeObjectURL(url), 60000);
-  if (sheet.open) sheet.close();
+  if (sheet.open) closeSheet();
   message(t("Календарь подготовлен", "Calendar prepared"));
 }
 async function act(action, id) {
   if (pending) return;
   switch (action) {
     case "close":
-      sheet.close();
+      closeSheet();
       break;
     case "chat":
       openChat();
@@ -477,7 +605,10 @@ async function act(action, id) {
       const project_id = Number(id);
       if (project_id === activeId()) break;
       await write("/api/projects/active", "PATCH", {project_id},
-        () => (state.active_project_id = project_id),
+        chosen => {
+          state.active_project_id = chosen?.id ?? project_id;
+          if (chosen?.id) mergeRecord(state.projects, chosen);
+        },
         t("Контекст в чате обновлён", "Chat context updated"));
       break;
     }
@@ -497,7 +628,7 @@ async function act(action, id) {
           "/api/settings",
           "PATCH",
           { timezone },
-          () => (state.settings.timezone = timezone),
+          settings => Object.assign(state.settings,settings || {timezone}),
           t("Часовой пояс обновлён", "Time zone updated"),
         );
       break;
@@ -511,7 +642,7 @@ async function act(action, id) {
     case "share-calendar":
       try {
         await navigator.share({ files: [calendarFile], title: "Aleph" });
-        sheet.close();
+        closeSheet();
       } catch (error) {
         if (error.name !== "AbortError")
           message(t("Используй кнопку «Скачать»", "Use the Download button"));
@@ -528,7 +659,7 @@ async function act(action, id) {
         "/api/tasks/" + id,
         "PATCH",
         { status },
-        () => (item.status = status),
+        task => Object.assign(item,task || {status}),
         status === "done"
           ? t("Поручение выполнено", "Task complete")
           : t("Поручение снова в работе", "Task reopened"),
@@ -537,15 +668,18 @@ async function act(action, id) {
     }
     case "proactive": {
       const proactive = !state.settings.proactive;
-      await write(
+      const control=app.querySelector('[data-action="proactive"]');
+      control?.setAttribute("aria-checked",String(proactive));
+      const saved=await write(
         "/api/settings",
         "PATCH",
         { proactive },
-        () => (state.settings.proactive = proactive),
+        settings => Object.assign(state.settings,settings || {proactive}),
         proactive
           ? t("Проактивность включена", "Proactive updates on")
           : t("Проактивность на паузе", "Proactive updates paused"),
       );
+      if(!saved)control?.setAttribute("aria-checked",String(state.settings.proactive));
       break;
     }
     case "remove-feed": {
@@ -571,9 +705,11 @@ async function act(action, id) {
 }
 document.addEventListener("click", (event) => {
   const el = event.target.closest("button");
-  if (!el || el.disabled || pending) return;
+  if (!el || el.disabled || sheet.classList.contains("closing")) return;
   if (el.dataset.page) navigate(el.dataset.page);
   else if (el.dataset.filter) {
+    if(filter===el.dataset.filter)return;
+    selectionFeedback();
     filter = el.dataset.filter;
     render();
   } else if (el.dataset.action) void act(el.dataset.action, el.dataset.id);
@@ -581,7 +717,10 @@ document.addEventListener("click", (event) => {
 sheet.addEventListener("close", () => {
   modal = null;
   syncBack();
-  if (returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
+  const target = returnFocus?.isConnected ? returnFocus : focusTarget ? app.querySelector(focusTarget) : null;
+  (target || workspace?.querySelector("h1"))?.focus({preventScroll:true});
+  returnFocus=null;
+  focusTarget=null;
 });
 sheet.addEventListener("click", (event) => {
   if (event.target !== sheet || pending) return;
@@ -592,7 +731,7 @@ sheet.addEventListener("click", (event) => {
     event.clientY < r.top ||
     event.clientY > r.bottom
   )
-    sheet.close();
+    closeSheet();
 });
 sheet.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -606,14 +745,11 @@ sheet.addEventListener("submit", async (event) => {
       if (!name) { form.elements.name.value = ""; form.elements.name.reportValidity(); return; }
       const context = data.context.trim();
       const id = Number(form.dataset.id);
-      ok = await write("/api/projects" + (id ? "/" + id : ""), id ? "PATCH" : "POST", {name, context}, () => {
+      ok = await write("/api/projects" + (id ? "/" + id : ""), id ? "PATCH" : "POST", {name, context}, result => {
         state.projects ||= [];
-        if (id) Object.assign(state.projects.find((item) => item.id === id), {name, context});
-        else {
-          const newId = Date.now();
-          state.projects.unshift({id: newId, name, context, open_tasks: 0});
-          state.active_project_id = newId;
-        }
+        const project=result || {id:id || Date.now(),name,context};
+        mergeRecord(state.projects,project);
+        if (!id) state.active_project_id=project.id;
       }, id ? t("Контекст сохранён", "Context saved") : t("Проект создан", "Project created"));
     } else if (form.id === "task-form") {
       const title = data.title.trim();
@@ -625,29 +761,30 @@ sheet.addEventListener("submit", async (event) => {
       }
       const body = { title, due_at: zonedISO(data.due_at, zone()) };
       const id = form.dataset.id;
+      const fields=id ? body : {...body,project_id:activeId()};
+      // A retry after a dropped response must reuse the same creation on the server.
+      if (!id && JSON.stringify(fields)!==form.dataset.submission) {
+        form.dataset.submission=JSON.stringify(fields);
+        form.dataset.requestKey=crypto.randomUUID?.() || (Date.now().toString(36)+Math.random().toString(36).slice(2));
+      }
       ok = await write(
         "/api/tasks" + (id ? "/" + id : ""),
-        id ? "PATCH" : "POST",
-        id ? body : {...body, project_id: activeId()},
-        () => {
-          if (id) Object.assign(byId(id), body);
-          else
-            state.tasks.push({
-              ...body,
-              project_id: activeId(),
-              id: Math.max(0, ...state.tasks.map((x) => Number(x.id))) + 1,
-              status: "open",
-              notes: "",
-            });
+        id ? "PATCH" : "POST", fields,
+        result => {
+          const record=result || (id ? {...byId(id),...body} : {
+            ...fields, id:Math.max(0,...state.tasks.map(x=>Number(x.id)))+1,status:"open",notes:""
+          });
+          mergeRecord(state.tasks,record);
         },
-        t("Поручение сохранено", "Task saved"),
+        t("Поручение сохранено","Task saved"),
+        {requestKey: id ? null : form.dataset.requestKey}
       );
     } else if (form.id === "schedule-form") {
       ok = await write(
         "/api/settings",
         "PATCH",
         data,
-        () => Object.assign(state.settings, data),
+        settings => Object.assign(state.settings,settings || data),
         t("Расписание обновлено", "Schedule updated"),
       );
     } else if (form.id === "feed-form") {
@@ -655,9 +792,9 @@ sheet.addEventListener("submit", async (event) => {
         "/api/feeds",
         "POST",
         { url: data.url },
-        () => {
-          const source = state.feed_catalog.find((x) => x.url === data.url);
-          state.feeds.push({ ...source, id: Date.now() });
+        result => {
+          const source=result || {...state.feed_catalog.find(x=>x.url===data.url),id:Date.now()};
+          mergeRecord(state.feeds,source);
         },
         t("Источник подключён", "Source connected"),
       );
@@ -666,7 +803,7 @@ sheet.addEventListener("submit", async (event) => {
         return;
       }
     }
-    if (ok) sheet.close();
+    if (ok) closeSheet();
   } catch (error) {
     const node = form.querySelector(".form-error");
     if (node) node.textContent = errorMessage(error);
@@ -701,6 +838,7 @@ async function start() {
     await load();
   } catch (error) {
     app.setAttribute("aria-busy", "false");
+    workspace = null; mountedPage = null; lastContent = null;
     app.innerHTML = `<main class="failure"><img src="./aleph.webp" width="45" alt=""><h1>Aleph</h1><p>${e(errorMessage(error))}</p><div class="actions"><button class="button" data-action="retry">${t("Повторить", "Try again")}</button><button class="button primary" data-action="chat">${t("В чат", "Open chat")}</button></div></main>`;
   } finally {
     loading = false;
@@ -714,17 +852,18 @@ async function refresh() {
     !state ||
     sheet.open ||
     pending ||
-    loading
+    loading || refreshRunning
   )
     return;
   const sequence = revision;
+  refreshRunning = true;
   try {
     const fresh = await request("/api/state");
     if (!pending && !sheet.open && sequence === revision) {
       state = fresh;
       render();
     }
-  } catch {}
+  } catch {} finally { refreshRunning = false; }
 }
 document.addEventListener("visibilitychange", refresh);
 window.addEventListener("focus", refresh);
