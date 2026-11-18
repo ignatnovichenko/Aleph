@@ -153,7 +153,7 @@ function nav() {
 }
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 const scrollByPage = new Map();
-let workspace, pageContent, dock, toolbarAction, mountedPage, lastContent, refreshRunning = false;
+let workspace, pageContent, dock, mountedPage, lastContent, refreshRunning = false;
 let closeTimer, closeListener, focusTarget, sheetDrag;
 
 function selectionFeedback() {
@@ -162,7 +162,8 @@ function selectionFeedback() {
   }
 }
 
-function navigate(id) {
+function navigate(id, fromSwipe = false) {
+  if (swipe) clearSwipe();
   if (!navs().some(([key]) => key === id)) return;
   if (page === id) {
     window.scrollTo({top: 0, behavior: reducedMotion.matches ? "auto" : "smooth"});
@@ -171,34 +172,32 @@ function navigate(id) {
   scrollByPage.set(page, window.scrollY);
   page = id;
   selectionFeedback();
-  render();
+  render(fromSwipe);
   window.scrollTo({top: scrollByPage.get(id) || 0, behavior: "instant"});
 }
 
 function mountShell() {
   app.innerHTML = `
-    <header class="toolbar"><div class="toolbar-inner">
-      <span class="wordmark"><img src="./aleph.webp" alt="" width="29" height="29"><span>Aleph</span><small>LAB ONE</small></span>
-      ${demo ? `<span class="demo-badge">${t("Демо", "Demo")}</span>` : ""}
-      <button class="toolbar-action"></button>
-    </div></header>
-    <main class="workspace" id="view"><header class="page-head"><div><h1 class="page-title" tabindex="-1"></h1><p class="page-kicker" hidden></p></div></header><div class="page-content"></div></main>
+    <div class="page-stage"><main class="workspace" id="view">
+      <header class="page-head"><img class="app-mark" src="./aleph.webp" width="30" height="30" alt="Aleph"><div><h1 class="page-title" tabindex="-1"></h1><p class="page-kicker" hidden></p></div></header>
+      <div class="page-content"></div>
+      ${demo ? `<footer class="demo-note">${t("Демо-режим","Demo mode")} · <a href="https://t.me/AlephAgentBot" target="_blank" rel="noopener noreferrer">${t("Открыть бота","Open bot")}</a></footer>` : ""}
+    </main></div>
     <nav aria-label="${t("Навигация", "Navigation")}" class="dock glass"><span aria-hidden="true" class="dock-lens"></span>${nav()}</nav>`;
   workspace = app.querySelector("#view");
   pageContent = workspace.querySelector(".page-content");
   dock = app.querySelector(".dock");
-  toolbarAction = app.querySelector(".toolbar-action");
 }
 
 // Keep both the native navigation surface and its lens mounted as content changes.
-function render() {
+function render(fromSwipe = false) {
   if (!state) return;
   if (!workspace?.isConnected) mountShell();
   const tabs = navs(), index = tabs.findIndex(([key]) => key === page);
   if (page !== mountedPage) {
     const previous = tabs.findIndex(([key]) => key === mountedPage);
     workspace.classList.remove("view-enter-forward","view-enter-backward");
-    if (mountedPage && !reducedMotion.matches) {
+    if (mountedPage && !fromSwipe && !reducedMotion.matches) {
       void workspace.offsetWidth;
       workspace.classList.add(index > previous ? "view-enter-forward" : "view-enter-backward");
     }
@@ -212,17 +211,14 @@ function render() {
       if(selected) tab.setAttribute("aria-current","page");
       else tab.removeAttribute("aria-current");
     }
-    const projectAction = page === "projects" && !bridge();
-    toolbarAction.dataset.action = projectAction ? "new-project" : "chat";
-    toolbarAction.innerHTML = projectAction ? icon("plus") + t("Новый","New") : icon("plane") + t("В чат","Chat");
     mountedPage = page;
   }
   const kicker = workspace.querySelector(".page-kicker");
   kicker.hidden = page !== "home";
   if (!kicker.hidden) {
-    kicker.textContent = new Intl.DateTimeFormat(locale(), {timeZone:zone(), weekday:"long",day:"numeric",month:"long"}).format(new Date());
+    kicker.textContent = localizedDate();
   }
-  const markup = page === "home" ? overview() : page === "projects" ? projectsPage() : settingsPage();
+  const markup = viewMarkup(page);
   if (markup !== lastContent) {
     const restore = pageContent.contains(document.activeElement) ? controlSelector(document.activeElement) : null;
     pageContent.innerHTML = markup;
@@ -232,6 +228,183 @@ function render() {
   app.setAttribute("aria-busy","false");
   syncBack();
 }
+
+// Track a horizontal pan only after it wins the direction lock. The browser owns
+// vertical scrolling and pinch zoom, including gestures beginning on a task row.
+let swipe = null;
+let suppressTap = false;
+const clamp = (value, min, max) => Math.min(max, Math.max(min,value));
+
+function viewMarkup(key) {
+  return key === "home" ? overview() : key === "projects" ? projectsPage() : settingsPage();
+}
+function localizedDate() {
+  return new Intl.DateTimeFormat(locale(), {timeZone:zone(), weekday:"long",day:"numeric",month:"long"}).format(new Date());
+}
+
+function clearSwipe() {
+  const gesture = swipe;
+  if (!gesture) return;
+  swipe = null;
+  cancelAnimationFrame(gesture.frame);
+  clearTimeout(gesture.timer);
+  gesture.peer?.remove();
+  workspace.classList.remove("swipe-pane","swipe-settling");
+  workspace.style.removeProperty("transform");
+  workspace.style.removeProperty("--snap-time");
+  dock.classList.remove("is-tracking");
+  dock.style.removeProperty("--tab-position");
+  dock.style.removeProperty("--lens-speed");
+  if (app.hasPointerCapture?.(gesture.pointerId)) app.releasePointerCapture(gesture.pointerId);
+}
+
+function finishSwipe() {
+  const destination = swipe?.destination;
+  clearSwipe();
+  if (destination && destination !== page) navigate(destination, true);
+}
+
+function drawSwipe() {
+  const g=swipe;
+  if (!g || !g.locked || g.releasing) return;
+  g.frame=0;
+  const dx=g.x-g.startX;
+  const position=clamp(g.index + (g.onDock ? dx : -dx)/g.width,0,2);
+  dock.style.setProperty("--tab-position",position.toFixed(4));
+  dock.style.setProperty("--lens-speed",Math.min(1,Math.abs(g.velocity)).toFixed(2));
+  if (g.onDock || reducedMotion.matches) return;
+  const direction=Math.sign(position-g.index), neighbor=g.index+direction;
+  if (g.neighbor !== neighbor) {
+    g.peer?.remove();
+    g.peer=null;
+    g.neighbor=neighbor;
+    if(direction) {
+      const [key,title]=navs()[neighbor];
+      const peer=document.createElement("section");
+      peer.className="workspace swipe-pane swipe-peer";
+      peer.inert=true;
+      peer.setAttribute("aria-hidden","true");
+      peer.innerHTML='<header class="page-head"><img class="app-mark" src="./aleph.webp" width="30" height="30" alt=""><div><h2 class="page-title">'+e(title)+'</h2><p class="page-kicker"'+(key==="home"?'':' hidden')+'>'+e(localizedDate())+'</p></div></header><div class="page-content">'+viewMarkup(key)+'</div>';
+      workspace.after(peer);
+      // Match the next tab's saved scroll offset even when starting mid-page.
+      const prior=scrollByPage.get(key) || 0;
+      const extent=Math.max(0,peer.offsetHeight+workspace.parentElement.offsetTop-innerHeight);
+      peer.style.top=(window.scrollY-Math.min(prior,extent))+"px";
+      g.peer=peer;
+    }
+  }
+  const shift=direction ? clamp(dx,-g.width,g.width) : Math.sign(dx)*Math.min(25,Math.sqrt(Math.abs(dx))*1.6);
+  workspace.style.transform='translate3d('+shift+'px,0,0)';
+  if(g.peer)g.peer.style.transform='translate3d('+(shift+direction*g.width)+'px,0,0)';
+}
+
+function startSwipe(event) {
+  if(!event.isPrimary) { clearSwipe(); return; }
+  suppressTap=false;
+  if (swipe?.releasing) finishSwipe();
+  if (swipe || !state || !workspace || sheet.open || pending || event.button!==0) return;
+  const target=event.target, onDock=Boolean(target.closest(".dock"));
+  if(!onDock && (!target.closest(".page-stage") || event.pointerType==="mouse")) return;
+  if(target.closest("input,textarea,select,[contenteditable=true],a,[data-no-swipe]") || window.getSelection()?.isCollapsed===false) return;
+  // Keep both edge gestures available to iOS, Android and Telegram itself.
+  if(event.clientX<24 || event.clientX>innerWidth-24) return;
+  const width=onDock?dock.querySelector(".nav-item").offsetWidth:workspace.clientWidth;
+  swipe={pointerId:event.pointerId,onDock,width,index:navs().findIndex(([key])=>key===page),startX:event.clientX,startY:event.clientY,x:event.clientX,time:event.timeStamp,velocity:0};
+}
+
+function moveSwipe(event) {
+  const g=swipe;
+  if(!g || g.pointerId!==event.pointerId || g.releasing)return;
+  if(!g.locked) {
+    const x=Math.abs(event.clientX-g.startX), y=Math.abs(event.clientY-g.startY);
+    if(Math.max(x,y)<9)return;
+    if(y>=x || (y>18 && x<1.35*y)) {clearSwipe();return;}
+    if(x<1.35*y)return;
+    g.locked=true;
+    suppressTap=true;
+    dock.classList.add("is-tracking");
+    workspace.classList.remove("view-enter-forward","view-enter-backward");
+    if(!g.onDock && !reducedMotion.matches) workspace.classList.add("swipe-pane");
+    try { app.setPointerCapture(event.pointerId); } catch {}
+  }
+  const elapsed=Math.max(1,event.timeStamp-g.time);
+  g.velocity=(elapsed>100?0:g.velocity*.30)+.70*(event.clientX-g.x)/elapsed;
+  g.time=event.timeStamp;
+  g.x=event.clientX;
+  if(!g.frame)g.frame=requestAnimationFrame(drawSwipe);
+}
+
+function releaseSwipe(event) {
+  const g=swipe;
+  if(!g || g.pointerId!==event.pointerId || g.releasing)return;
+  if(!g.locked) {clearSwipe();return;}
+  g.x=event.clientX;
+  cancelAnimationFrame(g.frame);
+  drawSwipe();
+  const dx=g.x-g.startX;
+  const velocity=event.timeStamp-g.time<110?g.velocity:0;
+  const distance=g.onDock?dx:-dx;
+  const fast=Math.abs(velocity)>.48 && Math.sign(velocity)===Math.sign(dx) && Math.abs(dx)>=28;
+  const threshold = g.onDock ? .38 : Math.min(.32,90/g.width);
+  let offset=0;
+  if(Math.abs(distance)>=g.width*threshold || fast) {
+    offset=Math.sign(distance)*(g.onDock?Math.max(1,Math.round(Math.abs(dx)/g.width)):1);
+  }
+  const target=clamp(g.index+offset,0,2);
+  g.releasing=true;
+  g.destination=navs()[target][0];
+  dock.classList.remove("is-tracking");
+  dock.style.setProperty("--tab-position",target);
+  dock.style.setProperty("--lens-speed",0);
+  if (g.onDock || reducedMotion.matches) {
+    // Keep the original touch target alive through the browser's touchend.
+    g.timer=setTimeout(finishSwipe,32);
+    return;
+  }
+
+  const endX=(g.index-target)*g.width;
+  const duration=clamp(130+Math.abs(endX-dx)/g.width*130,130,255);
+  for(const pane of [workspace,g.peer].filter(Boolean)){
+    pane.style.setProperty("--snap-time",duration+"ms");
+    pane.classList.add("swipe-settling");
+  }
+  // Commit the last finger position before switching to the release curve.
+  void workspace.offsetWidth;
+  workspace.style.transform='translate3d('+endX+'px,0,0)';
+  if(g.peer)g.peer.style.transform='translate3d('+(endX+(g.neighbor-g.index)*g.width)+'px,0,0)';
+  g.timer=setTimeout(finishSwipe,duration+16);
+}
+
+app.addEventListener("pointerdown",startSwipe);
+// Some embedded Chromium versions suppress the next tap after an uncancelled
+// touch fling. Once the horizontal axis is locked, the app owns this gesture.
+app.addEventListener("touchmove",event=>{
+  if(swipe?.locked && event.touches.length===1 && event.cancelable)event.preventDefault();
+},{passive:false});
+window.addEventListener("pointermove",moveSwipe,{passive:true});
+window.addEventListener("pointerup",releaseSwipe);
+window.addEventListener("pointercancel",event=>{
+  if(swipe?.pointerId===event.pointerId)clearSwipe();
+});
+window.addEventListener("resize",clearSwipe);
+window.addEventListener("blur",clearSwipe);
+app.addEventListener("click", event=>{
+  if(suppressTap && event.detail!==0) {
+    suppressTap=false;
+    event.preventDefault();event.stopImmediatePropagation();
+  }
+},true);
+app.addEventListener("keydown",event=>{
+  const tab=event.target.closest(".dock [data-page]");
+  if(!tab || event.altKey || event.ctrlKey || event.metaKey)return;
+  const tabs=navs(), index=tabs.findIndex(([key])=>key===page);
+  const shortcuts={ArrowLeft:index-1,ArrowRight:index+1,Home:0,End:tabs.length-1};
+  if(!Object.hasOwn(shortcuts,event.key))return;
+  event.preventDefault();
+  const key=tabs[clamp(shortcuts[event.key],0,tabs.length-1)][0];
+  if(key!==page)navigate(key);
+  dock.querySelector('[data-page="'+key+'"]').focus({preventScroll:true});
+});
 
 function controlSelector(el){
   if(!el?.matches("button")) return null;
@@ -303,7 +476,7 @@ function projectsPage() {
         <span class="setting-copy"><strong>${e(item.name)}</strong><small>${selected ? `<i class="signal-dot"></i>` + t("Активен в чате", "Active in chat") : counts.has(item.id) ? t("В работе", "Open") + " · " + counts.get(item.id) : t("Нет открытых поручений", "No open tasks")}</small></span>
         <span class="tail ${selected ? "selected" : ""}">${icon(selected ? "check" : "arrow")}</span>
       </button>`;
-    }).join("")}</div>
+    }).join("")}<button class="add-line new-project-action" data-action="new-project">${icon("plus")}${t("Новый проект","New project")}</button></div>
     ${current ? `<section class="project-context">${sectionHead(t("Контекст проекта", "Project context"))}
       <div class="panel">
         <p class="context-text" dir="auto">${current.context ? e(current.context) : t("Добавь цели, материалы и то, что Алефу важно учитывать.", "Add goals, reference material and anything Aleph should keep in mind.")}</p>
@@ -353,7 +526,7 @@ function settingsPage() {
     `<button class="setting-row" data-action="schedule"><span class="setting-copy"><strong>${label}</strong><span class="setting-detail">${detail}</span></span><span class="setting-value">${e(val)}${icon("arrow")}</span></button>`;
   return `<div class="settings-grid"><section class="settings-block"><h2 class="settings-title">${t("Ритм дня", "Daily rhythm")}</h2><div class="panel"><div class="setting-row"><span><strong>${t("Проактивность", "Proactive updates")}</strong><span class="setting-detail">${t("Обзоры и инициативы в чате", "Briefings and check-ins in chat")}</span></span>${switcher()}</div>
   ${row(t("Утренний обзор", "Morning brief"), t("Когда присылать план на день", "When to send your daily plan"), timeLabel(s.digest_time))}${row(t("Тихие часы", "Quiet hours"), t("Время для отдыха", "Your time to disconnect"), timeLabel(s.quiet_start) + " – " + timeLabel(s.quiet_end))}${row(t("Часовой пояс", "Time zone"), t("Для поручений и обзоров", "For tasks and briefings"), zone())}</div>${zone() === "UTC" && detected && detected !== "UTC" ? `<button class="small-action tz-suggest" data-action="detected-zone">${icon("globe")}${t("Использовать часовой пояс устройства", "Use device time zone")} · ${e(detected)}</button>` : ""}</section>
-  <section class="settings-block"><h2 class="settings-title">${t("Подключения", "Connections")}</h2><div class="panel">${integrationRows()}</div>${demo ? `<p class="settings-note">${t("Демо-режим. Изменения сохраняются в этом браузере.", "Demo mode. Changes are saved in this browser.")}</p>` : ""}<a class="privacy-link" href="./privacy.html" target="_blank" rel="noopener noreferrer">${t("Конфиденциальность", "Privacy")}</a></section>${routinesPanel()}</div>`;
+  <section class="settings-block"><h2 class="settings-title">${t("Подключения", "Connections")}</h2><div class="panel">${integrationRows()}</div><a class="privacy-link" href="./privacy.html" target="_blank" rel="noopener noreferrer">${t("Конфиденциальность", "Privacy")}</a></section>${routinesPanel()}</div>`;
 }
 function openSheet(type, title, html) {
   if (!sheet.open) {
@@ -852,14 +1025,14 @@ async function refresh() {
     !state ||
     sheet.open ||
     pending ||
-    loading || refreshRunning
+    loading || refreshRunning || swipe?.locked
   )
     return;
   const sequence = revision;
   refreshRunning = true;
   try {
     const fresh = await request("/api/state");
-    if (!pending && !sheet.open && sequence === revision) {
+    if (!pending && !sheet.open && !swipe?.locked && sequence === revision) {
       state = fresh;
       render();
     }

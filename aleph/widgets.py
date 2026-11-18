@@ -5,6 +5,8 @@ from pathlib import Path
 import re
 import zlib
 
+from .links import widget_url
+
 TEMPLATE = Path(__file__).with_name("widget_template.html").read_text(encoding="utf-8")
 KINDS = {"checklist": 6, "compare": 4, "chart": 7}
 TOOL = {"type": "function", "function": {
@@ -153,10 +155,26 @@ def change_check(store, query):
     index, on = int(action[1]), action[2] == "1"
     if spec["kind"] != "checklist" or index >= len(spec["items"]):
         return None
+    mask = set_checked(store, row, index, on)
+    return uid, message_id, chat_state(mask)
+
+
+def view(store, uid, widget_id):
+    row = store.db.execute("SELECT rowid AS id,* FROM widgets WHERE rowid=? AND user_id=?", (widget_id, uid)).fetchone()
+    if row is None:
+        raise KeyError("Виджет недоступен.")
+    return row
+
+
+def set_checked(store, row, index, on):
+    spec = json.loads(row["spec"])
+    if (spec["kind"] != "checklist" or type(index) is not int or type(on) is not bool
+            or not 0 <= index < len(spec["items"])):
+        raise ValueError("Некорректная отметка.")
     bit = 1 << index
     mask = (row["checked"] | bit) if on else (row["checked"] & ~bit)
     store.db.execute("UPDATE widgets SET checked=? WHERE key=?", (mask, row["key"]))
-    return uid, message_id, chat_state(mask)
+    return mask
 
 
 async def handle_query(store, telegram, query):
@@ -203,6 +221,9 @@ def card(row, *, russian=True):
         opts = [{"text": ("✓ " if i == index else "") + item["label"][:22],
                  "callback_data": f"w:{identity}:{i}"} for i, item in enumerate(rows)]
         buttons = [opts[i:i+2] for i in range(0, len(opts), 2)]
+    url = widget_url(identity)
+    if url:
+        buttons.append([{"text": "Открыть HTML-виджет" if russian else "Open HTML widget", "web_app": {"url": url}}])
     note = ("Telegram не позволил встроить HTML. Кнопки работают в этом сообщении." if russian
             else "Telegram didn’t allow inline HTML here. Use the buttons on this message.")
     return {"text": title + "\n\n" + "\n".join(bullets) + "\n\n" + note,
@@ -233,13 +254,15 @@ async def handle_fallback_query(store, telegram, query):
         await telegram.call("answerCallbackQuery", callback_query_id=query["id"])
         return
     if checklist:
-        bit = 1 << index
-        mask = (row["checked"] | bit) if action[3] == "1" else (row["checked"] & ~bit)
-        store.db.execute("UPDATE widgets SET checked=? WHERE key=?", (mask, row["key"]))
+        set_checked(store, row, index, action[3] == "1")
     else:
         store.db.execute("UPDATE widgets SET selected=? WHERE key=?", (index, row["key"]))
-    updated = store.db.execute("SELECT rowid AS id,* FROM widgets WHERE key=?", (row["key"],)).fetchone()
     await telegram.call("answerCallbackQuery", callback_query_id=query["id"])
+    await refresh_card(store, telegram, view(store, uid, row["id"]))
+
+
+async def refresh_card(store, telegram, row):
+    uid = row["user_id"]
     language = store.get_user(uid)["language_code"].lower().split("-")[0]
     await telegram.call("editMessageText", chat_id=uid, message_id=row["message_id"],
-                        **card(updated, russian=language in {"", "ru", "be", "uk"}))
+                        **card(row, russian=language in {"", "ru", "be", "uk"}))

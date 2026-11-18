@@ -4,12 +4,12 @@ import logging
 import os
 from pathlib import Path
 import signal
-from urllib.parse import urlsplit
 
 import aiohttp
 from aiohttp import web
 
 from .api import install_api
+from .links import mini_app_url
 from .bot import Telegram, TelegramError, run_bot
 from .scheduler import run_scheduler
 from .store import Store
@@ -28,19 +28,6 @@ def secret(name, filename):
     if not value:
         raise SystemExit(f"Set {name} or {name}_FILE.")
     return value
-
-
-def mini_app_url():
-    url = os.getenv("MINI_APP_URL", "").strip()
-    if not url:
-        path = Path(os.getenv("MINI_APP_URL_FILE") or CONFIG / "mini-app-url")
-        if path.is_file():
-            url = path.read_text().strip()
-    if url:
-        parts = urlsplit(url)
-        if parts.scheme != "https" or not parts.hostname or parts.username or parts.password:
-            raise ValueError("MINI_APP_URL must be a public HTTPS URL")
-    return url
 
 
 async def update_menu(tg):

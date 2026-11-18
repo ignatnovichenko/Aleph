@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="referrer" content="no-referrer">
+  <title>Aleph · Виджет</title>
+  <link rel="icon" href="./aleph.webp" type="image/webp">
+  <link rel="stylesheet" href="./fonts.css">
+  <link rel="stylesheet" href="./widget-page.css">
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script type="module" src="./widget-page.js"></script>
+</head>
+<body>
+  <main>
+    <header><img src="./aleph.webp" width="28" height="28" alt="Aleph"><button id="back" type="button">В чат</button></header>
+    <p id="status" role="status">Открываю виджет…</p>
+    <iframe id="card" sandbox="allow-scripts" title="Интерактивный виджет Aleph" hidden></iframe>
+  </main>
+</body>
+</html>

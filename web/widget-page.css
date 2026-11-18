@@ -1,0 +1,10 @@
+:root { color-scheme:light dark; --paper:#edede8; --ink:#151513; --surface:#f7f6f0; --line:#d0cfc8; }
+:root[data-theme="dark"] { color-scheme:dark; --paper:#090909; --ink:#f1efe6; --surface:#171717; --line:#343431; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--paper); color:var(--ink); font: 400 14px/1.5 Geologica,system-ui,sans-serif; }
+main { max-width:560px; margin:auto; padding: max(16px,env(safe-area-inset-top)) 16px 24px; }
+header { display:flex; justify-content:space-between; align-items:center; margin-bottom:18px; }
+header img { border-radius:50%; }
+header button { color:inherit; font:inherit; min-height:42px; border:1px solid var(--line); border-radius:22px; padding:0 16px; background:var(--surface); }
+iframe { display:block; border:1px solid var(--line); border-radius:20px; background:var(--surface); width:100%; min-height:92px; }
+[hidden] { display:none !important; }

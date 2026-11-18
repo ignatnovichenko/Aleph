@@ -1,4 +1,5 @@
 """Authenticated Mini App API. Telegram signs the initData received by the client."""
+import asyncio
 from datetime import datetime
 import hashlib
 import hmac
@@ -7,10 +8,11 @@ import re
 import time
 from urllib.parse import parse_qsl
 
+import aiohttp
 from aiohttp import web
 
 from .feeds import feed_catalog
-from . import projects
+from . import projects, widgets
 from .store import UTC
 
 
@@ -177,11 +179,34 @@ def install_api(app, store, token):
             raise ValueError("Выбери проект.")
         return web.json_response(projects.choose(store, user["id"], fields["project_id"]))
 
+    async def widget_view(request, user):
+        row = widgets.view(store, user["id"], int(request.match_info["id"]))
+        html = widgets.render(json.loads(row["spec"]))
+        return web.json_response({"html": html, "chat_data": widgets.chat_state(row["checked"])})
+
+    async def widget_check(request, user):
+        row = widgets.view(store, user["id"], int(request.match_info["id"]))
+        fields = await body(request)
+        if set(fields) != {"index", "checked"}:
+            raise ValueError("Некорректная отметка.")
+        mask = widgets.set_checked(store, row, fields["index"], fields["checked"])
+        if row["fallback"] and row["message_id"]:
+            from .bot import Telegram, TelegramError
+            async with aiohttp.ClientSession(trust_env=True) as session:
+                current = widgets.view(store, user["id"], row["id"])
+                try:
+                    await asyncio.wait_for(widgets.refresh_card(store, Telegram(session, token), current), 4)
+                except (TimeoutError, TelegramError):
+                    pass
+        return web.json_response({"chat_data": widgets.chat_state(mask)})
+
     routes = [("GET", "/api/state", state), ("POST", "/api/tasks", create),
               ("PATCH", r"/api/tasks/{id:\d{1,18}}", update), ("PATCH", "/api/settings", settings),
               ("POST", "/api/projects", create_project), ("PATCH", "/api/projects/active", choose_project),
               ("PATCH", r"/api/projects/{id:\d{1,18}}", update_project),
               ("GET", "/api/calendar.ics", calendar), ("GET", "/api/feeds", list_feeds),
               ("POST", "/api/feeds", add_feed), ("DELETE", r"/api/feeds/{id:\d{1,18}}", remove_feed)]
+    routes += [("GET", r"/api/widgets/{id:\d{1,18}}", widget_view),
+               ("PATCH", r"/api/widgets/{id:\d{1,18}}", widget_check)]
     for method, path, handler in routes:
         app.router.add_route(method, path, scoped(handler))

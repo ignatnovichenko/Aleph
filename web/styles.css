@@ -20,8 +20,12 @@
   --glass-border: #a9aaa04a;
   --glass-rim: #ffffffdf;
   --glass-shadow: #29292329;
-  --lens: #fffffbe8;
-  --lens-edge: #ffffffed;
+  --dock-fill: #efefe9b8;
+  --dock-ink: #4c4e47;
+  --lens: #fafbf5bd;
+  --lens-glint: #ffffffec;
+  --lens-shade: #51564b32;
+  --lens-shadow: #36392d26;
   --switch-off: #cbccc3;
   --ease: cubic-bezier(.2,.78,.22,1);
   --safe-bottom: max(env(safe-area-inset-bottom), var(--tg-content-safe-area-inset-bottom, 0px), var(--tg-safe-area-inset-bottom, 0px));
@@ -53,8 +57,12 @@
   --glass-border: #e6e7d936;
   --glass-rim: #e9e9d945;
   --glass-shadow: #0009;
-  --lens: #444540eb;
-  --lens-edge: #d8d9c94d;
+  --dock-fill: #20221ed6;
+  --dock-ink: #bcbeb4;
+  --lens: #51544b94;
+  --lens-glint: #f1f3da91;
+  --lens-shade: #05060492;
+  --lens-shadow: #0006;
   --switch-off: #484a43;
 }
 * { box-sizing: border-box; }
@@ -75,37 +83,18 @@ h1, h2, h3, p { margin: 0; }
   fill: none; stroke: currentColor; stroke-width: 1.65; stroke-linecap: round; stroke-linejoin: round;
 }
 
-/* The quiet masthead stays in place when the work area changes. */
-.toolbar {
-  position: sticky; z-index: 3; top: 0; padding-top: var(--safe-top);
-  background: var(--bg);
-  background: color-mix(in srgb, var(--bg) 80%, transparent);
-  border-bottom: 1px solid var(--hair);
-  -webkit-backdrop-filter: blur(20px) saturate(1.3); backdrop-filter: blur(20px) saturate(1.3);
+/* Telegram supplies the native header. Keep the mark in the scrolling page. */
+.workspace {
+  width:100%; max-width:700px; margin-inline:auto;
+  padding:calc(10px + var(--safe-top)) clamp(16px,4.7vw,30px) calc(112px + var(--safe-bottom));
 }
-.toolbar-inner, .workspace {
-  width: 100%; max-width: 700px; margin-inline: auto;
-  padding-inline: clamp(16px, 4.7vw, 30px);
-}
-.toolbar-inner { display: flex; align-items: center; min-height: 61px; gap: 10px; }
-.wordmark { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
-.wordmark img { display: block; border-radius: 50%; border: 1px solid var(--line); }
-.wordmark span { font: italic 600 28px/.95 var(--title); letter-spacing: -.045em; }
-.wordmark small, .demo-badge {
-  font: 400 8px/1 var(--mono); letter-spacing: .08em; color: var(--hint);
-}
-.wordmark small { padding-inline-start: 9px; border-inline-start: 1px solid var(--line); }
-.demo-badge { padding: 4px 6px; border: 1px solid var(--line); border-radius: 99px; }
-.toolbar-action {
-  display: inline-flex; align-items: center; justify-content: center; gap: 7px; margin-left: auto;
-  min-height: 44px; padding: 0 3px 0 10px; color: var(--accent);
-  font-size: 14px; font-weight: 550; white-space: nowrap;
-}
-.toolbar-action .icon { width: 18px; height: 18px; }
-.workspace { padding-top: 12px; padding-bottom: calc(118px + var(--safe-bottom)); }
+.app-mark { display:block; width:30px; height:30px; border-radius:50%; }
+.demo-note { margin:24px 4px 0; font-size:12px; line-height:1.5; color:var(--hint); }
+.demo-note a { color:inherit; text-underline-offset:3px; }
+.new-project-action { font-weight:500; }
 .page-head {
   display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 6px;
-  position: relative; isolation: isolate; background: var(--bg); min-height: 110px; margin-bottom: 12px; padding: 15px 2px;
+  position: relative; isolation: isolate; background: var(--bg); min-height: 112px; margin-bottom: 12px; padding: 4px 2px 10px; gap:9px;
 }
 .page-head::after {
   content: ""; position: absolute; inset: 0 -3px 0 auto; width: min(56%, 285px); z-index: -1;
@@ -274,22 +263,56 @@ h1, h2, h3, p { margin: 0; }
   position: fixed; z-index: 4; left: 50%; bottom: calc(12px + var(--safe-bottom)); transform: translateX(-50%);
   display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: stretch;
   width: min(340px, calc(100% - 34px)); padding: var(--pad); border-radius: 36px;
+  background:
+    linear-gradient(115deg, #fffff915, transparent 24% 72%, #ffffff11),
+    var(--dock-fill);
+  -webkit-backdrop-filter: blur(15px) saturate(1.45); backdrop-filter: blur(15px) saturate(1.45);
+  box-shadow: inset 0 1px 0 var(--glass-rim), inset 0 -1px 1px var(--lens-shade),
+    0 2px 4px -1px var(--lens-shadow), 0 8px 24px -9px var(--glass-shadow);
+  touch-action: pan-y; user-select: none; -webkit-user-select: none;
+}
+.dock::before, .dock-lens::before {
+  content: ""; position: absolute; pointer-events: none; inset: 0;
+  padding: 1px; border-radius: inherit;
+  background: linear-gradient(125deg, var(--lens-glint), transparent 27%, var(--lens-shade) 57%, transparent 74%, var(--lens-glint));
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor; mask-composite: exclude;
 }
 .dock-lens {
   pointer-events: none; position: absolute; top: var(--pad); bottom: var(--pad); left: var(--pad);
   width: calc((100% - 2 * var(--pad)) / 3); border-radius: 29px;
-  transform: translateX(calc(var(--tab-index, 0) * 100%)); transition: transform .32s cubic-bezier(.22,.86,.19,1.06);
-  background: var(--lens); box-shadow: inset 0 1px 1px var(--lens-edge), 0 1px 5px var(--line);
+  --shift: calc(var(--tab-position, var(--tab-index, 0)) * 100%);
+  --speed: clamp(0, var(--lens-speed, 0), 1);
+  transform: translate3d(var(--shift), 0, 0) scale(calc(1 + .055 * var(--speed)), calc(1 - .058 * var(--speed)));
+  transition: transform .34s cubic-bezier(.21,.83,.2,1.07);
+  background:
+    radial-gradient(100% 75% at 22% -27%, var(--lens-glint), transparent 82%),
+    radial-gradient(62% 86% at 104% 113%, var(--lens-glint), transparent 70%),
+    var(--lens);
+  box-shadow: inset 0 1px 1px var(--lens-glint), inset 0 -1px 2px var(--lens-shade),
+    0 2px 5px var(--lens-shadow);
+  will-change: transform;
 }
+.dock.is-tracking .dock-lens { transition: none; }
 .nav-item {
   position: relative; min-width: 0; min-height: 49px; border-radius: 29px;
-  display: grid; place-items: center; align-content: center; gap: 3px; color: var(--hint);
-  font-size: 10px; font-weight: 450; line-height: 1.25; transition: color .2s, transform .18s var(--ease);
+  display: grid; place-items: center; align-content: center; gap: 3px; color: var(--dock-ink);
+  touch-action: pan-y; font-size: 11px; font-weight: 450; line-height: 1.25;
+  transition: color .18s, transform .18s var(--ease);
 }
 .nav-item .icon { width: 21px; height: 21px; }
 .nav-item.active { color: var(--accent); font-weight: 600; }
 .nav-item.active .icon { stroke-width: 1.9; }
 .dock:not(:has(.dock-lens)) .nav-item.active { background: var(--lens); }
+@media (prefers-reduced-motion: reduce) {
+  .dock-lens { transform: translate3d(var(--shift), 0, 0); transition: none; }
+}
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+  .dock { background: var(--panel); -webkit-backdrop-filter: none; backdrop-filter: none; }
+  .dock-lens { background: var(--wash); box-shadow: inset 0 0 0 1px var(--hint); }
+  .dock::before, .dock-lens::before { content: none; }
+}
 .button {
   display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 46px;
   padding: 10px 18px; border-radius: 14px; border: 1px solid var(--line);
@@ -357,16 +380,21 @@ dialog[open].dragging { animation: none; }
 .context-row, .task-row, .integration-row, .setting-row, .project-row, .add-line {
   transition: background-color .17s ease, opacity .17s ease;
 }
-.toolbar-action, .button, .action-plus, .icon-button { transition: transform .17s var(--ease), opacity .17s ease; }
+.button, .action-plus, .icon-button { transition: transform .17s var(--ease), opacity .17s ease; }
 :where(.context-row,.integration-row,.project-row,.setting-row,.nav-item,.task-toggle,.task-body,.add-line,.segment):focus-visible {
   outline-offset: -3px; border-radius: 12px;
 }
-button:is(.toolbar-action,.button,.action-plus,.icon-button,.nav-item,.segment):active { transform: scale(.96); }
+button:is(.button,.action-plus,.icon-button,.nav-item,.segment):active { transform: scale(.96); }
 .task-toggle:active .ring { transform: scale(.84); }
 button:is(.integration-row,.project-row,.setting-row,.context-row,.add-line):active, .task-row:has(.task-body:active) { background-color: var(--pressed); }
 .saving :is(.task-toggle,.task-body,.project-row,.switch,.project-chat), [aria-busy="true"].pending { cursor: progress; }
 .saving .project-row[aria-current="true"], button.pending, button[aria-busy="true"], .task-row.pending { opacity: .62; }
 
+/* The active page and its inert neighbor are composited only while panning. */
+.page-stage { position:relative; min-height:100dvh; overflow:clip; touch-action:pan-y pinch-zoom; }
+.swipe-pane { will-change:transform; }
+.swipe-peer { position:absolute; inset:0 0 auto; pointer-events:none; }
+.swipe-settling { transition:transform var(--snap-time,210ms) cubic-bezier(.19,.79,.23,1); }
 .view-enter-forward { animation: view-forward .22s var(--ease); }
 .view-enter-backward { animation: view-backward .22s var(--ease); }
 @keyframes view-forward { from { opacity: .45; transform: translateX(8px); } }
@@ -377,21 +405,18 @@ button:is(.integration-row,.project-row,.setting-row,.context-row,.add-line):act
 @keyframes fade-out { to { opacity: 0; } }
 @media (hover: hover) and (pointer: fine) {
   :is(.integration-row,.project-row,.setting-row,.context-row,.add-line):is(button):hover, .task-row:has(.task-body:hover) { background-color: var(--wash); }
-  .toolbar-action:hover, .privacy-link:hover { color: var(--text); }
+  .privacy-link:hover { color: var(--text); }
   .task-toggle:hover .ring { border-color: var(--accent); }
 }
 @media (min-width: 640px) {
-  .toolbar-inner { min-height: 66px; }
-  .workspace { padding-top: 19px; }
+  .workspace { padding-top:calc(16px + var(--safe-top)); }
   .page-head { min-height: 137px; margin-bottom: 15px; }
   dialog { inset: 0; margin: auto; border-radius: 25px; border-bottom: 1px solid var(--glass-border); }
   .sheet-body { padding: 18px 25px 24px; }
   .sheet-grab { display: none; }
 }
 @media (max-width: 350px) {
-  .toolbar-inner, .workspace { padding-inline: 13px; }
-  .toolbar-inner { gap: 6px; }
-  .wordmark { gap: 6px; }
+  .workspace { padding-inline:13px; }
   .page-head { min-height: 99px; }
   .context-row { min-height: 70px; }
   .setting-row, .integration-row, .project-row { gap: 9px; padding-inline: 12px; }
