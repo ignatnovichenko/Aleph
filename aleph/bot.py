@@ -23,9 +23,10 @@ HELLO_EN = ("Hey, I’m Aleph. Send me a message or a voice note. If something n
             "tell me when and I’ll remind you right here.\n\nWhat’s on your mind? If you want reminders in local time, you can tell me your city.")
 
 class TelegramError(Exception):
-    def __init__(self, code=0, retry_after=0):
+    def __init__(self, code=0, retry_after=0, description=""):
         self.code = code
         self.retry_after = retry_after
+        self.description = description
         super().__init__(f"Telegram API status {code}")
 
 class Telegram:
@@ -43,7 +44,8 @@ class Telegram:
                 data = await response.json(content_type=None)
                 if not data.get("ok"):
                     raise TelegramError(int(data.get("error_code", response.status)),
-                                        int(data.get("parameters", {}).get("retry_after", 0)))
+                                        int(data.get("parameters", {}).get("retry_after", 0)),
+                                        data.get("description", ""))
                 return data["result"]
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, KeyError) as exc:
             raise TelegramError() from exc
@@ -292,14 +294,13 @@ async def _compose(row, store, inbox, tg, agent):
     historical = ("[Фото] " if photo else "") + query
     return historical, answer
 
-async def _send_widget(store, tg, uid, update_id, reply, show_plan):
+async def _send_widget(store, tg, uid, update_id, reply, show_plan, *, russian=True):
     widget = widgets.for_update(store, update_id)
     if not widget:
         return reply
     spec = json.loads(widget["spec"])
     cap = reply if not show_plan and len(reply.encode("utf-16-le")) // 2 <= 850 else ""
-    message_id = widget["message_id"]
-    if message_id is None:
+    if widget["message_id"] is None and not widget["fallback"]:
         params = {"chat_id": uid, "html": widgets.render(spec), "protect_content": True}
         if cap:
             params["caption"] = cap
@@ -307,15 +308,20 @@ async def _send_widget(store, tg, uid, update_id, reply, show_plan):
             params.update(allow_queries=True, chat_data=widgets.chat_state(widget["checked"]))
         try:
             sent = await tg.call("sendWidget", **params)
-            message_id = sent["message_id"]
         except TelegramError as error:
             if error.code not in (400, 404, 405):
                 raise
-            message_id = -1
-            log.warning("Telegram could not deliver native widget status=%s", error.code)
-        widgets.mark_sent(store, widget["key"], message_id)
-    if message_id == -1:
-        return reply + "\n\n" + widgets.fallback_text(spec)
+            reason = re.search(r"\b(?:INPUT_MEDIA_WIDGET|WIDGET)_[A-Z_]+\b", error.description or "")
+            log.warning("Telegram declined native widget status=%s reason=%s",
+                        error.code, reason[0] if reason else "unspecified")
+            widgets.mark_fallback(store, widget["key"])
+            widget = widgets.for_update(store, update_id)
+        else:
+            widgets.mark_sent(store, widget["key"], sent["message_id"])
+            return "" if cap else reply
+    if widget["fallback"] and widget["message_id"] is None:
+        sent = await tg.call("sendMessage", chat_id=uid, **widgets.card(widget, russian=russian))
+        widgets.mark_sent(store, widget["key"], sent["message_id"])
     return "" if cap else reply
 
 
@@ -377,7 +383,7 @@ async def _handle(row, store, inbox, tg, agent):
         command = (original.get("text") or "").strip().lower().split("@",1)[0].rstrip(".!")
         show_plan = (command.split(" ", 1)[0] in ("/start", "/help", "/plan") or command in PLAN_ALIASES
                      or bool(original.get("web_app_data")) or inbox.opened_plan(update_id))
-        reply = await _send_widget(store, tg, uid, update_id, reply, show_plan)
+        reply = await _send_widget(store, tg, uid, update_id, reply, show_plan, russian=ru)
         for n, chunk in enumerate(chunks(reply)):
             if n < row["sent_chunks"]:
                 continue
@@ -434,17 +440,22 @@ async def _widget_updates(store, telegram, updates):
     # so an earlier edit cannot win after a later one.
     lanes = {}
     for update in updates:
-        query = update.get("widget_query")
+        native = update.get("widget_query")
+        query = native or update.get("callback_query")
         if isinstance(query, dict) and isinstance(query.get("id"), str):
-            chat_id = (query.get("chat") or {}).get("id", 0)
-            lanes.setdefault((chat_id, query.get("message_id", 0)), []).append(query)
+            message = query if native else (query.get("message") or {})
+            chat_id = (message.get("chat") or {}).get("id", 0)
+            lanes.setdefault((chat_id, message.get("message_id", 0)), []).append((native, query))
     limit = asyncio.Semaphore(16)
 
     async def lane(queries):
         async with limit:
-            for query in queries:
+            for native, query in queries:
                 try:
-                    await widgets.handle_query(store, telegram, query)
+                    if native:
+                        await widgets.handle_query(store, telegram, query)
+                    else:
+                        await widgets.handle_fallback_query(store, telegram, query)
                 except TelegramError as error:
                     log.warning("Widget update delivery status=%s", error.code)
 
@@ -463,7 +474,7 @@ async def run_bot(store, session, token, model_key):
             if worker.done():
                 await worker
             try:
-                updates = await telegram.call("getUpdates", offset=inbox.offset(), timeout=25, allowed_updates=["message", "widget_query"])
+                updates = await telegram.call("getUpdates", offset=inbox.offset(), timeout=25, allowed_updates=["message", "widget_query", "callback_query"])
                 if updates:
                     inbox.ingest(updates)
                     changed.set()

@@ -45,14 +45,46 @@ class NativeWidgets(unittest.IsolatedAsyncioTestCase):
         self.inbox.done(10)
         self.assertEqual(widgets.change_check(self.store, {**query, "data": "check:1:0"})[2], '{"checked":0}')
 
-    async def test_old_bot_api_gets_full_plain_text(self):
+    async def test_two_native_rejections_do_not_block_same_chat(self):
+        async def send(method, **params):
+            if method == "sendWidget":
+                raise bot.TelegramError(400, description="Bad Request: INPUT_MEDIA_WIDGET_NOT_ALLOWED")
+            return {"message_id": self.next_message}
+
+        self.next_message = 201
         telegram = AsyncMock()
-        telegram.call.side_effect = bot.TelegramError(404)
-        content = await bot._send_widget(self.store, telegram, 89, 10, "Вот план.", False)
-        self.assertIn("Проверить паспорт", content)
-        self.assertIn("Сверить время вылета", content)
-        self.assertEqual(content, await bot._send_widget(self.store, telegram, 89, 10, "Вот план.", False))
-        telegram.call.assert_awaited_once()
+        telegram.call.side_effect = send
+        self.assertEqual(await bot._send_widget(self.store, telegram, 89, 10, "Вот план.", False), "")
+        self.assertEqual(telegram.call.await_args.args, ("sendMessage",))
+        self.assertIn("Проверить паспорт", telegram.call.await_args.kwargs["text"])
+        self.inbox.done(10)
+        self.inbox.ingest([{"update_id": 11, "message": {
+            "from": {"id": 89}, "chat": {"id": 89, "type": "private"}, "text": "Ещё виджет",
+        }}])
+        widgets.enqueue(self.store, 89, 0, "tg:11:0:0", CHECKLIST)
+        self.next_message = 202
+        self.assertEqual(await bot._send_widget(self.store, telegram, 89, 11, "Вот ещё.", False), "")
+        sent = widgets.for_update(self.store, 11)
+        self.assertEqual(sent["message_id"], 202)
+        self.assertEqual(sent["fallback"], 1)
+        taps = telegram.call.await_args.kwargs["reply_markup"]["inline_keyboard"]
+        callback = {"id": "q", "from": {"id": 89}, "message": {
+            "chat": {"id": 89, "type": "private"}, "message_id": 202,
+        }, "data": taps[1][0]["callback_data"]}
+        await widgets.handle_fallback_query(self.store, telegram, callback)
+        self.assertEqual(telegram.call.await_args.args, ("editMessageText",))
+        self.assertIn("1/2", telegram.call.await_args.kwargs["text"])
+        self.assertEqual(widgets.for_update(self.store, 11)["checked"], 2)
+        await widgets.handle_fallback_query(self.store, telegram, {**callback, "from": {"id": 90}})
+        self.assertEqual(telegram.call.await_args.args, ("answerCallbackQuery",))
+        self.assertEqual(widgets.for_update(self.store, 11)["checked"], 2)
+
+    async def test_old_failure_marker_is_migrated(self):
+        self.store.db.execute("UPDATE widgets SET message_id=-1 WHERE update_id=10")
+        self.inbox.done(10)
+        widgets.initialize(self.store.db)
+        saved = self.store.db.execute("SELECT message_id,fallback FROM widgets").fetchone()
+        self.assertEqual(tuple(saved), (None, 1))
 
     async def test_render_keeps_content_out_of_script_and_checks_payload(self):
         spec = widgets.clean({**CHECKLIST, "title": "</script><img src=x>"})

@@ -52,6 +52,12 @@ def initialize(db):
             UNIQUE(update_id)
         );
     """)
+    columns = {column[1] for column in db.execute("PRAGMA table_info(widgets)")}
+    if "fallback" not in columns:
+        db.execute("ALTER TABLE widgets ADD COLUMN fallback INTEGER NOT NULL DEFAULT 0")
+    if "selected" not in columns:
+        db.execute("ALTER TABLE widgets ADD COLUMN selected INTEGER NOT NULL DEFAULT 0")
+    db.execute("UPDATE widgets SET fallback=1,message_id=NULL WHERE message_id=-1")
 
 
 def render(spec):
@@ -117,7 +123,7 @@ def enqueue(store, uid, project_id, request_key, fields):
 
 
 def for_update(store, update_id):
-    return store.db.execute("SELECT * FROM widgets WHERE update_id=?", (update_id,)).fetchone()
+    return store.db.execute("SELECT rowid AS id,* FROM widgets WHERE update_id=?", (update_id,)).fetchone()
 
 
 def mark_sent(store, key, message_id):
@@ -163,3 +169,77 @@ async def handle_query(store, telegram, query):
         await telegram.call("answerWidgetQuery", widget_query_id=query["id"], data=state)
     finally:
         await telegram.call("editMessageWidgetData", chat_id=uid, message_id=message_id, chat_data=state)
+
+
+def mark_fallback(store, key):
+    store.db.execute("UPDATE widgets SET fallback=1 WHERE key=?", (key,))
+
+
+def card(row, *, russian=True):
+    spec = json.loads(row["spec"])
+    rows = spec["items"]
+    identity = row["id"]
+    bullets = []
+    buttons = []
+    if spec["kind"] == "checklist":
+        for index, item in enumerate(rows):
+            checked = bool(row["checked"] & (1 << index))
+            icon = "✓" if checked else "○"
+            bullets.append(f"{icon} {item['label']}" + (f" — {item['detail']}" if item["detail"] else ""))
+            buttons.append([{"text": f"{icon} {item['label'][:36]}", "callback_data": f"w:{identity}:{index}:{int(not checked)}"}])
+        count = sum(bool(row["checked"] & (1 << i)) for i in range(len(rows)))
+        title = spec["title"] + f" · {count}/{len(rows)}"
+    else:
+        title = spec["title"]
+        index = min(row["selected"], len(rows) - 1)
+        selected = rows[index]
+        if spec["kind"] == "compare":
+            bullets = [selected["label"], selected["detail"]]
+        else:
+            bullets = [
+                ("● " if i == index else "○ ") + f"{item['label']} — {item['value']:g} {spec['unit']}".rstrip()
+                for i, item in enumerate(rows)
+            ]
+        opts = [{"text": ("✓ " if i == index else "") + item["label"][:22],
+                 "callback_data": f"w:{identity}:{i}"} for i, item in enumerate(rows)]
+        buttons = [opts[i:i+2] for i in range(0, len(opts), 2)]
+    note = ("Telegram не позволил встроить HTML. Кнопки работают в этом сообщении." if russian
+            else "Telegram didn’t allow inline HTML here. Use the buttons on this message.")
+    return {"text": title + "\n\n" + "\n".join(bullets) + "\n\n" + note,
+            "reply_markup": {"inline_keyboard": buttons}, "link_preview_options": {"is_disabled": True}}
+
+
+async def handle_fallback_query(store, telegram, query):
+    action = re.fullmatch(r"w:([1-9]\d{0,17}):([0-6])(?::([01]))?", query.get("data") or "")
+    if not action:
+        return
+    sender = query.get("from") or {}
+    uid = sender.get("id")
+    message = query.get("message") or {}
+    chat = message.get("chat") or {}
+    if chat.get("type") != "private" or chat.get("id") != uid or type(uid) is not int or sender.get("is_bot"):
+        await telegram.call("answerCallbackQuery", callback_query_id=query["id"])
+        return
+    row = store.db.execute("""SELECT rowid AS id,* FROM widgets
+        WHERE rowid=? AND user_id=? AND message_id=? AND fallback=1""",
+        (int(action[1]), uid, message.get("message_id"))).fetchone()
+    if not row:
+        await telegram.call("answerCallbackQuery", callback_query_id=query["id"], text="Карточка недоступна.")
+        return
+    spec = json.loads(row["spec"])
+    index = int(action[2])
+    checklist = spec["kind"] == "checklist"
+    if index >= len(spec["items"]) or checklist != (action[3] is not None):
+        await telegram.call("answerCallbackQuery", callback_query_id=query["id"])
+        return
+    if checklist:
+        bit = 1 << index
+        mask = (row["checked"] | bit) if action[3] == "1" else (row["checked"] & ~bit)
+        store.db.execute("UPDATE widgets SET checked=? WHERE key=?", (mask, row["key"]))
+    else:
+        store.db.execute("UPDATE widgets SET selected=? WHERE key=?", (index, row["key"]))
+    updated = store.db.execute("SELECT rowid AS id,* FROM widgets WHERE key=?", (row["key"],)).fetchone()
+    await telegram.call("answerCallbackQuery", callback_query_id=query["id"])
+    language = store.get_user(uid)["language_code"].lower().split("-")[0]
+    await telegram.call("editMessageText", chat_id=uid, message_id=row["message_id"],
+                        **card(updated, russian=language in {"", "ru", "be", "uk"}))
