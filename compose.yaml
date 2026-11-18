@@ -8,7 +8,7 @@ services:
       MINI_APP_URL: https://${ALEPH_DOMAIN:?set ALEPH_DOMAIN}
       TELEGRAM_BOT_TOKEN_FILE: /run/secrets/telegram
       OPENCODE_API_KEY_FILE: /run/secrets/opencode
-      OPENCODE_MODEL: ${OPENCODE_MODEL:-deepseek-v4.1-flash}
+      OPENCODE_MODEL: ${OPENCODE_MODEL:-claude-haiku-5-5}
       OPENCODE_FALLBACK_MODEL: ${OPENCODE_FALLBACK_MODEL:-}
       OPENCODE_BASE_URL: ${OPENCODE_BASE_URL:-https://opencode.ai/zen/go/v1}
       WHISPER_MODEL: ${WHISPER_MODEL:-small}
