@@ -116,10 +116,11 @@ export function escapeHtml(value) {
       ],
   );
 }
+const wallClockFormatters = new Map();
 export function localDateTime(iso, zone) {
   if (!iso) return "";
-  const parts = Object.fromEntries(
-    new Intl.DateTimeFormat("en-CA", {
+  if (!wallClockFormatters.has(zone)) {
+    wallClockFormatters.set(zone, new Intl.DateTimeFormat("en-CA", {
       timeZone: zone,
       year: "numeric",
       month: "2-digit",
@@ -127,9 +128,10 @@ export function localDateTime(iso, zone) {
       hour: "2-digit",
       minute: "2-digit",
       hourCycle: "h23",
-    })
-      .formatToParts(new Date(iso))
-      .map((p) => [p.type, p.value]),
+    }));
+  }
+  const parts = Object.fromEntries(
+    wallClockFormatters.get(zone).formatToParts(new Date(iso)).map((p) => [p.type, p.value]),
   );
   return (
     parts.year +

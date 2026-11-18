@@ -1,0 +1,65 @@
+/* Lab One's Paper and Void, with glass reserved for navigation. */
+:root {
+  color-scheme: light;
+  --bg: #edede8;
+  --panel: #e7e7e1;
+  --paper: #f4f4ee;
+  --text: #171716;
+  --hint: #565653;
+  --line: #1919192a;
+  --hair: #19191915;
+  --wash: #19191906;
+  --pressed: #19191913;
+  --button: #161618;
+  --button-text: #f3eee6;
+  --signal: #ff3b1f;
+  --critical: #9d3021;
+  --dock-bed: #f2f2e964;
+  --dock-web: #efefe8e8;
+  --dock-ink: #51514c;
+  --glass-bright: #ffffffec;
+  --glass-highlight: #ffffffa8;
+  --glass-refract: #fcfff494;
+  --glass-depth: #777b664f;
+  --glass-drop: #36372b3a;
+  --lens-body: #f7faeb30;
+  --lens-highlight: #fff9;
+  --lens-deep: #62685b63;
+  --scrim: #10110e6b;
+  --ease: cubic-bezier(.16,1,.3,1);
+  --safe-bottom: max(env(safe-area-inset-bottom), var(--tg-content-safe-area-inset-bottom, 0px), var(--tg-safe-area-inset-bottom, 0px));
+  --safe-top: max(env(safe-area-inset-top), var(--tg-content-safe-area-inset-top, 0px));
+  --title: "Cormorant Garamond", Georgia, serif;
+  --mono: "Martian Mono", ui-monospace, monospace;
+  --voice: Geologica, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--voice);
+  font-weight: 350;
+  -webkit-font-smoothing: antialiased;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #000;
+  --panel: #0b0b0c;
+  --paper: #161618;
+  --text: #f3eee6;
+  --hint: #a19f9a;
+  --line: #f3eee640;
+  --hair: #f3eee620;
+  --wash: #f3eee609;
+  --pressed: #f3eee61b;
+  --button: #f3eee6;
+  --button-text: #161618;
+  --critical: #ff907e;
+  --dock-bed: #24242194;
+  --dock-web: #252523e8;
+  --dock-ink: #b6b4ae;
+  --glass-bright: #f7f4e8a6;
+  --glass-highlight: #ebeee144;
+  --glass-refract: #eff1de3b;
+  --glass-depth: #010103c4;
+  --glass-drop: #000b;
+  --lens-body: #b1b7ad29;
+  --lens-highlight: #ecf0db57;
+  --lens-deep: #010200b0;
+  --scrim: #0009;
+}

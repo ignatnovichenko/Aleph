@@ -40,19 +40,20 @@ const sorted = () =>
   );
 const activeId = () => Number(state.active_project_id || 0);
 const currentProject = () => (state.projects || []).find((item) => item.id === activeId());
-const readableDay = (iso) =>
-  new Intl.DateTimeFormat(locale(), {
-    timeZone: zone(),
-    day: "numeric",
-    month: "short",
-  }).format(new Date(iso));
-const clock = (iso) =>
-  new Intl.DateTimeFormat(locale(), {
-    timeZone: zone(),
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23",
-  }).format(new Date(iso));
+const dateFormats = {
+  date: { weekday: "long", day: "numeric", month: "long" },
+  day: { day: "numeric", month: "short" },
+  clock: { hour: "2-digit", minute: "2-digit", hourCycle: "h23" },
+};
+const dateFormatters = new Map();
+function formatDate(kind, value) {
+  const language = locale(), timeZone = zone();
+  const key = `${kind}/${language}/${timeZone}`;
+  if (!dateFormatters.has(key)) {
+    dateFormatters.set(key, new Intl.DateTimeFormat(language, { timeZone, ...dateFormats[kind] }));
+  }
+  return dateFormatters.get(key).format(new Date(value));
+}
 const timeLabel = (time) => String(time || "").slice(0, 5);
 const navs = () => [
   ["home", t("План", "Plan")],
@@ -101,20 +102,12 @@ function setLanguage(code) {
   ru = !code || ["ru", "uk", "be"].includes(code.toLowerCase().split("-")[0]);
   document.documentElement.lang = ru ? "ru" : "en";
 }
-function due(iso, withTime = true) {
+function dueDay(iso, today, tomorrow) {
   if (!iso) return t("Без срока", "No due date");
-  const date = localDateTime(iso, zone()).slice(0, 10),
-    today = localDateTime(Date.now(), zone()).slice(0, 10);
-  const tomorrow = new Date(Date.parse(today + "T12:00Z") + 86400000)
-    .toISOString()
-    .slice(0, 10);
-  const day =
-    date === today
-      ? t("Сегодня", "Today")
-      : date === tomorrow
-        ? t("Завтра", "Tomorrow")
-        : readableDay(iso);
-  return withTime ? day + " · " + clock(iso) : day;
+  const date = localDateTime(iso, zone()).slice(0, 10);
+  if (date === today) return t("Сегодня", "Today");
+  if (date === tomorrow) return t("Завтра", "Tomorrow");
+  return formatDate("day", iso);
 }
 function message(text) {
   clearTimeout(toastTimer);
@@ -148,13 +141,15 @@ function errorMessage(error) {
 }
 function nav() {
   return navs().map(([id, label]) =>
-    `<button class="nav-item ${page === id ? "active" : ""}" data-page="${id}" ${page === id ? 'aria-current="page"' : ""}>${icon(id)}<span>${label}</span></button>`
+    `<button class="nav-item" data-page="${id}" ${page === id ? 'aria-current="page"' : ""}>${icon(id)}<span>${label}</span></button>`
   ).join("");
 }
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
-const scrollByPage = new Map();
-let workspace, pageContent, dock, mountedPage, lastContent, refreshRunning = false;
-let closeTimer, closeListener, focusTarget, sheetDrag;
+const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+let stage, track, dock, lens, tabs, views, sizeObserver;
+let trackWidth, tabWidth, swipe, suppressTap, trackMotion, lensMotion;
+let closeTimer, closeListener, focusTarget, sheetDrag, refreshRunning = false;
+const activeView = () => views?.find((view) => view.key === page);
 
 function selectionFeedback() {
   if (!demo && !reducedMotion.matches && webapp()?.isVersionAtLeast?.("6.1")) {
@@ -162,248 +157,236 @@ function selectionFeedback() {
   }
 }
 
-function navigate(id, fromSwipe = false) {
-  if (swipe) clearSwipe();
-  if (!navs().some(([key]) => key === id)) return;
-  if (page === id) {
-    window.scrollTo({top: 0, behavior: reducedMotion.matches ? "auto" : "smooth"});
-    return;
-  }
-  scrollByPage.set(page, window.scrollY);
-  page = id;
-  selectionFeedback();
-  render(fromSwipe);
-  window.scrollTo({top: scrollByPage.get(id) || 0, behavior: "instant"});
-}
-
 function mountShell() {
+  const footer = demo ? `<footer class="demo-note">${t("Демо-режим", "Demo mode")} · <a href="https://t.me/AlephAgentBot" target="_blank" rel="noopener noreferrer">${t("Открыть бота", "Open bot")}</a></footer>` : "";
   app.innerHTML = `
-    <div class="page-stage"><main class="workspace" id="view">
-      <header class="page-head"><img class="app-mark" src="./aleph.webp" width="30" height="30" alt="Aleph"><div><h1 class="page-title" tabindex="-1"></h1><p class="page-kicker" hidden></p></div></header>
-      <div class="page-content"></div>
-      ${demo ? `<footer class="demo-note">${t("Демо-режим","Demo mode")} · <a href="https://t.me/AlephAgentBot" target="_blank" rel="noopener noreferrer">${t("Открыть бота","Open bot")}</a></footer>` : ""}
-    </main></div>
-    <nav aria-label="${t("Навигация", "Navigation")}" class="dock glass"><span aria-hidden="true" class="dock-lens"></span>${nav()}</nav>`;
-  workspace = app.querySelector("#view");
-  pageContent = workspace.querySelector(".page-content");
+    <main class="page-stage"><div class="page-track">${navs().map(([key, label]) => `
+      <section class="page-panel" data-view="${key}" aria-labelledby="title-${key}"${page === key ? "" : ' inert aria-hidden="true"'}>
+        <div class="workspace">
+          <header class="page-head"><img class="app-mark" src="./aleph.webp" width="30" height="30" alt="Aleph">
+            <h1 class="page-title" id="title-${key}" tabindex="-1">${label}</h1>
+            ${key === "home" ? '<p class="page-kicker"></p>' : ""}
+          </header>
+          <div class="page-content"></div>${footer}
+        </div>
+      </section>`).join("")}</div></main>
+    <nav aria-label="${t("Навигация", "Navigation")}" class="dock">
+      <span aria-hidden="true" class="dock-surface"></span><span aria-hidden="true" class="dock-lens"></span>${nav()}
+    </nav>`;
+  stage = app.querySelector(".page-stage");
+  track = stage.querySelector(".page-track");
   dock = app.querySelector(".dock");
+  lens = dock.querySelector(".dock-lens");
+  tabs = [...dock.querySelectorAll(".nav-item")];
+  views = [...track.children].map((panel, index) => ({
+    key: panel.dataset.view, index, panel, heading: panel.querySelector("h1"), content: panel.querySelector(".page-content"),
+  }));
+  sizeObserver?.disconnect();
+  sizeObserver = new ResizeObserver((entries) => {
+    for (const {target, contentRect} of entries) {
+      if (target === stage) trackWidth = contentRect.width;
+      else tabWidth = contentRect.width / tabs.length;
+    }
+  });
+  sizeObserver.observe(stage);
+  sizeObserver.observe(dock);
+  showPage(activeView().index, 0);
 }
 
-// Keep both the native navigation surface and its lens mounted as content changes.
-function render(fromSwipe = false) {
+function render() {
   if (!state) return;
-  if (!workspace?.isConnected) mountShell();
-  const tabs = navs(), index = tabs.findIndex(([key]) => key === page);
-  if (page !== mountedPage) {
-    const previous = tabs.findIndex(([key]) => key === mountedPage);
-    workspace.classList.remove("view-enter-forward","view-enter-backward");
-    if (mountedPage && !fromSwipe && !reducedMotion.matches) {
-      void workspace.offsetWidth;
-      workspace.classList.add(index > previous ? "view-enter-forward" : "view-enter-backward");
-    }
-    const title = tabs[index][1];
-    workspace.querySelector("h1").textContent = title;
-    document.title = title + " · Aleph";
-    dock.style.setProperty("--tab-index", index);
-    for(const tab of dock.querySelectorAll("[data-page]")){
-      const selected = tab.dataset.page === page;
-      tab.classList.toggle("active",selected);
-      if(selected) tab.setAttribute("aria-current","page");
-      else tab.removeAttribute("aria-current");
-    }
-    mountedPage = page;
+  if (!stage?.isConnected) mountShell();
+  const date = formatDate("date", Date.now());
+  const kicker = track.querySelector(".page-kicker");
+  if (kicker.textContent !== date) kicker.textContent = date;
+  // Each view keeps its own scroller and stays mounted during navigation.
+  for (const view of views) {
+    const markup = view.key === "home" ? overview() : view.key === "projects" ? projectsPage() : settingsPage();
+    if (view.markup === markup) continue;
+    const restore = view.content.contains(document.activeElement) ? controlSelector(document.activeElement) : null;
+    view.content.innerHTML = markup;
+    view.markup = markup;
+    if (restore) view.content.querySelector(restore)?.focus({preventScroll: true});
   }
-  const kicker = workspace.querySelector(".page-kicker");
-  kicker.hidden = page !== "home";
-  if (!kicker.hidden) {
-    kicker.textContent = localizedDate();
-  }
-  const markup = viewMarkup(page);
-  if (markup !== lastContent) {
-    const restore = pageContent.contains(document.activeElement) ? controlSelector(document.activeElement) : null;
-    pageContent.innerHTML = markup;
-    lastContent = markup;
-    if(restore) pageContent.querySelector(restore)?.focus({preventScroll:true});
-  }
-  app.setAttribute("aria-busy","false");
+  app.setAttribute("aria-busy", "false");
   syncBack();
 }
 
-// Track a horizontal pan only after it wins the direction lock. The browser owns
-// vertical scrolling and pinch zoom, including gestures beginning on a task row.
-let swipe = null;
-let suppressTap = false;
-const clamp = (value, min, max) => Math.min(max, Math.max(min,value));
+const trackTransform = (position) => `translate3d(${-position * 100}%,0,0)`;
+const lensTransform = (position, speed = 0) =>
+  `translate3d(${position * 100}%,0,0) scale(${1 + speed * .1},${1 - speed * .1})`;
 
-function viewMarkup(key) {
-  return key === "home" ? overview() : key === "projects" ? projectsPage() : settingsPage();
-}
-function localizedDate() {
-  return new Intl.DateTimeFormat(locale(), {timeZone:zone(), weekday:"long",day:"numeric",month:"long"}).format(new Date());
-}
-
-function clearSwipe() {
-  const gesture = swipe;
-  if (!gesture) return;
-  swipe = null;
-  cancelAnimationFrame(gesture.frame);
-  clearTimeout(gesture.timer);
-  gesture.peer?.remove();
-  workspace.classList.remove("swipe-pane","swipe-settling");
-  workspace.style.removeProperty("transform");
-  workspace.style.removeProperty("--snap-time");
+function showPage(index, duration) {
+  const previous = activeView();
+  const current = views[index];
+  const fromTrack = track.style.transform || trackTransform(previous.index);
+  const fromLens = lens.style.transform || lensTransform(previous.index);
+  trackMotion?.cancel();
+  lensMotion?.cancel();
   dock.classList.remove("is-tracking");
-  dock.style.removeProperty("--tab-position");
-  dock.style.removeProperty("--lens-speed");
-  if (app.hasPointerCapture?.(gesture.pointerId)) app.releasePointerCapture(gesture.pointerId);
-}
-
-function finishSwipe() {
-  const destination = swipe?.destination;
-  clearSwipe();
-  if (destination && destination !== page) navigate(destination, true);
-}
-
-function drawSwipe() {
-  const g=swipe;
-  if (!g || !g.locked || g.releasing) return;
-  g.frame=0;
-  const dx=g.x-g.startX;
-  const position=clamp(g.index + (g.onDock ? dx : -dx)/g.width,0,2);
-  dock.style.setProperty("--tab-position",position.toFixed(4));
-  dock.style.setProperty("--lens-speed",Math.min(1,Math.abs(g.velocity)).toFixed(2));
-  if (g.onDock || reducedMotion.matches) return;
-  const direction=Math.sign(position-g.index), neighbor=g.index+direction;
-  if (g.neighbor !== neighbor) {
-    g.peer?.remove();
-    g.peer=null;
-    g.neighbor=neighbor;
-    if(direction) {
-      const [key,title]=navs()[neighbor];
-      const peer=document.createElement("section");
-      peer.className="workspace swipe-pane swipe-peer";
-      peer.inert=true;
-      peer.setAttribute("aria-hidden","true");
-      peer.innerHTML='<header class="page-head"><img class="app-mark" src="./aleph.webp" width="30" height="30" alt=""><div><h2 class="page-title">'+e(title)+'</h2><p class="page-kicker"'+(key==="home"?'':' hidden')+'>'+e(localizedDate())+'</p></div></header><div class="page-content">'+viewMarkup(key)+'</div>';
-      workspace.after(peer);
-      // Match the next tab's saved scroll offset even when starting mid-page.
-      const prior=scrollByPage.get(key) || 0;
-      const extent=Math.max(0,peer.offsetHeight+workspace.parentElement.offsetTop-innerHeight);
-      peer.style.top=(window.scrollY-Math.min(prior,extent))+"px";
-      g.peer=peer;
+  track.style.transform = trackTransform(index);
+  lens.style.transform = lensTransform(index);
+  if (duration && !reducedMotion.matches) {
+    if (fromTrack !== track.style.transform) {
+      trackMotion = track.animate([{transform: fromTrack}, {transform: track.style.transform}], {
+        duration, easing: "cubic-bezier(.2,.75,.25,1)",
+      });
+    }
+    if (fromLens !== lens.style.transform) {
+      lensMotion = lens.animate([{transform: fromLens}, {transform: lens.style.transform}], {
+        duration: Math.max(220, duration), easing: "cubic-bezier(.18,.8,.28,1.07)",
+      });
     }
   }
-  const shift=direction ? clamp(dx,-g.width,g.width) : Math.sign(dx)*Math.min(25,Math.sqrt(Math.abs(dx))*1.6);
-  workspace.style.transform='translate3d('+shift+'px,0,0)';
-  if(g.peer)g.peer.style.transform='translate3d('+(shift+direction*g.width)+'px,0,0)';
+  if (current !== previous) {
+    const transferFocus = previous.panel.contains(document.activeElement);
+    previous.panel.inert = true;
+    previous.panel.setAttribute("aria-hidden", "true");
+    current.panel.inert = false;
+    current.panel.removeAttribute("aria-hidden");
+    tabs[previous.index].removeAttribute("aria-current");
+    tabs[index].setAttribute("aria-current", "page");
+    page = current.key;
+    if (transferFocus) current.heading.focus({preventScroll: true});
+    selectionFeedback();
+  }
+  document.title = current.heading.textContent + " · Aleph";
+  syncBack();
+}
+
+function navigate(id) {
+  const destination = views?.find((view) => view.key === id);
+  if (!destination) return;
+  if (swipe) cancelSwipe();
+  if (id === page) {
+    destination.panel.scrollTo({top: 0, behavior: reducedMotion.matches ? "auto" : "smooth"});
+    return;
+  }
+  showPage(destination.index, 240);
+}
+
+function resetSwipe() {
+  if (!swipe) return;
+  const {frame, pointerId} = swipe;
+  swipe = null;
+  cancelAnimationFrame(frame);
+  app.removeEventListener("touchmove", claimHorizontalTouch);
+  if (app.hasPointerCapture?.(pointerId)) app.releasePointerCapture(pointerId);
+}
+
+function cancelSwipe() {
+  if (!swipe) return;
+  const {index, locked} = swipe;
+  resetSwipe();
+  if (locked) showPage(index, 160);
+}
+
+// Let the browser own vertical gestures. A locked horizontal pan writes only
+// the two transform properties, with no layout reads or content rendering.
+function drawSwipe() {
+  const gesture = swipe;
+  if (!gesture) return;
+  gesture.frame = 0;
+  const {index, x, startX, onDock, width, velocity} = gesture;
+  const progress = index + (onDock ? x - startX : startX - x) / width;
+  const bounded = clamp(progress, 0, views.length - 1);
+  const overshoot = clamp((progress - bounded) * .16, -.055, .055);
+  if (!onDock && !reducedMotion.matches) track.style.transform = trackTransform(bounded + overshoot);
+  if (!reducedMotion.matches) {
+    const stretch = clamp(Math.abs(velocity) * .48 + Math.abs(overshoot) * 3 + .18, 0, 1);
+    lens.style.transform = lensTransform(bounded, stretch);
+  }
 }
 
 function startSwipe(event) {
-  if(!event.isPrimary) { clearSwipe(); return; }
-  suppressTap=false;
-  if (swipe?.releasing) finishSwipe();
-  if (swipe || !state || !workspace || sheet.open || pending || event.button!==0) return;
-  const target=event.target, onDock=Boolean(target.closest(".dock"));
-  if(!onDock && (!target.closest(".page-stage") || event.pointerType==="mouse")) return;
-  if(target.closest("input,textarea,select,[contenteditable=true],a,[data-no-swipe]") || window.getSelection()?.isCollapsed===false) return;
-  // Keep both edge gestures available to iOS, Android and Telegram itself.
-  if(event.clientX<24 || event.clientX>innerWidth-24) return;
-  const width=onDock?dock.querySelector(".nav-item").offsetWidth:workspace.clientWidth;
-  swipe={pointerId:event.pointerId,onDock,width,index:navs().findIndex(([key])=>key===page),startX:event.clientX,startY:event.clientY,x:event.clientX,time:event.timeStamp,velocity:0};
+  if (!event.isPrimary) { cancelSwipe(); return; }
+  suppressTap = false;
+  if (swipe || !stage?.isConnected || sheet.open || pending || event.button !== 0) return;
+  const target = event.target;
+  const onDock = dock.contains(target);
+  if (!onDock && (!stage.contains(target) || event.pointerType === "mouse")) return;
+  if (target.closest("input,textarea,select,[contenteditable=true],a,[data-no-swipe]") || window.getSelection()?.isCollapsed === false) return;
+  if (event.clientX < 24 || event.clientX > innerWidth - 24) return;
+  const width = onDock ? tabWidth : trackWidth;
+  if (!width) return;
+  swipe = {pointerId: event.pointerId, onDock, width, index: activeView().index,
+    startX: event.clientX, startY: event.clientY, x: event.clientX, time: event.timeStamp, velocity: 0};
+}
+
+function claimHorizontalTouch(event) {
+  if (event.touches.length === 1 && event.cancelable) event.preventDefault();
 }
 
 function moveSwipe(event) {
-  const g=swipe;
-  if(!g || g.pointerId!==event.pointerId || g.releasing)return;
-  if(!g.locked) {
-    const x=Math.abs(event.clientX-g.startX), y=Math.abs(event.clientY-g.startY);
-    if(Math.max(x,y)<9)return;
-    if(y>=x || (y>18 && x<1.35*y)) {clearSwipe();return;}
-    if(x<1.35*y)return;
-    g.locked=true;
-    suppressTap=true;
+  const gesture = swipe;
+  if (!gesture || gesture.pointerId !== event.pointerId) return;
+  if (!gesture.locked) {
+    const x = Math.abs(event.clientX - gesture.startX), y = Math.abs(event.clientY - gesture.startY);
+    if (Math.max(x, y) < 9) return;
+    if (y >= x || (y > 18 && x < 1.35 * y)) { resetSwipe(); return; }
+    if (x < 1.35 * y) return;
+    gesture.locked = true;
+    suppressTap = true;
+    trackMotion?.cancel();
+    lensMotion?.cancel();
     dock.classList.add("is-tracking");
-    workspace.classList.remove("view-enter-forward","view-enter-backward");
-    if(!g.onDock && !reducedMotion.matches) workspace.classList.add("swipe-pane");
+    // WebViews can absorb the next tap after an uncancelled horizontal fling.
+    app.addEventListener("touchmove", claimHorizontalTouch, {passive: false});
     try { app.setPointerCapture(event.pointerId); } catch {}
   }
-  const elapsed=Math.max(1,event.timeStamp-g.time);
-  g.velocity=(elapsed>100?0:g.velocity*.30)+.70*(event.clientX-g.x)/elapsed;
-  g.time=event.timeStamp;
-  g.x=event.clientX;
-  if(!g.frame)g.frame=requestAnimationFrame(drawSwipe);
+  const elapsed = Math.max(1, event.timeStamp - gesture.time);
+  gesture.velocity = (elapsed > 100 ? 0 : gesture.velocity * .30) + .70 * (event.clientX - gesture.x) / elapsed;
+  gesture.time = event.timeStamp;
+  gesture.x = event.clientX;
+  if (!gesture.frame) gesture.frame = requestAnimationFrame(drawSwipe);
 }
 
 function releaseSwipe(event) {
-  const g=swipe;
-  if(!g || g.pointerId!==event.pointerId || g.releasing)return;
-  if(!g.locked) {clearSwipe();return;}
-  g.x=event.clientX;
-  cancelAnimationFrame(g.frame);
-  drawSwipe();
-  const dx=g.x-g.startX;
-  const velocity=event.timeStamp-g.time<110?g.velocity:0;
-  const distance=g.onDock?dx:-dx;
-  const fast=Math.abs(velocity)>.48 && Math.sign(velocity)===Math.sign(dx) && Math.abs(dx)>=28;
-  const threshold = g.onDock ? .38 : Math.min(.32,90/g.width);
-  let offset=0;
-  if(Math.abs(distance)>=g.width*threshold || fast) {
-    offset=Math.sign(distance)*(g.onDock?Math.max(1,Math.round(Math.abs(dx)/g.width)):1);
+  const gesture = swipe;
+  if (!gesture || event.pointerId !== gesture.pointerId) return;
+  if (!gesture.locked) { resetSwipe(); return; }
+  const dx = event.clientX - gesture.startX;
+  const distance = gesture.onDock ? dx : -dx;
+  const velocity = event.timeStamp - gesture.time < 110 ? gesture.velocity : 0;
+  const flick = Math.abs(dx) >= 28 && Math.abs(velocity) > .48 && Math.sign(velocity) === Math.sign(dx);
+  const threshold = gesture.onDock ? gesture.width * .38 : Math.min(90, gesture.width * .28);
+  const offset = Math.abs(distance) < threshold && !flick ? 0 : Math.sign(distance) *
+    (gesture.onDock ? Math.max(1, Math.round(Math.abs(distance) / gesture.width)) : 1);
+  const index = clamp(gesture.index + offset, 0, views.length - 1);
+  if (gesture.frame) {
+    cancelAnimationFrame(gesture.frame);
+    gesture.x = event.clientX;
+    drawSwipe();
   }
-  const target=clamp(g.index+offset,0,2);
-  g.releasing=true;
-  g.destination=navs()[target][0];
-  dock.classList.remove("is-tracking");
-  dock.style.setProperty("--tab-position",target);
-  dock.style.setProperty("--lens-speed",0);
-  if (g.onDock || reducedMotion.matches) {
-    // Keep the original touch target alive through the browser's touchend.
-    g.timer=setTimeout(finishSwipe,32);
-    return;
-  }
-
-  const endX=(g.index-target)*g.width;
-  const duration=clamp(130+Math.abs(endX-dx)/g.width*130,130,255);
-  for(const pane of [workspace,g.peer].filter(Boolean)){
-    pane.style.setProperty("--snap-time",duration+"ms");
-    pane.classList.add("swipe-settling");
-  }
-  // Commit the last finger position before switching to the release curve.
-  void workspace.offsetWidth;
-  workspace.style.transform='translate3d('+endX+'px,0,0)';
-  if(g.peer)g.peer.style.transform='translate3d('+(endX+(g.neighbor-g.index)*g.width)+'px,0,0)';
-  g.timer=setTimeout(finishSwipe,duration+16);
+  resetSwipe();
+  const remaining = Math.abs(index - gesture.index - distance / gesture.width);
+  showPage(index, gesture.onDock ? 225 : clamp(150 + remaining * 90, 150, 245));
 }
 
-app.addEventListener("pointerdown",startSwipe);
-// Some embedded Chromium versions suppress the next tap after an uncancelled
-// touch fling. Once the horizontal axis is locked, the app owns this gesture.
-app.addEventListener("touchmove",event=>{
-  if(swipe?.locked && event.touches.length===1 && event.cancelable)event.preventDefault();
-},{passive:false});
-window.addEventListener("pointermove",moveSwipe,{passive:true});
-window.addEventListener("pointerup",releaseSwipe);
-window.addEventListener("pointercancel",event=>{
-  if(swipe?.pointerId===event.pointerId)clearSwipe();
+app.addEventListener("pointerdown", startSwipe);
+window.addEventListener("pointermove", moveSwipe, {passive: true});
+window.addEventListener("pointerup", releaseSwipe);
+window.addEventListener("pointercancel", (event) => {
+  if (swipe?.pointerId === event.pointerId) cancelSwipe();
 });
-window.addEventListener("resize",clearSwipe);
-window.addEventListener("blur",clearSwipe);
-app.addEventListener("click", event=>{
-  if(suppressTap && event.detail!==0) {
-    suppressTap=false;
-    event.preventDefault();event.stopImmediatePropagation();
+window.addEventListener("resize", cancelSwipe);
+window.addEventListener("blur", cancelSwipe);
+app.addEventListener("click", (event) => {
+  if (suppressTap && event.detail !== 0) {
+    suppressTap = false;
+    event.preventDefault();
+    event.stopImmediatePropagation();
   }
-},true);
-app.addEventListener("keydown",event=>{
-  const tab=event.target.closest(".dock [data-page]");
-  if(!tab || event.altKey || event.ctrlKey || event.metaKey)return;
-  const tabs=navs(), index=tabs.findIndex(([key])=>key===page);
-  const shortcuts={ArrowLeft:index-1,ArrowRight:index+1,Home:0,End:tabs.length-1};
-  if(!Object.hasOwn(shortcuts,event.key))return;
+}, true);
+app.addEventListener("keydown", (event) => {
+  if (!event.target.closest(".dock [data-page]") || event.altKey || event.ctrlKey || event.metaKey) return;
+  const index = activeView().index;
+  const shortcuts = {ArrowLeft: index - 1, ArrowRight: index + 1, Home: 0, End: tabs.length - 1};
+  if (!Object.hasOwn(shortcuts, event.key)) return;
   event.preventDefault();
-  const key=tabs[clamp(shortcuts[event.key],0,tabs.length-1)][0];
-  if(key!==page)navigate(key);
-  dock.querySelector('[data-page="'+key+'"]').focus({preventScroll:true});
+  const next = clamp(shortcuts[event.key], 0, tabs.length - 1);
+  if (next !== index) navigate(views[next].key);
+  tabs[next].focus({preventScroll: true});
 });
 
 function controlSelector(el){
@@ -415,7 +398,7 @@ function controlSelector(el){
 function taskRow(task) {
   const done = task.status === "done",
     late = !done && task.due_at && Date.parse(task.due_at) < Date.now();
-  return `<div class="task-row ${done ? "done" : ""}"><button class="task-toggle" data-action="toggle-task" data-id="${e(task.id)}" aria-label="${e((done ? t("Вернуть в работу", "Reopen") : t("Завершить", "Complete")) + " · " + task.title)}" aria-pressed="${done}"><span class="ring">${done ? icon("check") : ""}</span></button><button class="task-body" data-action="edit-task" data-id="${e(task.id)}"><span class="task-title">${e(task.title)}</span>${task.due_at ? `<span class="task-date ${late ? "late" : ""}">${icon("clock")}${e(clock(task.due_at))}</span>` : ""}</button><span class="arrow">${icon("arrow")}</span></div>`;
+  return `<div class="task-row ${done ? "done" : ""}"><button class="task-toggle" data-action="toggle-task" data-id="${e(task.id)}" aria-label="${e((done ? t("Вернуть в работу", "Reopen") : t("Завершить", "Complete")) + " · " + task.title)}" aria-pressed="${done}"><span class="ring">${done ? icon("check") : ""}</span></button><button class="task-body" data-action="edit-task" data-id="${e(task.id)}"><span class="task-title">${e(task.title)}</span>${task.due_at ? `<span class="task-date ${late ? "late" : ""}">${icon("clock")}${e(formatDate("clock", task.due_at))}</span>` : ""}</button><span class="arrow">${icon("arrow")}</span></div>`;
 }
 function taskEmpty(done = false) {
   return `<div class="empty"><span class="empty-symbol" aria-hidden="true">${icon(done ? "check" : "calendar")}</span><strong>${done ? t("Завершённых поручений пока нет", "No completed tasks yet") : t("Пока всё свободно", "Nothing on the list yet")}</strong><p>${done ? t("Здесь появятся отмеченные галочкой задачи.", "Tasks you check off will appear here.") : t("Напиши Алефу в чате или добавь поручение здесь.", "Message Aleph in chat or add a task here.")}</p></div>`;
@@ -423,39 +406,41 @@ function taskEmpty(done = false) {
 function switcher() {
   return `<button class="switch" role="switch" aria-label="${t("Проактивность", "Proactive updates")}" aria-checked="${Boolean(state.settings.proactive)}" data-action="proactive"></button>`;
 }
-function glyph(symbol, color) {
-  return `<span class="glyph ${color}">${icon(symbol)}</span>`;
+function glyph(symbol) {
+  return `<span class="glyph">${icon(symbol)}</span>`;
 }
 function integrationRows() {
-  return `<button class="integration-row" data-action="calendar">${glyph("calendar", "blue")}<span><span class="integration-label">${t("Календарь", "Calendar")}</span><small class="integration-info">${t("Экспорт поручений в .ics", "Export tasks as .ics")}</small></span><span class="tail">${icon("download")}</span></button><button class="integration-row" data-action="feeds">${glyph("rss", "orange")}<span><span class="integration-label">RSS</span><small class="integration-info">${state.feeds.length ? t("Подключено", "Connected") + " · " + state.feeds.length : t("Добавить источник", "Add a source")}</small></span><span class="tail">${icon("arrow")}</span></button>`;
+  return `<button class="integration-row" data-action="calendar">${glyph("calendar")}<span><span class="integration-label">${t("Календарь", "Calendar")}</span><small class="integration-info">${t("Экспорт поручений в .ics", "Export tasks as .ics")}</small></span><span class="tail">${icon("download")}</span></button><button class="integration-row" data-action="feeds">${glyph("rss")}<span><span class="integration-label">RSS</span><small class="integration-info">${state.feeds.length ? t("Подключено", "Connected") + " · " + state.feeds.length : t("Добавить источник", "Add a source")}</small></span><span class="tail">${icon("arrow")}</span></button>`;
 }
-function sectionHead(title, action = "", label = "") {
-  return `<div class="section-head"><h2>${title}</h2>${action ? `<button class="small-action" data-page="${action}">${label}${icon("right")}</button>` : ""}</div>`;
+function sectionHead(title) {
+  return `<h2 class="section-title">${title}</h2>`;
 }
 function overview() {
   const current = currentProject();
   const tasks = sorted();
   const visible = tasks.filter((item) => item.status === filter);
-  const today = due(Date.now(), false);
+  const today = localDateTime(Date.now(), zone()).slice(0, 10);
+  const tomorrow = new Date(Date.parse(today + "T12:00Z") + 86400000).toISOString().slice(0, 10);
+  const completed = tasks.length - tasks.filter((task) => task.status === "open").length;
   const groups = new Map();
   for (const item of visible) {
-    const day = due(item.due_at, false);
+    const day = dueDay(item.due_at, today, tomorrow);
     if (!groups.has(day)) groups.set(day, []);
     groups.get(day).push(item);
   }
   const filters = [["open", t("В работе", "Open")], ["done", t("Готово", "Done")]];
-  return `<button class="context-row panel" data-page="projects">${glyph(current ? "projects" : "person", "blue")}<span class="context-copy">
+  return `<button class="context-row panel" data-page="projects">${glyph(current ? "projects" : "person")}<span class="context-copy">
       <small><i class="signal-dot"></i>${t("Контекст в чате", "Active in chat")}</small><strong>${e(current?.name || t("Личное", "Personal"))}</strong></span>${icon("arrow")}</button>
     <div class="task-tools">
       <div class="segmented" aria-label="${t("Статус поручений", "Task status")}">${filters.map(([key, label]) =>
-        `<button aria-pressed="${filter === key}" data-filter="${key}" class="segment ${filter === key ? "active" : ""}">${label}<small>${tasks.filter((x) => x.status === key).length}</small></button>`).join("")}</div>
-      <button class="action-plus glass" aria-label="${t("Добавить поручение", "Add task")}" data-action="new-task">${icon("plus")}</button>
+        `<button aria-pressed="${filter === key}" data-filter="${key}" class="segment ${filter === key ? "active" : ""}">${label}<small>${key === "done" ? completed : tasks.length - completed}</small></button>`).join("")}</div>
+      <button class="action-plus" aria-label="${t("Добавить поручение", "Add task")}" data-action="new-task">${icon("plus")}</button>
     </div>
-    ${groups.size ? `<div class="agenda panel">${[...groups].map(([day,items]) => `<section class="task-group"><h2 class="group-label ${day === today ? "today" : ""}">${e(day)}</h2>${items.map(taskRow).join("")}</section>`).join("")}</div>`
+    ${groups.size ? `<div class="agenda panel">${[...groups].map(([day,items]) => `<section class="task-group"><h2 class="group-label ${day === t("Сегодня", "Today") ? "today" : ""}">${e(day)}</h2>${items.map(taskRow).join("")}</section>`).join("")}</div>`
       : `<div class="panel">${taskEmpty(filter === "done")}</div>`}
     ${bridge() && Number(state.snapshot_total || 0) > state.tasks.length ? `<p class="settings-note">${t("Полный список доступен в чате.", "See the complete list in chat.")}</p>` : ""}
     <section class="brief-section">${sectionHead(t("Уведомления", "Notifications"))}
-      <div class="panel"><button class="integration-row" data-page="settings">${glyph("bell", "green")}<span><span class="integration-label">${t("Утренний обзор", "Morning brief")}</span><small class="integration-info">${state.settings.proactive ? e(timeLabel(state.settings.digest_time)) + " · " + t("В чате с Алефом", "In Aleph chat") : t("На паузе", "Paused")}</small></span><span class="tail">${icon("arrow")}</span></button></div>
+      <div class="panel"><button class="integration-row" data-page="settings">${glyph("bell")}<span><span class="integration-label">${t("Утренний обзор", "Morning brief")}</span><small class="integration-info">${state.settings.proactive ? e(timeLabel(state.settings.digest_time)) + " · " + t("В чате с Алефом", "In Aleph chat") : t("На паузе", "Paused")}</small></span><span class="tail">${icon("arrow")}</span></button></div>
     </section>`;
 }
 function projectsPage() {
@@ -468,12 +453,12 @@ function projectsPage() {
     if (task.status === "open") counts.set(id, (counts.get(id) || 0) + 1);
   }
   const workspaces = [{ id:0, name:t("Личное","Personal") }, ...projects];
-  return `<p class="page-intro">${t("Выбранный проект задаёт контекст разговора с Алефом.", "Your selected project sets the context for your conversation with Aleph.")}</p>
+  return `<h2 class="section-title">${t("Контекст чата", "Chat context")}</h2>
     <div class="panel workspace-list">${workspaces.map((item) => {
       const selected = item.id === activeId();
       return `<button class="project-row" data-action="choose-project" data-id="${item.id}" ${selected ? 'aria-current="true"' : ""}>
-        ${glyph(item.id ? "projects" : "person", item.id ? "violet" : "blue")}
-        <span class="setting-copy"><strong>${e(item.name)}</strong><small>${selected ? `<i class="signal-dot"></i>` + t("Активен в чате", "Active in chat") : counts.has(item.id) ? t("В работе", "Open") + " · " + counts.get(item.id) : t("Нет открытых поручений", "No open tasks")}</small></span>
+        ${glyph(item.id ? "projects" : "person")}
+        <span class="setting-copy"><strong>${e(item.name)}</strong><small>${selected ? `<i class="signal-dot"></i>` + t("Активен в чате", "Active in chat") : counts.has(item.id) ? counts.get(item.id) + " · " + t("в работе", "open") : t("Нет открытых поручений", "No open tasks")}</small></span>
         <span class="tail ${selected ? "selected" : ""}">${icon(selected ? "check" : "arrow")}</span>
       </button>`;
     }).join("")}<button class="add-line new-project-action" data-action="new-project">${icon("plus")}${t("Новый проект","New project")}</button></div>
@@ -891,7 +876,7 @@ sheet.addEventListener("close", () => {
   modal = null;
   syncBack();
   const target = returnFocus?.isConnected ? returnFocus : focusTarget ? app.querySelector(focusTarget) : null;
-  (target || workspace?.querySelector("h1"))?.focus({preventScroll:true});
+  (target || activeView()?.heading)?.focus({preventScroll:true});
   returnFocus=null;
   focusTarget=null;
 });
@@ -1011,7 +996,9 @@ async function start() {
     await load();
   } catch (error) {
     app.setAttribute("aria-busy", "false");
-    workspace = null; mountedPage = null; lastContent = null;
+    sizeObserver?.disconnect();
+    stage = null;
+    views = null;
     app.innerHTML = `<main class="failure"><img src="./aleph.webp" width="45" alt=""><h1>Aleph</h1><p>${e(errorMessage(error))}</p><div class="actions"><button class="button" data-action="retry">${t("Повторить", "Try again")}</button><button class="button primary" data-action="chat">${t("В чат", "Open chat")}</button></div></main>`;
   } finally {
     loading = false;
