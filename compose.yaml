@@ -1,0 +1,41 @@
+services:
+  aleph:
+    build: .
+    restart: unless-stopped
+    init: true
+    environment:
+      BIND: 0.0.0.0
+      MINI_APP_URL: https://${ALEPH_DOMAIN:?set ALEPH_DOMAIN}
+      TELEGRAM_BOT_TOKEN_FILE: /run/secrets/telegram
+      OPENCODE_API_KEY_FILE: /run/secrets/opencode
+      OPENCODE_MODEL: ${OPENCODE_MODEL:-deepseek-v4.1-flash}
+      OPENCODE_FALLBACK_MODEL: ${OPENCODE_FALLBACK_MODEL:-}
+      OPENCODE_BASE_URL: ${OPENCODE_BASE_URL:-https://opencode.ai/zen/go/v1}
+      WHISPER_MODEL: ${WHISPER_MODEL:-small}
+    volumes:
+      - aleph_data:/data
+    secrets: [telegram, opencode]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8787/healthz',timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      ALEPH_DOMAIN: ${ALEPH_DOMAIN:?set ALEPH_DOMAIN}
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+secrets:
+  telegram:
+    file: ${TELEGRAM_BOT_TOKEN_FILE:?set Telegram secret file path}
+  opencode:
+    file: ${OPENCODE_API_KEY_FILE:?set OpenCode secret file path}
+volumes:
+  aleph_data:
+  caddy_data:
+  caddy_config:

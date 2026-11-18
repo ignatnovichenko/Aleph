@@ -1,0 +1,7 @@
+*
+!aleph/
+!aleph/**
+!web/
+!web/**
+!requirements*.txt
+**/__pycache__/
