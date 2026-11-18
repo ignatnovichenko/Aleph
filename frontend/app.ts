@@ -479,6 +479,7 @@ function chatgptSheet(pairing?: ChatGPTPairing) {
     const account = [chatgpt.email, chatgpt.model].filter(Boolean).join(" · ");
     openSheet("ChatGPT", `<p class="sheet-desc">${e(account || t("Аккаунт подключён", "Account connected"))}</p>
       <p class="sheet-desc">${t("Ответы в чате используют твой тариф ChatGPT.", "Chat replies use your ChatGPT plan.")}</p>
+      <p class="sheet-desc"><a href="https://chatgpt.com/settings/usage" target="_blank" rel="noopener noreferrer">${t("Лимиты тарифа", "Plan usage")}</a></p>
       <button class="button" data-action="disconnect-chatgpt">${t("Отключить аккаунт", "Disconnect account")}</button>`);
     return;
   }
