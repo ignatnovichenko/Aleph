@@ -9,9 +9,12 @@ import time
 
 import aiohttp
 
+from .chatgpt import plan as chatgpt
+from .chatgpt_pair import owner as chatgpt_owner
 from .hermes import create_agent
+from .links import settings_url
 from . import projects
-from .llm import ModelUnavailable
+from .llm import ChatGPTUnavailable, ModelUnavailable
 from . import media, memory, documents, widgets
 
 log = logging.getLogger(__name__)
@@ -103,13 +106,21 @@ class Inbox:
 
         widgets.initialize(self.db)
 
-        if "project_id" not in {r["name"] for r in self.db.execute("PRAGMA table_info(bot_inbox)")}:
+        columns = {r["name"] for r in self.db.execute("PRAGMA table_info(bot_inbox)")}
+        if "project_id" not in columns:
             self.db.execute("ALTER TABLE bot_inbox ADD COLUMN project_id INTEGER")
+        if "chatgpt_client" not in columns:
+            self.db.execute("ALTER TABLE bot_inbox ADD COLUMN chatgpt_client TEXT")
 
     def bind_project(self, update_id, uid):
         self.db.execute("UPDATE bot_inbox SET project_id=? WHERE id=? AND uid=? AND project_id IS NULL",
                         (projects.active(self.store, uid), update_id, uid))
         return self.db.execute("SELECT project_id FROM bot_inbox WHERE id=? AND uid=?", (update_id, uid)).fetchone()[0]
+
+    def bind_chatgpt(self, update_id, uid, client):
+        self.db.execute("UPDATE bot_inbox SET chatgpt_client=? WHERE id=? AND uid=? AND chatgpt_client IS NULL",
+                        (client or "", update_id, uid))
+        return self.db.execute("SELECT chatgpt_client FROM bot_inbox WHERE id=? AND uid=?", (update_id, uid)).fetchone()[0]
 
     def ingest(self, updates):
         if not updates:
@@ -259,6 +270,8 @@ async def _compose(row, store, inbox, tg, agent):
     from .privacy import privacy_reply
     erasure = privacy_reply(store, uid, msg.get("text") or "", row["id"])
     if erasure:
+        if chatgpt_owner(uid) and not store.db.execute("SELECT 1 FROM users WHERE id=?", (uid,)).fetchone():
+            await chatgpt.disconnect(tg.session, uid, erase=True)
         return None, erasure
     try:
         project_reply = projects.chat_command(store, uid, msg.get("text"), _uses_russian(msg))
@@ -281,7 +294,12 @@ async def _compose(row, store, inbox, tg, agent):
         return None, ("Нажми «Открыть план» внизу чата." if bridge_url else "Открой план кнопкой меню внизу чата.")
     command = (msg.get("text") or "").partition(" ")[0].partition("@")[0]
     if command in ("/start", "/help"):
-        return None, HELLO_RU if _uses_russian(msg) else HELLO_EN
+        ru = _uses_russian(msg)
+        reply = HELLO_RU if ru else HELLO_EN
+        if command == "/start" and chatgpt_owner(uid) and settings_url():
+            reply += ("\n\nСвою подписку ChatGPT можно подключить в настройках Алефа." if ru else
+                      "\n\nYou can connect your ChatGPT plan in Aleph settings.")
+        return None, reply
     query, photo = await _message_text(tg, msg)
     if "voice" in msg:
         try:
@@ -350,8 +368,10 @@ async def _handle(row, store, inbox, tg, agent):
                     raise
                 reply = "Telegram не смог открыть это вложение. Пришли файл ещё раз." if ru else "Telegram couldn’t retrieve this file. Please send it again."
             except ModelUnavailable as error:
-                log.warning("OpenCode temporarily unavailable status=%d", error.status)
-                if error.status in (0, 429, 500, 502, 503, 504) and row["retries"] == 0:
+                using_chatgpt = isinstance(error, ChatGPTUnavailable)
+                log.warning("%s unavailable status=%d", "ChatGPT" if using_chatgpt else "OpenCode", error.status)
+                retry_statuses = (0, 500, 502, 503, 504) if using_chatgpt else (0, 429, 500, 502, 503, 504)
+                if error.status in retry_statuses and row["retries"] == 0:
                     inbox.retry(row, 3)
                     return
                 saved = inbox.successful_mutations(update_id)
@@ -359,6 +379,14 @@ async def _handle(row, store, inbox, tg, agent):
                     reply = "Подготовил виджет." if ru else "Here’s the widget."
                 elif saved:
                     reply = "Сохранил изменения: " + ", ".join(saved) + ". Подробности есть в плане."
+                elif using_chatgpt and error.status == 429:
+                    reply = ("Лимит ChatGPT для Алефа достигнут. Проверь его в настройках ChatGPT: https://chatgpt.com/settings/usage" if ru else
+                             "Aleph has reached a ChatGPT limit. Check it at https://chatgpt.com/settings/usage")
+                elif using_chatgpt and error.status == 401:
+                    reply = ("Открой настройки Алефа и подключи ChatGPT заново." if ru else "Open Aleph settings and reconnect ChatGPT.")
+                elif using_chatgpt:
+                    reply = ("ChatGPT сейчас не принял запрос. Проверь доступ к подписке в настройках Алефа." if ru else
+                             "ChatGPT couldn't accept this request. Check your plan connection in Aleph settings.")
                 elif error.status in (400, 422) and "photo" in original:
                     reply = "Модель сейчас не смогла разобрать фотографию. Напиши, что на ней нужно проверить." if ru else "I couldn’t read this image. Can you describe what you’d like me to check?"
                 else:
@@ -392,6 +420,11 @@ async def _handle(row, store, inbox, tg, agent):
             if n == 0 and bridge_url and show_plan:
                 from .bridge import keyboard_markup
                 params["reply_markup"] = keyboard_markup(store, uid, bridge_url)
+            if n == 0 and command.split(" ", 1)[0] == "/start" and chatgpt_owner(uid):
+                url = settings_url()
+                if url:
+                    params["reply_markup"] = {"inline_keyboard": [[{"text": "Настройки" if ru else "Settings",
+                                                                     "web_app": {"url": url}}]]}
             await tg.call("sendMessage", **params)
             inbox.db.execute("UPDATE bot_inbox SET sent_chunks=? WHERE id=?", (n+1, update_id))
         inbox.done(update_id)

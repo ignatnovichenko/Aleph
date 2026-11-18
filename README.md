@@ -45,6 +45,23 @@ Static hosting is optional. After enabling GitHub Pages (GitHub Actions source) 
 
 Telegram delivery queues and tool results are persisted before replies. A crash exactly after Telegram accepts a message but before its acknowledgement is saved can result in duplicate delivery. Scheduler notifications are delivered while the service is online. An active webhook on the token must be removed by the operator before running this polling implementation.
 
+## Connect ChatGPT on a self-hosted instance
+
+Aleph can use eligible ChatGPT Plus or Pro plan usage for the owner of a personal, self-hosted instance. Set `ALEPH_CHATGPT_OWNER_ID` to the owner's numeric Telegram user ID and restart Aleph. This follows the [OpenAI self-hosted VM flow](https://developers.openai.com/siwc/token-sharing-open-source/self-hosted-vms). An app that offers ChatGPT plan usage as a shared hosted service needs [OpenAI hosted-app access](https://developers.openai.com/siwc/token-sharing-open-source).
+
+1. Open **Settings** in the live Telegram Mini App and create a one-time ChatGPT setup code.
+2. On the computer that will open the browser for sign-in, check out this repository and create a Python environment. Install the dependencies and run the local sign-in helper.
+
+   ```sh
+   python -m venv .venv
+   .venv/bin/python -m pip install -r requirements.txt
+   .venv/bin/python -m aleph.chatgpt_login connect
+   ```
+
+3. Paste the setup code into the helper's hidden prompt. Sign in on the OpenAI page in your system browser, then allow Aleph to use your ChatGPT plan. Return to the Mini App to see the connected account and model. On Windows, use `.venv\Scripts\python.exe` in place of `.venv/bin/python`.
+
+The helper completes OAuth locally and transfers the verified session to the instance in an encrypted packet. The code is valid for ten minutes and can be used once. Credentials and refresh tokens stay in the server's private directory. Set `ALEPH_CHATGPT_DIR` to select another directory. The Docker deployment keeps its session under `/data/chatgpt`. Settings can disconnect the session and link to [ChatGPT usage](https://chatgpt.com/settings/usage). Other Telegram users on the instance use OpenCode. When the owner's ChatGPT connection fails, Aleph shows the provider failure and offers reconnection or usage management.
+
 ## Checks
 
     npm ci

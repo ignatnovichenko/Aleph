@@ -11,7 +11,11 @@ from urllib.parse import parse_qsl
 import aiohttp
 from aiohttp import web
 
+from .chatgpt import plan as chatgpt
+from .chatgpt_auth import ChatGPTError
+from .chatgpt_pair import IMPORT_PATH, MAX_PACKET, owner as chatgpt_owner
 from .feeds import feed_catalog
+from .links import mini_app_url
 from . import projects, widgets
 from .store import UTC
 
@@ -200,6 +204,41 @@ def install_api(app, store, token):
                     pass
         return web.json_response({"chat_data": widgets.chat_state(mask)})
 
+    async def chatgpt_status(request, user):
+        return web.json_response(chatgpt.status(user["id"]))
+
+    async def chatgpt_pair(request, user):
+        if not chatgpt_owner(user["id"]):
+            raise KeyError("ChatGPT connection is unavailable.")
+        return web.json_response(chatgpt.prepare(user["id"], mini_app_url()))
+
+    async def chatgpt_disconnect(request, user):
+        if not chatgpt_owner(user["id"]):
+            raise KeyError("ChatGPT connection is unavailable.")
+        async with aiohttp.ClientSession(trust_env=True) as session:
+            return web.json_response(await chatgpt.disconnect(session, user["id"]))
+
+    async def chatgpt_import(request):
+        # The local CLI proves possession of the one-use code with the encrypted
+        # packet. A signed Telegram session is required to create that code.
+        raw = bytearray()
+        try:
+            if request.content_type != "application/json":
+                raise ValueError
+            async for block in request.content.iter_chunked(4096):
+                raw.extend(block)
+                if len(raw) > MAX_PACKET:
+                    raise ValueError
+            packet = json.loads(raw)
+            async with aiohttp.ClientSession(trust_env=True) as session:
+                status = await chatgpt.install(session, packet)
+            result, code = status, 200
+        except (ValueError, UnicodeError, OSError, RecursionError):
+            result, code = {"error": "Pairing could not be completed. Create a new code in Aleph."}, 400
+        except ChatGPTError as error:
+            result, code = {"error": "ChatGPT did not validate the connection."}, 503 if error.status in {0, 503} else 403
+        return web.json_response(result, status=code, headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+
     routes = [("GET", "/api/state", state), ("POST", "/api/tasks", create),
               ("PATCH", r"/api/tasks/{id:\d{1,18}}", update), ("PATCH", "/api/settings", settings),
               ("POST", "/api/projects", create_project), ("PATCH", "/api/projects/active", choose_project),
@@ -207,6 +246,9 @@ def install_api(app, store, token):
               ("GET", "/api/calendar.ics", calendar), ("GET", "/api/feeds", list_feeds),
               ("POST", "/api/feeds", add_feed), ("DELETE", r"/api/feeds/{id:\d{1,18}}", remove_feed)]
     routes += [("GET", r"/api/widgets/{id:\d{1,18}}", widget_view),
-               ("PATCH", r"/api/widgets/{id:\d{1,18}}", widget_check)]
+               ("PATCH", r"/api/widgets/{id:\d{1,18}}", widget_check),
+               ("GET", "/api/chatgpt", chatgpt_status), ("POST", "/api/chatgpt/pair", chatgpt_pair),
+               ("DELETE", "/api/chatgpt", chatgpt_disconnect)]
     for method, path, handler in routes:
         app.router.add_route(method, path, scoped(handler))
+    app.router.add_post(IMPORT_PATH, chatgpt_import)

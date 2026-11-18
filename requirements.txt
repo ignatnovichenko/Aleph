@@ -1,3 +1,4 @@
 aiohttp>=3.12.15,<4
 Pillow>=11.3,<14
 pypdf>=7.1.1,<8
+PyJWT[crypto]>=2.10.1,<3

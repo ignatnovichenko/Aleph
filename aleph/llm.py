@@ -79,6 +79,12 @@ class ModelUnavailable(Exception):
         self.status = status
         super().__init__(f"OpenCode response status {status}")
 
+class ChatGPTUnavailable(ModelUnavailable):
+    def __init__(self, error):
+        self.code = error.code
+        super().__init__(error.status)
+
+
 class RegionUnavailable(ModelUnavailable):
     pass
 
@@ -106,6 +112,23 @@ class Aleph:
             except RegionUnavailable:
                 self.unavailable_until[model] = time.monotonic() + 1800
         return await self._request(messages, self.fallback_model, tools=tools, session_id=session_id)
+
+    async def complete_turn(self, messages, model, *, tools, uid, project_id, ledger, update_id, step):
+        from .chatgpt import ChatGPTError, plan
+
+        client = ledger.bind_chatgpt(update_id, uid, plan.selected(uid))
+        if not client:
+            return await self.completion(messages, model, tools=tools, session_id=f"aleph-chat-{uid}-{project_id}")
+        previous = {}
+        for number in range(step):
+            reply = ledger.get_step(update_id, number) or {}
+            calls, output = reply.get("tool_calls"), reply.get("_chatgpt_output")
+            if calls and output:
+                previous[calls[0]["id"]] = output
+        try:
+            return await plan.complete(self.session, uid, client, messages, TOOLS if tools else [], previous)
+        except ChatGPTError as error:
+            raise ChatGPTUnavailable(error) from error
 
     async def _request(self, messages, model, *, tools, session_id):
         payload = {"model": model, "messages": messages,
@@ -282,7 +305,8 @@ class Aleph:
         for step in range(6):
             reply = ledger.get_step(update_id, step)
             if reply is None:
-                reply = await self.completion(messages, model, tools=step < 5, session_id=f"aleph-chat-{uid}-{project_id}")
+                reply = await self.complete_turn(messages, model, tools=step < 5, uid=uid, project_id=project_id,
+                                                 ledger=ledger, update_id=update_id, step=step)
                 ledger.save_step(update_id, step, reply)
             calls = reply.get("tool_calls") or []
             if not calls:

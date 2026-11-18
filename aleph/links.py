@@ -1,7 +1,7 @@
 """Public links for Telegram's signed Mini App."""
 import os
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 
 def mini_app_url():
@@ -28,3 +28,15 @@ def widget_url(widget_id):
     parts = urlsplit(url)
     return urlunsplit((parts.scheme, parts.netloc, parts.path.rstrip("/") + "/widget.html",
                        f"id={widget_id}", ""))
+
+
+def settings_url():
+    try:
+        url = mini_app_url()
+    except (ValueError, OSError):
+        return ""
+    if not url:
+        return ""
+    parts = urlsplit(url)
+    query = [(key, value) for key, value in parse_qsl(parts.query) if key != "view"]
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query + [("view", "settings")]), ""))

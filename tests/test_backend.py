@@ -1,17 +1,21 @@
 import hashlib
 import hmac
 import json
+import os
 import tempfile
 import time
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlencode
+from unittest.mock import AsyncMock, patch
 
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
+from aleph import chatgpt, chatgpt_auth
 from aleph.api import install_api, signed_user
+from aleph.chatgpt_pair import encrypt_for_vm
 from aleph.feeds import CATALOG, parse_feed
 from aleph.scheduler import deliver, queue_messages, quiet
 from aleph.store import UTC, Store, parse_due, timestamp
@@ -97,6 +101,34 @@ class BackendAPI(unittest.IsolatedAsyncioTestCase):
             parse_feed(b'<!DOCTYPE a [<!ENTITY x "x">]><a>&x;</a>')
         self.assertEqual(parse_feed(b'<rss><channel><item><title>Hi</title><link>https://example.org/item</link></item></channel></rss>'),
                          [{"title":"Hi", "url":"https://example.org/item"}])
+
+    async def test_chatgpt_pairing_requires_signed_owner_and_is_single_use(self):
+        route = "/api/chatgpt"
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {
+                "ALEPH_CHATGPT_OWNER_ID": "1", "ALEPH_CHATGPT_DIR": str(Path(tmp) / "chatgpt"),
+                "MINI_APP_URL": "https://aleph.example.org",
+        }), patch("aleph.api.chatgpt", chatgpt.ChatGPTPlan()):
+            self.assertEqual((await self.client.get(route)).status, 401)
+            stranger = await (await self.client.get(route, headers=self.headers(2))).json()
+            self.assertFalse(stranger["available"])
+            self.assertEqual((await self.client.post(route + "/pair", headers=self.headers(2))).status, 404)
+            response = await self.client.post(route + "/pair", headers=self.headers())
+            self.assertEqual(response.status, 200)
+            setup = await response.json()
+            _, packet = encrypt_for_vm(setup["code"], {
+                "client_id": "oaiapp_example", "subject": "example", "id_token": "signed-id-token",
+                "access_token": "short-lived-access-token", "refresh_token": "private-refresh-token",
+                "scopes": chatgpt_auth.SCOPES.split(), "expires_at": time.time() + 3600,
+            })
+            models = [{"slug": "gpt-6.2-sol", "display_name": "GPT-6.2 Sol"}]
+            with patch.object(chatgpt, "validate_id_token", AsyncMock(return_value={"sub": "example"})), \
+                 patch.object(chatgpt_auth, "models_for", AsyncMock(return_value=models)):
+                imported = await self.client.post(route + "/import", json=packet)
+            self.assertEqual(imported.status, 200)
+            self.assertTrue((await imported.json())["connected"])
+            self.assertNotIn("token", await (await self.client.get(route, headers=self.headers())).text())
+            self.assertEqual((await self.client.post(route + "/import", json=packet)).status, 400)
+            self.assertEqual((await self.client.delete(route, headers=self.headers(2))).status, 404)
 
 
 class OkSession:

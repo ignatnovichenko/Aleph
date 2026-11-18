@@ -11,6 +11,8 @@ services:
       OPENCODE_MODEL: ${OPENCODE_MODEL:-claude-haiku-5-5}
       OPENCODE_FALLBACK_MODEL: ${OPENCODE_FALLBACK_MODEL:-}
       OPENCODE_BASE_URL: ${OPENCODE_BASE_URL:-https://opencode.ai/zen/go/v1}
+      ALEPH_CHATGPT_OWNER_ID: ${ALEPH_CHATGPT_OWNER_ID:-}
+      ALEPH_CHATGPT_DIR: /data/chatgpt
       WHISPER_MODEL: ${WHISPER_MODEL:-small}
     volumes:
       - aleph_data:/data

@@ -69,9 +69,9 @@ class TurnBroker:
             try:
                 reply = self.ledger.get_step(self.update_id, step)
                 if reply is None:
-                    reply = await self.agent.completion(
+                    reply = await self.agent.complete_turn(
                         data["messages"], self.model, tools=bool(data.get("tools")) and step < MAX_STEPS - 1,
-                        session_id=f"aleph-chat-{self.uid}-{self.project_id}",
+                        uid=self.uid, project_id=self.project_id, ledger=self.ledger, update_id=self.update_id, step=step,
                     )
                     self.ledger.save_step(self.update_id, step, reply)
             except ModelUnavailable as exc:
@@ -87,7 +87,8 @@ class TurnBroker:
             return web.json_response({
                 "id": f"chatcmpl-aleph-{step}", "object": "chat.completion", "created": int(time.time()),
                 "model": self.model, "choices": [{"index": 0,
-                    "message": {"role": "assistant", **reply}, "finish_reason": "tool_calls" if calls else "stop"}],
+                    "message": {"role": "assistant", **{k: v for k, v in reply.items() if k != "_chatgpt_output"}},
+                    "finish_reason": "tool_calls" if calls else "stop"}],
             })
 
     async def tool(self, request):
