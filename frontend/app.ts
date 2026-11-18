@@ -484,8 +484,9 @@ function chatgptSheet(pairing?: ChatGPTPairing) {
     return;
   }
   const setup = `${chatgpt.needs_reauth ? `<p class="sheet-desc">${t("Срок действия подключения истёк. Войди в ChatGPT снова.", "Your connection expired. Sign in to ChatGPT again.")}</p>` : ""}
-    <p class="sheet-desc">${t("Подключи свой тариф ChatGPT для ответов Алефа. Запусти команду на компьютере и введи одноразовый код. Вход откроется в браузере.", "Connect your ChatGPT plan for Aleph’s replies. Run this command on your computer and enter the one-time code to sign in from your browser.")}</p>
-    <p class="sheet-desc"><code>python -m aleph.chatgpt_login connect</code></p>
+    <p class="sheet-desc">${pairing
+      ? t("Запусти помощник из папки OneBot и вставь код. Страница входа в ChatGPT откроется в браузере.", "Run the helper from the OneBot folder and paste the code. The ChatGPT sign-in page will open in your browser.")
+      : t("При первом подключении сначала скачай Aleph и установи зависимости на компьютере. Получи одноразовый код, когда помощник будет готов к запуску.", "For your first connection, download Aleph and install its dependencies on your computer. Generate the one-time code when you are ready to run the helper.")}</p>
     <p class="sheet-desc"><a href="https://github.com/ignatnovichenko/OneBot#connect-chatgpt-on-a-self-hosted-instance" target="_blank" rel="noopener noreferrer">${t("Инструкция по подключению", "Connection instructions")}</a></p>`;
   const code = pairing ? `<label class="field">${t("Одноразовый код", "One-time code")}<input id="chatgpt-pair-code" readonly value="${e(pairing.code)}" spellcheck="false" dir="ltr"></label>
     <p class="sheet-desc">${t("Срок действия, мин.", "Valid for, min.")} ${Math.ceil(pairing.expires_in / 60)}</p>` : "";
