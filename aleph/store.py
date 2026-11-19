@@ -59,7 +59,8 @@ class Store:
                 language_code TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
                 proactive INTEGER NOT NULL DEFAULT 1, timezone TEXT NOT NULL DEFAULT 'UTC',
                 quiet_start TEXT NOT NULL DEFAULT '22:00', quiet_end TEXT NOT NULL DEFAULT '08:00',
-                digest_time TEXT NOT NULL DEFAULT '09:00', blocked_until TEXT
+                digest_time TEXT NOT NULL DEFAULT '09:00', blocked_until TEXT,
+                theme TEXT NOT NULL DEFAULT 'auto' CHECK(theme IN ('auto','white','dark'))
             );
             CREATE TABLE IF NOT EXISTS tasks (
                 id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id),
@@ -107,6 +108,9 @@ class Store:
         if "routine_id" not in {row["name"] for row in self.db.execute("PRAGMA table_info(deliveries)")}:
             self.db.execute("ALTER TABLE deliveries ADD COLUMN routine_id INTEGER REFERENCES routines(id)")
 
+        if "theme" not in {row["name"] for row in self.db.execute("PRAGMA table_info(users)")}:
+            self.db.execute("ALTER TABLE users ADD COLUMN theme TEXT NOT NULL DEFAULT 'auto' CHECK(theme IN ('auto','white','dark'))")
+
         projects.initialize(self.db)
         connections.initialize(self.db)
         capture.initialize(self.db)
@@ -145,20 +149,23 @@ class Store:
         return dict(row)
 
     def get_settings(self, uid):
-        row = self.db.execute("""SELECT proactive,timezone,quiet_start,quiet_end,digest_time
+        row = self.db.execute("""SELECT proactive,timezone,quiet_start,quiet_end,digest_time,theme
             FROM users WHERE id=?""", (uid,)).fetchone()
         if row is None:
             raise KeyError("Пользователь не найден.")
         return {**dict(row), "proactive": bool(row["proactive"])}
 
     def patch_settings(self, uid, fields):
-        allowed = {"proactive", "quiet_start", "quiet_end", "digest_time", "timezone"}
+        allowed = {"proactive", "quiet_start", "quiet_end", "digest_time", "timezone", "theme"}
         if not fields or fields.keys() - allowed:
             raise ValueError("Неизвестная настройка.")
         for key, value in fields.items():
             if key == "proactive":
                 if type(value) is not bool:
                     raise ValueError("proactive должен быть true или false.")
+            elif key == "theme":
+                if value not in ("auto", "white", "dark"):
+                    raise ValueError("Выбери фон мини-приложения.")
             elif key == "timezone":
                 try:
                     if not isinstance(value, str) or len(value) > 80:

@@ -68,7 +68,10 @@ export interface ProjectEntry {
   created_at: string;
 }
 
+export type ThemeMode = "auto" | "white" | "dark";
+
 export interface Settings {
+  theme?: ThemeMode;
   proactive: boolean;
   timezone: string;
   quiet_start: string;

@@ -290,6 +290,8 @@ button:is(.integration-row,.project-row,.setting-row,.context-row,.add-line,.seg
 }
 .plan-tabs button[aria-pressed="true"] { color: var(--text); background: var(--paper); box-shadow: 0 1px 4px var(--hair); font-weight: 550; }
 .plan-tabs small { font-size: 10px; color: var(--hint); }
+.theme-options { grid-template-columns: repeat(3, minmax(0,1fr)); }
+.theme-options button { min-height: 44px; white-space: normal; }
 .plan-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 46px; margin: 15px 0 9px; }
 .plan-heading .section-title { margin: 0; }
 .plan-heading:first-child { margin-top: 0; }

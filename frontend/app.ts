@@ -1,7 +1,7 @@
 import { icon } from "./icons.js";
 import type { IconName } from "./icons.js";
 import type { RequestOptions, WriteMethod, Writes } from "./store.js";
-import type { CalendarEvent, ChatGPTConnection, ChatGPTPairing, ProjectEntry, Service, ModelCatalog, ModelChoice, ModelProvider, Project, ProviderModel, Task, WorkspaceState } from "./types.js";
+import type { CalendarEvent, ChatGPTConnection, ChatGPTPairing, ProjectEntry, Service, ModelCatalog, ModelChoice, ModelProvider, Project, ProviderModel, Task, ThemeMode, WorkspaceState } from "./types.js";
 import {
   bridge,
   demo,
@@ -27,6 +27,7 @@ const sheet = requiredElement<HTMLDialogElement>(document, "#sheet");
 const toastEl = requiredElement(document, "#toast");
 let calendarFile: File | undefined;
 let state: WorkspaceState;
+let previewTheme: ThemeMode | undefined;
 let page: Page = new URLSearchParams(location.search).get("view") === "settings" ? "settings" : "home";
 type PlanFilter = "today" | "upcoming" | "inbox" | "done";
 let filter: PlanFilter = "today";
@@ -74,18 +75,22 @@ const navs = (): [Page, string][] => [
   ["projects", t("Проекты", "Projects")],
   ["settings", t("Настройки", "Settings")],
 ];
-function isDark() {
+function prefersDark() {
   const tg = webapp();
   return tg?.platform && tg.platform !== "unknown" && tg.colorScheme
     ? tg.colorScheme === "dark"
     : matchMedia("(prefers-color-scheme: dark)").matches;
 }
+const themeMode = () => previewTheme ?? state?.settings.theme ?? "auto";
+
 function setTheme() {
-  const dark = isDark();
+  const mode = themeMode();
+  const dark = mode === "dark" || (mode === "auto" && prefersDark());
   const root = document.documentElement;
   const tg = webapp();
   root.dataset.theme = dark ? "dark" : "light";
-  const bg = dark ? "#141313" : "#f5f2eb";
+  root.toggleAttribute("data-white-theme", mode === "white");
+  const bg = getComputedStyle(root).getPropertyValue("--bg").trim();
   const meta = document.querySelector<HTMLMetaElement>("meta[name=theme-color]");
   if (meta) meta.content = bg;
   try {
@@ -773,12 +778,25 @@ function routinesPanel() {
     .join("");
   return `<section class="settings-block routine-block"><h2 class="settings-title">${t("Регулярные поручения", "Recurring tasks")}</h2><div class="panel">${rows}<button class="add-line" data-action="chat">${icon("plane")}${t("Изменить в чате", "Manage in chat")}</button></div></section>`;
 }
+function themeSettings() {
+  const current = themeMode();
+  const options: [ThemeMode, string][] = [
+    ["auto", t("Как в Telegram", "Match Telegram")],
+    ["white", t("Белый", "White")],
+    ["dark", t("Тёмный", "Dark")],
+  ];
+  return `<section class="settings-block">
+    <h2 class="settings-title">${t("Оформление", "Appearance")}</h2>
+    <div class="plan-tabs theme-options" role="group" aria-label="${t("Фон", "Background")}">${
+      options.map(([mode,label]) => `<button type="button" data-action="theme" data-id="${mode}" aria-pressed="${mode === current}">${label}</button>`).join("")
+    }</div></section>`;
+}
 function settingsPage() {
   const s = state.settings;
   const detected = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const row = (label: string, detail: string, val: string) =>
     `<button class="setting-row" data-action="schedule"><span class="setting-copy"><strong>${label}</strong><span class="setting-detail">${detail}</span></span><span class="setting-value">${e(val)}${icon("arrow")}</span></button>`;
-  return `<div class="settings-grid">${modelSettingsBlock()}<section class="settings-block"><h2 class="settings-title">${t("Ритм дня", "Daily rhythm")}</h2><div class="panel"><div class="setting-row"><span><strong>${t("Проактивность", "Proactive updates")}</strong><span class="setting-detail">${t("Обзоры и инициативы в чате", "Briefings and check-ins in chat")}</span></span>${switcher()}</div>
+  return `<div class="settings-grid">${modelSettingsBlock()}${themeSettings()}<section class="settings-block"><h2 class="settings-title">${t("Ритм дня", "Daily rhythm")}</h2><div class="panel"><div class="setting-row"><span><strong>${t("Проактивность", "Proactive updates")}</strong><span class="setting-detail">${t("Обзоры и инициативы в чате", "Briefings and check-ins in chat")}</span></span>${switcher()}</div>
   ${row(t("Утренний обзор", "Morning brief"), t("Когда присылать план на день", "When to send your daily plan"), timeLabel(s.digest_time))}${row(t("Тихие часы", "Quiet hours"), t("Время для отдыха", "Your time to disconnect"), timeLabel(s.quiet_start) + " – " + timeLabel(s.quiet_end))}${row(t("Часовой пояс", "Time zone"), t("Для поручений и обзоров", "For tasks and briefings"), zone())}</div>${zone() === "UTC" && detected && detected !== "UTC" ? `<button class="small-action tz-suggest" data-action="detected-zone">${icon("globe")}${t("Использовать часовой пояс устройства", "Use device time zone")} · ${e(detected)}</button>` : ""}</section>
   <section class="settings-block"><h2 class="settings-title">${t("Подключения", "Connections")}</h2><div class="panel">${serviceRows()}${integrationRows()}${chatgptRow()}</div><a class="privacy-link" href="./privacy.html" target="_blank" rel="noopener noreferrer">${t("Конфиденциальность", "Privacy")}</a></section></div>`;
 }
@@ -948,6 +966,7 @@ async function load() {
   }
   state.feeds ??= [];
   state.settings.digest_time ??= "09:00";
+  setTheme();
   render();
   if (!demo && !bridge()) void syncChatGPT();
 }
@@ -1129,6 +1148,20 @@ async function act(action: string, id?: string) {
     case "edit-task":
       if (byId(id)) taskSheet(byId(id));
       break;
+    case "theme": {
+      if ((id !== "auto" && id !== "white" && id !== "dark") || id === themeMode()) break;
+      previewTheme = id;
+      setTheme();
+      render();
+      const saved = await write("/api/settings", "PATCH", {theme: id}, settings => {
+        state.settings.theme = settings?.theme ?? id;
+      }, "");
+      if (saved && bridge()) state.settings.theme = id;
+      previewTheme = undefined;
+      setTheme();
+      render();
+      break;
+    }
     case "schedule":
       schedule();
       break;
@@ -1485,6 +1518,7 @@ async function refresh() {
     if (!pending && !sheet.open && !swipe?.locked && sequence === revision) {
       const previouslyConnected = state.connections?.calendar;
       state = fresh;
+      setTheme();
       render();
       if (page === "projects" && projectDetail) void loadProject(projectDetail);
       if (fresh.connections?.calendar === "connected" && (previouslyConnected !== "connected" || page === "home")) void loadAgenda();

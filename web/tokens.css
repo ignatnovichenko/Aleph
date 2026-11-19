@@ -36,6 +36,13 @@
   font-weight: 350;
   -webkit-font-smoothing: antialiased;
 }
+:root[data-white-theme] {
+  --bg: #ffffff;
+  --panel: #fafafa;
+  --paper: #fff;
+  --dock-bed: #ffffff9e;
+  --dock-web: #fffffff2;
+}
 :root[data-theme="dark"] {
   color-scheme: dark;
   --bg: #141313;

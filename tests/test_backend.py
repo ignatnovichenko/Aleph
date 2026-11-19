@@ -43,6 +43,20 @@ class BackendAPI(unittest.IsolatedAsyncioTestCase):
     def headers(self, uid=1):
         return {"Authorization": "tma " + auth(uid)}
 
+    async def test_appearance_is_persisted_for_the_signed_user(self):
+        headers = self.headers()
+        self.assertEqual((await self.client.patch("/api/settings", json={"theme": "dark"})).status, 401)
+        for theme in ("white", "dark", "auto"):
+            response = await self.client.patch("/api/settings", headers=headers, json={"theme": theme})
+            self.assertEqual(response.status, 200)
+            stored = await (await self.client.get("/api/state", headers=headers)).json()
+            self.assertEqual(stored["settings"]["theme"], theme)
+        await self.client.patch("/api/settings", headers=headers, json={"theme": "dark"})
+        self.assertEqual((await self.client.patch("/api/settings", headers=headers, json={"theme": []})).status, 400)
+        fresh = await (await self.client.get("/api/state", headers=self.headers(2))).json()
+        self.assertEqual(fresh["settings"]["theme"], "auto")
+        self.assertEqual(self.store.get_settings(1)["theme"], "dark")
+
     async def test_signed_scope_mutations_export(self):
         self.assertEqual((await self.client.get("/api/state")).status, 401)
         headers = self.headers()
