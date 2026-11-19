@@ -1,7 +1,7 @@
 import { bridge, bridgeRequest } from "./bridge.js";
 import { apiRequest, statePath } from "./transport.js";
 import type { RequestOptions, WriteMethod } from "./transport.js";
-import type { CalendarEvent, ChatGPTConnection, ChatGPTPairing, Connections, Service, ProjectEntry, Feed, ModelCatalog, ModelSummary, Project, SavedMemory, Settings, Task, WidgetState, WorkspaceState } from "./types.js";
+import type { CalendarEvent, ChatGPTConnection, ChatGPTPairing, Connections, Service, ProjectEntry, Feed, ModelCatalog, ModelSummary, Project, ProjectSkills, SavedMemory, Settings, Skill, SkillDraft, SkillSummary, Task, WidgetState, WorkspaceState } from "./types.js";
 
 export { bridge };
 export type { RequestOptions, WriteMethod };
@@ -16,6 +16,9 @@ type Reads = {
   [path: `/api/tasks/${number}/result`]: {html: string | null; delivered_at: string | null};
   [path: `/api/connections/calendar/events?${string}`]: {events: CalendarEvent[]; more: boolean};
   [path: `/api/projects/${number}/entries`]: ProjectEntry[];
+  [path: `/api/projects/${number}/skills`]: ProjectSkills;
+  "/api/skills": SkillSummary[];
+  [path: `/api/skills/${number}`]: Skill;
   [path: `/api/widgets/${string}`]: WidgetState & { html: string };
 };
 
@@ -33,6 +36,10 @@ export type Writes = {
   "/api/connections/drive/picker": {url: string};
   [path: `/api/projects/${number}/entries`]: ProjectEntry;
   [path: `/api/projects/${number}/entries/${number}`]: null;
+  [path: `/api/projects/${number}/skills`]: {selected: number[]};
+  "/api/skills": Skill;
+  "/api/skills/preview": SkillDraft;
+  [path: `/api/skills/${number}`]: Skill;
   [path: `/api/feeds/${string}`]: null;
   [path: `/api/memory/${number}`]: null;
   [path: `/api/widgets/${string}`]: WidgetState;

@@ -55,6 +55,21 @@ export interface Project {
   context: string;
 }
 
+export interface SkillSummary {
+  id: number;
+  name: string;
+  description: string;
+  source_url: string;
+}
+
+export type SkillDraft = Omit<SkillSummary, "id"> & {instructions: string};
+export type Skill = SkillSummary & {instructions: string};
+export interface ProjectSkills {
+  skills: SkillSummary[];
+  selected: number[];
+  limit: number;
+}
+
 export type Service = "calendar" | "notion" | "drive" | "gmail";
 export type ConnectionStatus = "unavailable" | "disconnected" | "connected" | "reconnect";
 export type Connections = Record<Service, ConnectionStatus>;

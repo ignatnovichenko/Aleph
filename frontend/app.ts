@@ -1,9 +1,11 @@
 import { icon } from "./icons.js";
 import { revealMiniApp } from "./telegram.js";
 import { bindSheetMotion } from "./sheet-motion.js";
+import { ApiMessage } from "./transport.js";
 import type { IconName } from "./icons.js";
 import type { RequestOptions, WriteMethod, Writes } from "./store.js";
 import type { CalendarEvent, ChatGPTConnection, ChatGPTPairing, ProjectEntry, ReplyStyle, SavedMemory, Service, ModelCatalog, ModelChoice, ModelProvider, Project, ProviderModel, Settings, Task, ThemeMode, WorkspaceState } from "./types.js";
+import type { ProjectSkills, SkillDraft, SkillSummary } from "./types.js";
 import {
   bridge,
   demo,
@@ -175,6 +177,7 @@ function message(text: string, duration=3300) {
   }, duration);
 }
 function errorMessage(error: unknown) {
+  if (error instanceof ApiMessage) return error.message;
   const reason = error instanceof Error ? error.message : "";
   if (reason === "static-plan") {
     return t(
@@ -839,15 +842,20 @@ function projectPage(project?: Project) {
   const tasks = sorted(state.tasks.filter(task => (task.project_id || 0) === id));
   const done = tasks.filter(taskDone);
   const open = tasks.filter(task => !taskDone(task));
-  if (!project) return projectTasks(id, open, done);
+  const skillRow = `<div class="panel project-skill-link">${settingRow("skills", t("Скиллы", "Skills"),
+    t("Выбрать для этого проекта", "Choose for this workspace"), "project-skills", String(id))}</div>`;
+  if (!project) return skillRow + projectTasks(id, open, done);
 
   const hasContext = !!project.context.trim();
-  return `<button class="project-context panel setting-row" data-action="project-context" data-id="${id}">
+  return `<div class="panel project-configuration">
+      <button class="project-context setting-row" data-action="project-context" data-id="${id}">
       ${glyph("document")}<span class="setting-copy">
         <strong>${t("Контекст и инструкции","Context and instructions")}</strong>
         <span class="setting-detail" dir="auto">${hasContext ? e(project.context) : t("Добавить контекст","Add context")}</span>
       </span><span class="tail">${icon("arrow")}</span>
-    </button>
+      </button>
+      ${settingRow("skills", t("Скиллы", "Skills"), undefined, "project-skills", String(id))}
+    </div>
     <div class="project-panes" role="group" aria-label="${t("Разделы проекта","Project sections")}">
       ${([["tasks", t("Задачи","Tasks"), open.length], ["notes", t("Записи","Notes"), entries?.length]] as const)
         .map(([key,label,count]) => `<button aria-pressed="${projectPane === key}" aria-controls="project-work"
@@ -1012,6 +1020,8 @@ function settingsPage() {
   return `<div class="settings-grid">
     ${settingsGroup(t("Ассистент", "Assistant"), modelRow() +
       settingRow("edit", t("Персонализация ответов", "Personalize replies"), responseLabel, "reply-preferences") +
+      (bridge() ? "" : settingRow("skills", t("Скиллы", "Skills"),
+        t("Библиотека, создание и импорт", "Library, creation and import"), "skill-library")) +
       settingRow("bookmark", t("Личная память", "Personal memory"), enabledLabel(s.personal_memory !== false), "memory"))}
     ${settingsGroup(t("Приложение", "App"), settingRow("sun", t("Оформление", "Appearance"), themeName(visibleTheme()), "appearance") +
       settingRow("globe", t("Часовой пояс", "Time zone"), zone().replaceAll("_", " "), "timezone"))}
@@ -1027,6 +1037,124 @@ function settingsPage() {
       t("Что хранится и как это удалить", "What is stored and how to delete it"), "privacy"))}
   </div>`;
 }
+function skillScope(id?: string) {
+  return id === undefined ? undefined : Number(id);
+}
+
+function skillBack(scope?: number) {
+  return `<button class="small-action back-project" data-action="skill-list"${scope === undefined ? "" : ` data-id="${scope}"`}>${icon("arrow")}${scope === undefined ? t("Библиотека","Library") : t("Скиллы проекта","Project skills")}</button>`;
+}
+
+function skillOption(item: SkillSummary, selected?: number[]) {
+  const copy = `<span class="setting-copy"><strong dir="auto">${e(item.name)}</strong>
+    <span class="setting-detail skill-description" dir="auto">${e(item.description)}</span></span>`;
+  return selected
+    ? `<label class="setting-row skill-option">${copy}<input type="checkbox" name="skill_ids"
+        value="${item.id}"${selected.includes(item.id) ? " checked" : ""}></label>`
+    : `<button class="setting-row skill-option" data-action="skill-edit" data-id="${item.id}">
+        ${glyph("skills")}${copy}<span class="tail">${icon("arrow")}</span></button>`;
+}
+
+async function skillList(scope?: number, newlyAdded?: number) {
+  const title = scope === undefined ? t("Библиотека скиллов", "Skill library") : t("Скиллы проекта", "Project skills");
+  if (demo) {
+    openSheet(title, `<p class="sheet-desc">${t("Открой Алефа в Telegram, чтобы создать скиллы и выбрать их для своих проектов.","Open Aleph in Telegram to create skills and choose which projects use them.")}</p>
+      <button class="button primary" data-action="chat">${t("Открыть Алефа","Open Aleph")}</button>`);
+    return;
+  }
+  openSheet(title, `<p class="sheet-desc" role="status" data-skill-loading>${t("Загрузка…","Loading…")}</p>`);
+  const loading = requiredElement(sheet, "[data-skill-loading]");
+  const isCurrent = () => loading.isConnected && sheet.open && !sheet.classList.contains("closing");
+  const attr = scope === undefined ? "" : ` data-id="${scope}"`;
+  try {
+    const project = scope === undefined ? undefined : await request(`/api/projects/${scope}/skills`);
+    const items = project?.skills ?? await request("/api/skills");
+    if (!isCurrent()) return;
+    const intro = scope === undefined
+      ? t("Сохраняй инструкции для повторяющихся задач и подключай их в нужных проектах.", "Save instructions for repeated tasks and enable them in the projects that need them.")
+      : t("Алеф применяет выбранные скиллы, когда они подходят к запросу в этом проекте.", "Aleph uses the selected skills when they match a request in this project.");
+    const actions = `<div class="skill-actions">
+      <button class="button" data-action="skill-create"${attr}>${icon("plus")}${t("Создать","Create")}</button>
+      <button class="button" data-action="skill-import"${attr}>${icon("download")}${t("Импортировать","Import")}</button>
+    </div>`;
+    openSheet(title, `
+      ${scope === undefined ? "" : `<p class="skill-workspace" dir="auto">${e(projectName(scope))}</p>`}
+      <p class="sheet-desc">${intro}</p>
+      ${actions}
+      ${project && scope !== undefined && items.length ? skillSelectionForm(scope, project, newlyAdded)
+        : items.length ? `<div class="panel skill-list">${items.map(item => skillOption(item)).join("")}</div>`
+        : `<div class="empty surface skill-empty"><strong>${t("Пока скиллов нет","No skills yet")}</strong>
+          <p>${t("Начни с повторяющейся задачи. Например, приводи заметки после встреч к одному формату.","Start with a repeated task, such as turning meeting notes into a consistent recap.")}</p>
+          <button class="small-action" data-action="skill-template"${attr}>${t("Открыть шаблон","Open template")}${icon("arrow")}</button>
+        </div>`}`);
+  } catch (error) {
+    if (isCurrent()) openSheet(title, `<p class="form-error" role="alert">${e(errorMessage(error))}</p>
+      <button class="small-action" data-action="skill-list"${attr}>${t("Повторить","Try again")}</button>`);
+  }
+}
+
+function skillSelectionForm(scope: number, project: ProjectSkills, newlyAdded?: number) {
+  const selected = newlyAdded && project.selected.length < project.limit && !project.selected.includes(newlyAdded)
+    ? [...project.selected, newlyAdded] : project.selected;
+  return `<form id="project-skills-form" data-project="${scope}" data-limit="${project.limit}">
+    <div class="panel skill-list">${project.skills.map(item => skillOption(item, selected)).join("")}</div>
+    ${submit(t("Сохранить выбор","Save selection"))}</form>`;
+}
+
+function skillEditor(draft?: SkillDraft, scope?: number, id?: number) {
+  const title = id === undefined ? (draft?.source_url ? t("Предпросмотр скилла","Preview skill") : t("Новый скилл","New skill"))
+    : t("Редактировать скилл","Edit skill");
+  openSheet(title, `${skillBack(scope)}
+    <form id="skill-form"${scope === undefined ? "" : ` data-project="${scope}"`}${id === undefined ? "" : ` data-id="${id}"`}>
+      ${draft?.source_url ? `<p class="sheet-desc skill-source">
+        <a href="${e(draft.source_url)}" data-external-link target="_blank" rel="noopener noreferrer">${t("Источник на GitHub","View source on GitHub")}</a>
+        <input type="hidden" name="source_url" value="${e(draft.source_url)}">
+      </p>` : ""}
+      <label class="field">${t("Название","Name")}<input name="name" value="${e(draft?.name)}" required maxlength="64" dir="auto" placeholder="${t("Например, Итоги встречи","For example, Meeting recap")}"></label>
+      <label class="field">${t("Когда применять","When to use it")}<textarea name="description" required rows="2" maxlength="1024" dir="auto"
+        placeholder="${t("Когда я прошу подвести итоги встречи или присылаю её заметки.","When I ask for a meeting recap or share meeting notes.")}">${e(draft?.description)}</textarea></label>
+      <label class="field">${t("Инструкции для Алефа","Instructions for Aleph")}<textarea class="skill-instructions" name="instructions" required rows="7" maxlength="12000" dir="auto"
+        placeholder="${t("Опиши шаги и формат результата.","Describe the steps and the output format.")}">${e(draft?.instructions)}</textarea></label>
+      ${submit(id === undefined ? t("Добавить в библиотеку","Add to library") : saveLabel())}
+    </form>
+    ${id === undefined ? "" : `<button class="small-action project-entry-remove" data-action="skill-remove" data-id="${id}">${icon("trash")}${t("Удалить из библиотеки","Remove from library")}</button>`}`);
+}
+
+async function editSkill(id: number) {
+  const title = t("Редактировать скилл","Edit skill");
+  openSheet(title, `${skillBack()}<p class="sheet-desc" data-skill-loading role="status">${t("Загрузка…","Loading…")}</p>`);
+  const loading = requiredElement(sheet, "[data-skill-loading]");
+  try {
+    const item = await request(`/api/skills/${id}`);
+    if (loading.isConnected && sheet.open && !sheet.classList.contains("closing")) skillEditor(item, undefined, id);
+  } catch (error) {
+    if (loading.isConnected) loading.textContent = errorMessage(error);
+  }
+}
+
+function skillImport(scope?: number) {
+  openSheet(t("Импорт скилла","Import a skill"), `${skillBack(scope)}
+    <p class="sheet-desc skill-import-desc">${t("Вставь публичную ссылку на SKILL.md или папку скилла в GitHub. Можно загрузить SKILL.md с устройства.","Paste a public link to a SKILL.md file or skill folder on GitHub, or upload SKILL.md from your device.")}</p>
+    <form id="skill-import-form"${scope === undefined ? "" : ` data-project="${scope}"`}>
+      <label class="field">${t("Ссылка GitHub","GitHub link")}<input type="url" name="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://github.com/…"></label>
+      <label class="file-label skill-file">${icon("document")}<span>${t("Выбрать SKILL.md","Choose SKILL.md")}</span>
+        <input type="file" name="skill_file" accept=".md,.markdown,text/markdown,text/plain"></label>
+      ${submit(t("Предпросмотр","Preview"))}
+    </form>`);
+}
+
+function meetingSkill(): SkillDraft {
+  return {
+    name: t("Итоги встречи","Meeting recap"),
+    description: t("Когда я присылаю заметки со встречи или прошу подвести итоги обсуждения.","When I share meeting notes or ask for a recap of a discussion."),
+    instructions: t(
+      "Кратко сформулируй итог встречи. Затем перечисли принятые решения, следующие шаги и открытые вопросы. Добавляй ответственных и сроки только если они названы. Если информации не хватает, пометь это. Сохраняй задачи только по моей просьбе.",
+      "Start with a short recap. Then list decisions, next steps and open questions. Include owners and dates only when given. Flag missing details. Create tasks only if I ask.",
+    ),
+    source_url: "",
+  };
+}
+
 function appearanceSheet() {
   const current = visibleTheme();
   const card = (theme: SelectableTheme) => `<button class="theme-card" type="button" data-action="choose-theme"
@@ -1359,6 +1487,27 @@ async function act(action: string, id?: string) {
     case "chat":
       openChat();
       break;
+    case "skill-library":
+    case "project-skills":
+    case "skill-list":
+      await skillList(skillScope(id));
+      break;
+    case "skill-create":
+      skillEditor(undefined, skillScope(id));
+      break;
+    case "skill-template":
+      skillEditor(meetingSkill(), skillScope(id));
+      break;
+    case "skill-import":
+      skillImport(skillScope(id));
+      break;
+    case "skill-edit":
+      await editSkill(Number(id));
+      break;
+    case "skill-remove":
+      if (window.confirm(t("Удалить скилл из библиотеки и всех проектов?", "Remove this skill from the library and every project?")) &&
+          await write(`/api/skills/${Number(id)}`, "DELETE", undefined, () => {}, t("Скилл удалён","Skill removed"))) await skillList();
+      break;
     case "new-project":
       if (bridge()) openChat();
       else {
@@ -1611,7 +1760,7 @@ document.addEventListener("click", (event) => {
   if (link && webapp()?.openLink) {
     event.preventDefault();
     webapp()?.openLink?.(link.href);
-    if (!link.closest(".task-result, .project-entry-body")) closeSheet();
+    if (!link.closest(".task-result, .project-entry-body, .skill-source")) closeSheet();
     return;
   }
   const el = target?.closest("button");
@@ -1660,7 +1809,51 @@ sheet.addEventListener("submit", async (event) => {
   };
   let ok = false;
   try {
-    if (form.id === "project-form") {
+    if (form.id === "skill-import-form") {
+      const file = data.get("skill_file");
+      const hasFile = file instanceof File && file.size > 0;
+      const url = field("url").trim();
+      const error = requiredElement(form, ".form-error");
+      if ((!hasFile && !url) || (hasFile && file.size > 48 * 1024)) {
+        error.textContent = hasFile
+          ? t("Выбери SKILL.md размером до 48 КБ.", "Choose a SKILL.md file up to 48 KB.")
+          : t("Вставь ссылку или выбери файл SKILL.md.", "Paste a link or choose a SKILL.md file.");
+        return;
+      }
+      let preview: SkillDraft | null = null;
+      let input: {markdown: string} | {url: string} = {url};
+      if (hasFile) {
+        try {
+          input = {markdown: new TextDecoder("utf-8", {fatal: true}).decode(await file.arrayBuffer())};
+        } catch {
+          error.textContent = t("Выбери текстовый SKILL.md в UTF-8.", "Choose a UTF-8 SKILL.md text file.");
+          return;
+        }
+      }
+      if (!form.isConnected || !sheet.open || sheet.classList.contains("closing")) return;
+      await write("/api/skills/preview", "POST", input, result => { preview = result; }, "", {showApiMessage: ru});
+      if (preview) skillEditor(preview, skillScope(form.dataset.project));
+      return;
+    } else if (form.id === "skill-form") {
+      const id = form.dataset.id;
+      const scope = skillScope(form.dataset.project);
+      const payload = {name: field("name").trim(), description: field("description").trim(),
+        instructions: field("instructions").trim(), source_url: field("source_url")};
+      let saved: number | undefined;
+      if (await write(id ? `/api/skills/${Number(id)}` : "/api/skills", id ? "PATCH" : "POST", payload,
+        result => { saved = result?.id; }, t("Скилл сохранён","Skill saved"), {showApiMessage: ru})) await skillList(scope, id ? undefined : saved);
+      return;
+    } else if (form.id === "project-skills-form") {
+      const scope = Number(form.dataset.project);
+      const skill_ids = data.getAll("skill_ids").map(Number);
+      const limit = Number(form.dataset.limit);
+      if (skill_ids.length > limit) {
+        requiredElement(form, ".form-error").textContent = t(`Выбери до ${limit} скиллов.`, `Choose up to ${limit} skills.`);
+        return;
+      }
+      ok = await write(`/api/projects/${scope}/skills`, "PATCH", {skill_ids}, () => {},
+        t("Скиллы проекта сохранены","Project skills saved"), {showApiMessage: ru});
+    } else if (form.id === "project-form") {
       const name = field("name").trim();
       if (!name) {
         const input = requiredElement<HTMLInputElement>(form, 'input[name="name"]');
@@ -1774,6 +1967,12 @@ sheet.addEventListener("submit", async (event) => {
 });
 sheet.addEventListener("change", async (event) => {
   const picker = event.target;
+  if (picker instanceof HTMLInputElement && picker.form?.id === "skill-import-form" && picker.name === "skill_file") {
+    const file = picker.files?.[0];
+    requiredElement(picker.form, ".skill-file span").textContent = file?.name || t("Выбрать SKILL.md","Choose SKILL.md");
+    if (file) requiredElement<HTMLInputElement>(picker.form, "[name=url]").value = "";
+    return;
+  }
   if (picker instanceof HTMLInputElement && picker.form?.id === "notifications-form") {
     syncNotificationForm(picker.form);
     return;
@@ -1808,6 +2007,11 @@ sheet.addEventListener("change", async (event) => {
 });
 sheet.addEventListener("input", event => {
   const input = event.target;
+  if (input instanceof HTMLInputElement && input.form?.id === "skill-import-form" && input.name === "url" && input.value) {
+    requiredElement<HTMLInputElement>(input.form, "[name=skill_file]").value = "";
+    requiredElement(input.form, ".skill-file span").textContent = t("Выбрать SKILL.md","Choose SKILL.md");
+    return;
+  }
   if (!(input instanceof HTMLInputElement) || input.form?.id !== "task-form" || input.type !== "datetime-local") return;
   const zoneField = input.form.querySelector<HTMLElement>("[data-task-zone]");
   if (!zoneField) return;

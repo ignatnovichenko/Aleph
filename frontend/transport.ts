@@ -1,10 +1,11 @@
 export type WriteMethod = "POST" | "PATCH" | "DELETE";
-export interface RequestOptions { requestKey?: string | null }
+export interface RequestOptions { requestKey?: string | null; showApiMessage?: boolean }
+export class ApiMessage extends Error {}
 
 export const statePath = "/api/state?compact=1";
 
 export async function apiRequest(path: string, signed: string, method: "GET" | WriteMethod = "GET",
-  body?: object, { requestKey }: RequestOptions = {}): Promise<unknown> {
+  body?: object, { requestKey, showApiMessage }: RequestOptions = {}): Promise<unknown> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 18000);
   try {
@@ -20,7 +21,14 @@ export async function apiRequest(path: string, signed: string, method: "GET" | W
       },
       ...(body ? {body: JSON.stringify(body)} : {}),
     });
-    if (!response.ok) throw new Error(String(response.status));
+    if (!response.ok) {
+      if (showApiMessage && [400, 404].includes(response.status) &&
+          response.headers.get("Content-Type")?.includes("application/json")) {
+        const data = await response.json().catch(() => null);
+        if (typeof data?.error === "string" && data.error.length <= 320) throw new ApiMessage(data.error);
+      }
+      throw new Error(String(response.status));
+    }
     if (path.endsWith(".ics")) return await response.blob();
     return response.status === 204 ? null : await response.json();
   } finally {

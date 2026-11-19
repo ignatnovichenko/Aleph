@@ -17,7 +17,7 @@ from .chatgpt_auth import ChatGPTError
 from .chatgpt_pair import IMPORT_PATH, MAX_PACKET, owner as chatgpt_owner
 from .feeds import feed_catalog
 from .links import mini_app_url
-from . import articles, connections, drive_picker, integrations, memory, models, projects, reports, widgets
+from . import articles, connections, drive_picker, integrations, memory, models, projects, reports, skills, widgets
 from .store import UTC
 
 
@@ -85,16 +85,17 @@ def calendar_export(tasks, uid):
 
 def install_api(app, store, token, model_key=None):
     catalogs = models.ModelCatalogs(model_key)
+    github_imports = asyncio.Semaphore(4)
 
-    async def body(request):
+    async def body(request, limit=16384):
         if request.content_type != "application/json":
             raise ValueError("Ожидается JSON.")
-        if request.content_length is not None and request.content_length > 16384:
+        if request.content_length is not None and request.content_length > limit:
             raise ValueError("Слишком большой запрос.")
         chunks = bytearray()
         async for chunk in request.content.iter_chunked(4096):
             chunks.extend(chunk)
-            if len(chunks) > 16384:
+            if len(chunks) > limit:
                 raise ValueError("Слишком большой запрос.")
         try:
             fields = json.loads(chunks.decode())
@@ -285,6 +286,43 @@ def install_api(app, store, token, model_key=None):
             raise ValueError("Выбери проект.")
         return web.json_response(projects.choose(store, user["id"], fields["project_id"]))
 
+    async def skill_library(request, user):
+        uid = user["id"]
+        if request.method == "GET":
+            return web.json_response(skills.library(store, uid))
+        fields = await body(request, limit=65536)
+        return web.json_response(skills.save(store, uid, fields), status=201)
+
+    async def skill_item(request, user):
+        uid, skill_id = user["id"], int(request.match_info["id"])
+        if request.method == "GET":
+            return web.json_response(skills.detail(store, uid, skill_id))
+        if request.method == "DELETE":
+            skills.remove(store, uid, skill_id)
+            return web.Response(status=204)
+        return web.json_response(skills.save(store, uid, await body(request, limit=65536), skill_id))
+
+    async def skill_preview(request, user):
+        fields = await body(request, limit=100000)
+        if fields.keys() == {"markdown"}:
+            return web.json_response(skills.parse_markdown(fields["markdown"]))
+        if fields.keys() != {"url"}:
+            raise ValueError("Вставь ссылку GitHub или выбери SKILL.md.")
+        if github_imports.locked():
+            raise ValueError("Сейчас много импортов. Попробуй через несколько секунд.")
+        async with github_imports, aiohttp.ClientSession(trust_env=True) as session:
+            return web.json_response(await skills.preview_github(session, fields["url"]))
+
+    async def project_skills(request, user):
+        uid, project_id = user["id"], int(request.match_info["id"])
+        if request.method == "PATCH":
+            fields = await body(request)
+            if fields.keys() != {"skill_ids"}:
+                raise ValueError("Укажи скиллы для этого проекта.")
+            return web.json_response({"selected": skills.set_project(store, uid, project_id, fields["skill_ids"])})
+        selected = [skill["id"] for skill in skills.for_project(store, uid, project_id)]
+        return web.json_response({"skills": skills.library(store, uid), "selected": selected, "limit": skills.MAX_ENABLED})
+
     async def widget_view(request, user):
         row = widgets.view(store, user["id"], int(request.match_info["id"]))
         html = widgets.render(json.loads(row["spec"]))
@@ -373,6 +411,10 @@ def install_api(app, store, token, model_key=None):
                ("GET", "/api/models", model_settings), ("PATCH", "/api/models", model_settings),
                ("GET", "/api/chatgpt", chatgpt_status), ("POST", "/api/chatgpt/pair", chatgpt_pair),
                ("DELETE", "/api/chatgpt", chatgpt_disconnect)]
+    routes += [("GET", "/api/skills", skill_library), ("POST", "/api/skills", skill_library),
+               ("POST", "/api/skills/preview", skill_preview)]
+    routes += [(method, r"/api/skills/{id:\d{1,18}}", skill_item) for method in ("GET", "PATCH", "DELETE")]
+    routes += [(method, r"/api/projects/{id:\d{1,18}}/skills", project_skills) for method in ("GET", "PATCH")]
     provider_path = r"{provider:calendar|notion|drive|gmail}"
     app.router.add_post(f"/api/connections/{provider_path}/start", scoped(connection))
     app.router.add_delete(f"/api/connections/{provider_path}", scoped(connection))

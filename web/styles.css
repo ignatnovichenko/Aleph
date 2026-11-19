@@ -469,6 +469,8 @@ button.pending, button[aria-busy="true"], .task-row.pending { opacity: .62; }
 .project-list .project-row > .setting-copy, .project-context .setting-copy, .project-resume .setting-copy { flex: 1; }
 .project-list .project-row > .tail { margin-left: 0; }
 .project-context { min-height: 61px; padding-inline: 12px; }
+.project-configuration .setting-row + .setting-row { min-height: 50px; padding-inline: 12px; }
+.project-skill-link { margin-bottom: 10px; }
 .project-context .setting-detail, .project-resume .setting-detail { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .project-panes { display: flex; border-bottom: 1px solid var(--hair); gap: 17px; margin-block: 10px 8px; }
 .project-panes button {
@@ -507,6 +509,22 @@ button.pending, button[aria-busy="true"], .task-row.pending { opacity: .62; }
 .project-reading { font-size: 15px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
 .project-reading a { text-underline-offset: 3px; }
 .project-entry-remove { margin-top: 16px; color: var(--critical); }
+.skill-workspace { margin-bottom: 5px; font-size: 14px; font-weight: 520; overflow-wrap: anywhere; }
+.skill-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; margin-block: 13px; }
+.skill-actions .button { min-height: 44px; padding-inline: 6px; font-size: 13px; }
+.skill-actions .icon { width: 16px; height: 16px; }
+.skill-list .skill-option { gap: 10px; padding: 10px 12px; }
+.skill-option .setting-copy { flex: 1; }
+.skill-option .skill-description {
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;
+}
+label.skill-option { cursor: pointer; }
+.skill-option input { flex: 0 0 19px; width: 19px; height: 19px; margin: 0 1px 0 0; accent-color: var(--button); }
+.skill-empty .small-action { margin-bottom: -8px; }
+.skill-source, .skill-import-desc { margin-bottom: 13px; }
+.skill-source a { text-underline-offset: 3px; }
+.skill-file span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.skill-instructions { min-height: 135px; }
 .task-details { margin-top: 8px; }
 .task-details summary { cursor: pointer; min-height: 40px; padding-block: 11px; font-size: 13px; color: var(--hint); }
 .task-details[open] summary { margin-bottom: 7px; }
