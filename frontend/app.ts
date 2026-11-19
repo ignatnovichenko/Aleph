@@ -18,6 +18,7 @@ import {
 
 declare const __ALEPH_MARK_URL__: string;
 type Page = "home" | "projects" | "settings";
+type SelectableTheme = Exclude<ThemeMode, "auto">;
 
 function requiredElement<T extends HTMLElement>(scope: ParentNode, selector: string): T {
   const node = scope.querySelector<T>(selector);
@@ -85,14 +86,20 @@ function prefersDark() {
     ? tg.colorScheme === "dark"
     : matchMedia("(prefers-color-scheme: dark)").matches;
 }
-const themeMode = () => state?.settings.theme ?? "auto";
+let previewTheme: SelectableTheme | undefined;
+function visibleTheme(): SelectableTheme {
+  const theme = previewTheme ?? state?.settings.theme;
+  return theme === "white" || theme === "dark" ? theme : prefersDark() ? "dark" : "white";
+}
 
 function setTheme() {
-  const mode = themeMode();
-  const dark = mode === "dark" || (mode === "auto" && prefersDark());
+  const theme = visibleTheme();
   const root = document.documentElement;
   const tg = webapp();
-  root.dataset.theme = dark ? "dark" : "light";
+  root.dataset.theme = theme === "dark" ? "dark" : "light";
+  for (const card of sheet.querySelectorAll<HTMLButtonElement>('[data-action="choose-theme"]')) {
+    card.setAttribute("aria-pressed", String(card.dataset.id === theme));
+  }
   const bg = getComputedStyle(root).getPropertyValue("--bg").trim();
   const meta = document.querySelector<HTMLMetaElement>("meta[name=theme-color]");
   if (meta) meta.content = bg;
@@ -102,13 +109,17 @@ function setTheme() {
     tg?.setBottomBarColor?.(bg);
   } catch {}
 }
+function applySystemTheme() {
+  setTheme();
+  render();
+}
 function initTelegram() {
   const tg = webapp();
   if (!tg || sdkBound) return;
   sdkBound = true;
   revealMiniApp();
-  setTheme();
-  tg.onEvent?.("themeChanged", setTheme);
+  applySystemTheme();
+  tg.onEvent?.("themeChanged", applySystemTheme);
   tg.BackButton?.onClick(() => {
     if (sheet.open) {
       if (!pending) closeSheet();
@@ -856,8 +867,8 @@ function settingsGroup(title: string, rows: string) {
 function replyStyleOptions(): [ReplyStyle, string][] {
   return [["short", t("Кратко", "Concise")], ["balanced", t("Стандартно", "Standard")], ["detailed", t("Подробно", "Detailed")]];
 }
-function themeOptions(): [ThemeMode, string][] {
-  return [["auto", t("Как в Telegram", "Match Telegram")], ["white", t("Светлый", "Light")], ["dark", t("Тёмный", "Dark")]];
+function themeName(theme: SelectableTheme) {
+  return theme === "dark" ? t("Тёмная", "Dark") : t("Светлая", "Light");
 }
 function settingChoices<T extends string>(name: string, label: string, options: [T, string][], selected: T) {
   return `<fieldset class="setting-choices"><legend>${label}</legend>${options.map(([value, title]) =>
@@ -869,13 +880,12 @@ function enabledLabel(on: boolean) {
 function settingsPage() {
   const s = state.settings;
   const responseLabel = replyStyleOptions().find(([key]) => key === (s.reply_style ?? "balanced"))?.[1];
-  const themeLabel = themeOptions().find(([key]) => key === themeMode())?.[1];
   const connections = serviceRows() + chatgptRow();
   return `<div class="settings-grid">
     ${settingsGroup(t("Ассистент", "Assistant"), modelRow() +
       settingRow("edit", t("Персонализация ответов", "Personalize replies"), responseLabel, "reply-preferences") +
       settingRow("bookmark", t("Личная память", "Personal memory"), enabledLabel(s.personal_memory !== false), "memory"))}
-    ${settingsGroup(t("Приложение", "App"), settingRow("sun", t("Оформление", "Appearance"), themeLabel, "appearance") +
+    ${settingsGroup(t("Приложение", "App"), settingRow("sun", t("Оформление", "Appearance"), themeName(visibleTheme()), "appearance") +
       settingRow("globe", t("Часовой пояс", "Time zone"), zone().replaceAll("_", " "), "timezone"))}
     ${settingsGroup(t("Уведомления", "Notifications"),
       settingRow("bell", t("Расписание уведомлений", "Notification schedule"),
@@ -890,8 +900,20 @@ function settingsPage() {
   </div>`;
 }
 function appearanceSheet() {
-  openSheet(t("Оформление", "Appearance"), `<form id="appearance-form">
-    ${settingChoices("theme", t("Фон мини-приложения", "Mini App background"), themeOptions(), themeMode())}${submit()}</form>`);
+  const current = visibleTheme();
+  const card = (theme: SelectableTheme) => `<button class="theme-card" type="button" data-action="choose-theme"
+      data-id="${theme}" aria-pressed="${theme === current}">
+    <span class="theme-preview" data-preview="${theme}" aria-hidden="true">
+      <span class="theme-preview-head"><img src="${__ALEPH_MARK_URL__}" alt="" width="15" height="15">
+        <span>${t("Задачи", "Tasks")}</span></span>
+      <span class="theme-preview-tabs"><i></i><i></i><i></i></span>
+      <span class="theme-preview-list"><i></i><i></i></span>
+      <span class="theme-preview-dock">${icon("home")}${icon("projects")}${icon("settings")}</span>
+    </span>
+    <span class="theme-card-caption">${themeName(theme)}<span class="theme-card-check" aria-hidden="true">${icon("check")}</span></span>
+  </button>`;
+  openSheet(t("Оформление", "Appearance"), `<div class="theme-picker" role="group" aria-label="${t("Цветовая тема", "Color theme")}">
+    ${card("white")}${card("dark")}</div><p class="form-error" role="alert"></p>`);
 }
 function replyPreferencesSheet() {
   openSheet(t("Персонализация ответов", "Personalize replies"), `<form id="reply-form">
@@ -1336,6 +1358,19 @@ async function act(action: string, id?: string) {
     case "appearance":
       appearanceSheet();
       break;
+    case "choose-theme":
+      if ((id === "white" || id === "dark") && state.settings.theme !== id) {
+        sheet.querySelector(".form-error")?.replaceChildren();
+        previewTheme = id;
+        applySystemTheme();
+        try {
+          if (await saveSettings({theme: id}, "") && bridge()) state.settings.theme = id;
+        } finally {
+          previewTheme = undefined;
+          applySystemTheme();
+        }
+      }
+      break;
     case "reply-preferences":
       replyPreferencesSheet();
       break;
@@ -1569,10 +1604,6 @@ sheet.addEventListener("submit", async (event) => {
       }, (result) => {
         if (result) state.model = result;
       }, t("Настройки модели сохранены", "Model settings saved"));
-    } else if (form.id === "appearance-form") {
-      const theme = field("theme") as ThemeMode;
-      ok = await saveSettings({theme});
-      if (ok) setTheme();
     } else if (form.id === "reply-form") {
       const fields: Partial<Settings> = {reply_style: field("reply_style") as ReplyStyle};
       if (data.has("assistant_instructions")) fields.assistant_instructions = field("assistant_instructions");
@@ -1732,7 +1763,7 @@ document
   .querySelector('script[src*="telegram-web-app"]')
   ?.addEventListener("load", initTelegram, { once: true });
 window.addEventListener("load", initTelegram, { once: true });
-matchMedia("(prefers-color-scheme: dark)").addEventListener("change", setTheme);
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", applySystemTheme);
 setTheme();
 setLanguage(
   webapp()?.initDataUnsafe?.user?.language_code ||

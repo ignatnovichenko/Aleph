@@ -13,10 +13,18 @@ declare global {
 
 // Run from the document head, before the browser needs to load the main bundle.
 document.documentElement.dataset.theme = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+function revealWithTheme() {
+  const telegram = window.Telegram?.WebApp;
+  if (telegram?.platform && telegram.platform !== "unknown" && telegram.colorScheme &&
+      document.querySelector("#app .boot")) {
+    document.documentElement.dataset.theme = telegram.colorScheme;
+  }
+  revealMiniApp();
+}
 document.addEventListener("load", event => {
   if (!(event.target instanceof HTMLScriptElement) || event.target.id !== "telegram-sdk") return;
-  if (document.getElementById("app")) revealMiniApp();
-  else document.addEventListener("DOMContentLoaded", revealMiniApp, {once: true});
+  if (document.getElementById("app")) revealWithTheme();
+  else document.addEventListener("DOMContentLoaded", revealWithTheme, {once: true});
 }, true);
 const params = new URLSearchParams(location.hash.slice(1));
 const initData = params.get("tgWebAppData");
