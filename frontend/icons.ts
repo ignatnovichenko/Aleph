@@ -5,6 +5,7 @@ const paths = {
   person: '<circle cx="12" cy="8" r="3.3"/><path d="M5.5 20v-1.5a5 5 0 0 1 5-5h3a5 5 0 0 1 5 5V20"/>',
   edit: '<path d="m14.5 6 3.5 3.5M5 19l3.6-.7L19 8A2.5 2.5 0 1 0 15.5 4.5L5.8 14.8z"/>',
   bookmark: '<path d="M7 5a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v16l-5-3.5L7 21z"/>',
+  document: '<path d="M7 3h7l4 4v12a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z"/><path d="M14 3v5h4M9 12h5m-5 4h5"/>',
   shield: '<path d="M12 3l7 3v6c0 3.8-3.4 6.8-7 9-3.6-2.2-7-5.2-7-9V6z"/><path d="m9 12 2 2 4-4"/>',
   arrow: '<path d="m9 5 7 7-7 7"/>',
   right: '<path d="M4 12h15m-6-6 6 6-6 6"/>',

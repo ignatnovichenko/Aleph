@@ -37,10 +37,13 @@ let page: Page = initialView.get("view") === "settings" ? "settings" : "home";
 type PlanFilter = "today" | "upcoming" | "inbox" | "done";
 let filter: PlanFilter = "today";
 let projectDetail: number | null = null;
+let projectPane: "tasks" | "notes" = "tasks";
+let projectDoneOpen = false;
 let projectListScroll = 0;
 let undoTask: number | undefined;
 const projectEntries = new Map<number, ProjectEntry[]>();
-let projectLoadError = 0;
+const loadingProjects = new Set<number>();
+const projectLoadErrors = new Set<number>();
 let agenda: CalendarEvent[] | undefined;
 let agendaError = false;
 let chatgpt: ChatGPTConnection | undefined;
@@ -253,8 +256,14 @@ function mountShell() {
     <main class="page-stage"><div class="page-track">${navs().map(([key, label]) => `
       <section class="page-panel" data-view="${key}" aria-labelledby="title-${key}"${page === key ? "" : ' inert aria-hidden="true"'}>
         <div class="workspace">
-          <header class="page-head"><img class="app-mark" src="${__ALEPH_MARK_URL__}" width="30" height="30" alt="Aleph" decoding="async">
-            <h1 class="page-title" id="title-${key}" tabindex="-1">${label}</h1>
+          <header class="page-head">
+            ${key === "projects" ? `<div class="project-backbar">
+              <button class="small-action back-project" data-action="project-list">${icon("arrow")}${t("Все проекты","All projects")}</button>
+              <span class="live-project" hidden><i class="signal-dot"></i>${t("В чате","In chat")}</span>
+            </div>` : ""}
+            <img class="app-mark" src="${__ALEPH_MARK_URL__}" width="30" height="30" alt="Aleph" decoding="async">
+            <h1 class="page-title" id="title-${key}" tabindex="-1" dir="auto">${label}</h1>
+            ${key === "projects" ? `<button class="project-chat-action" data-action="continue-project">${icon("plane")}${t("В чат","Open chat")}</button>` : ""}
             ${key === "home" ? '<p class="page-kicker"></p>' : ""}
           </header>
           <div class="page-content"></div>${footer}
@@ -286,6 +295,18 @@ function mountShell() {
 }
 
 function renderView(view: View) {
+  if (view.key === "projects") {
+    const id = projectDetail;
+    const detail = !bridge() && id !== null && (id === 0 || !!selectedProject());
+    const title = detail ? projectName(id) : t("Проекты", "Projects");
+    view.panel.classList.toggle("project-detail-view", detail);
+    if (view.heading.textContent !== title) {
+      view.heading.textContent = title;
+      if (page === view.key) document.title = title + " · Aleph";
+    }
+    requiredElement(view.panel, ".live-project").hidden = !detail || id !== activeId();
+    requiredElement(view.panel, ".project-chat-action").dataset.id = detail ? String(id) : "";
+  }
   const markup = view.key === "home" ? overview() : view.key === "projects" ? projectsPage() : settingsPage();
   if (view.markup === markup) return;
   const restore = view.content.contains(document.activeElement) ? controlSelector(document.activeElement) : null;
@@ -771,80 +792,165 @@ function calendarSection() {
       : `<button class="small-action" data-action="load-agenda">${agendaError ? t("Повторить загрузку","Try again") : t("Показать события","Show events")}</button>`}</section>`;
 }
 
+function projectAdd(action: string, label: string, id?: number) {
+  return `<button class="project-add" data-action="${action}"${id === undefined ? "" : ` data-id="${id}"`}>${icon("plus")}${label}</button>`;
+}
+
 function projectsPage() {
   if (bridge()) return `<div class="empty surface"><strong>${t("Проекты в чате","Projects in chat")}</strong><button class="button" data-action="chat">${t("В чат","Open chat")}</button></div>`;
   const project = selectedProject();
   if (projectDetail !== null && (!projectDetail || project)) return projectPage(project);
-  const items = [{id:0,name:t("Личное","Personal"),context:""}, ...(state.projects || [])]
-    .sort((a,b) => Number(b.id === activeId()) - Number(a.id === activeId()));
-  return `<div class="plan-heading"><h2 class="section-title">${t("Рабочие пространства","Workspaces")}</h2><button class="action-plus" data-action="new-project" aria-label="${t("Новый проект","New project")}">${icon("plus")}</button></div>
-    <div class="project-list">${items.map(item => {
-      const count = state.tasks.filter(task => (task.project_id || 0) === item.id && task.status === "open").length;
-      return `<button class="project-card surface ${item.id === activeId() ? "active-project-card" : ""}" data-action="view-project" data-id="${item.id}">${glyph(item.id ? "projects" : "person")}
-        <span><strong dir="auto">${e(item.name)}</strong><small>${count ? count + " · " + t("в работе","open") : t("Пока без задач","No open tasks")}
-        ${item.id === activeId() ? ' <i class="signal-dot"></i> ' + t("В чате","In chat") : ""}</small></span>${icon("arrow")}</button>`;
-    }).join("")}</div>`;
+
+  const active = activeId();
+  const items = [{id:0,name:t("Личное","Personal")}, ...(state.projects || [])]
+    .sort((a,b) => Number(b.id === active) - Number(a.id === active));
+  const counts = new Map<number, number>();
+  for (const task of state.tasks) {
+    if (taskDone(task)) continue;
+    const id = task.project_id || 0;
+    counts.set(id, (counts.get(id) || 0) + 1);
+  }
+
+  return `<div class="project-index-action">${projectAdd("new-project", t("Новый проект","New project"))}</div>
+    <div class="panel project-list">${items.map(item => {
+    const count = counts.get(item.id) || 0;
+    return `<button class="project-row" data-action="view-project" data-id="${item.id}">
+      ${glyph(item.id ? "projects" : "person")}
+      <span class="setting-copy"><strong dir="auto">${e(item.name)}</strong>
+        ${count ? `<small>${t("В работе","Open tasks")} · ${count}</small>` : ""}</span>
+      ${item.id === active ? `<span class="live-project"><i class="signal-dot"></i>${t("В чате","In chat")}</span>` : ""}
+      <span class="tail">${icon("arrow")}</span></button>`;
+  }).join("")}</div>`;
 }
 
 function showProjectList() {
+  const id = projectDetail;
   projectDetail = null;
   render();
-  activeView()?.panel.scrollTo({top: projectListScroll});
+  const view = activeView();
+  view?.panel.scrollTo({top: projectListScroll});
+  const row = view?.content.querySelector<HTMLElement>(`[data-action="view-project"][data-id="${id}"]`);
+  (row || view?.heading)?.focus({preventScroll: true});
 }
 
 function projectPage(project?: Project) {
   const id = project?.id || 0;
   const entries = projectEntries.get(id);
-  const tasks = sorted(state.tasks.filter(task => (task.project_id || 0) === id && !taskDone(task)));
-  const decision = entries?.find(entry => entry.kind === "decision");
-  const next = tasks.find(task => task.status === "open");
-  return `<button class="small-action back-project" data-action="project-list">← ${t("Все проекты","All projects")}</button>
-    <section class="project-hero surface">
-      <div>${glyph(id ? "projects" : "person")}${id === activeId() ? `<span class="live-project"><i class="signal-dot"></i>${t("Активен в чате","Active in chat")}</span>` : ""}</div>
-      <h2 dir="auto">${e(project?.name || projectName(0))}</h2>
-      <button class="button primary" data-action="continue-project" data-id="${id}">${icon("plane")}${t("Продолжить в чате","Continue in chat")}</button>
-    </section>
-    ${decision || next ? `<section class="workspace-section">${sectionHead(t("С чего продолжить","Pick up where you left off"))}
-      <div class="panel resume-panel">${decision ? `<p><small>${t("Последнее решение","Latest decision")}</small><strong dir="auto">${e(decision.text)}</strong></p>` : ""}
-      ${next ? `<p><small>${t("Следующий шаг","Next step")}</small><button class="resume-task" data-action="edit-task" data-id="${next.id}">${e(next.title)} ${icon("arrow")}</button></p>` : ""}</div></section>` : ""}
-    ${project?.context ? `<details class="project-context panel"><summary>${t("Описание и инструкции", "Description and instructions")}</summary>
-      <p class="project-goal" dir="auto">${e(project.context)}</p></details>` : ""}
-    <section class="workspace-section"><div class="plan-heading">${sectionHead(t("Задачи проекта","Project tasks"))}<button class="action-plus compact" data-action="new-task" data-id="${id}" aria-label="${t("Добавить поручение","Add task")}">${icon("plus")}</button></div>
-      ${tasks.length ? `<div class="panel">${tasks.map(task => taskRow(task,false)).join("")}</div>` : `<p class="muted">${t("Здесь появятся задачи проекта","Project tasks will appear here")}</p>`}</section>
-    ${project ? `<section class="workspace-section"><div class="plan-heading">${sectionHead(t("Записи и материалы","Notes and materials"))}<button class="small-action" data-action="new-entry">${t("Добавить","Add")}</button></div>
-      ${entries ? entries.map(entryRow).join("") || `<p class="muted">${t("Попроси Алефа сохранить решение или добавь материал.","Ask Aleph to save a decision or add a source.")}</p>`
-        : projectLoadError === id ? `<button class="small-action" data-action="reload-project" data-id="${id}">${t("Повторить","Try again")}</button>`
-        : `<p class="muted" role="status">${t("Загрузка…","Loading…")}</p>`}
-      <button class="small-action" data-action="edit-project" data-id="${id}">${icon("edit")}${t("Изменить описание и инструкции","Edit description and instructions")}</button>
-    </section>` : ""}`;
+  const tasks = sorted(state.tasks.filter(task => (task.project_id || 0) === id));
+  const done = tasks.filter(taskDone);
+  const open = tasks.filter(task => !taskDone(task));
+  if (!project) return projectTasks(id, open, done);
+
+  const hasContext = !!project.context.trim();
+  return `<button class="project-context panel setting-row" data-action="project-context" data-id="${id}">
+      ${glyph("document")}<span class="setting-copy">
+        <strong>${t("Контекст и инструкции","Context and instructions")}</strong>
+        <span class="setting-detail" dir="auto">${hasContext ? e(project.context) : t("Добавить контекст","Add context")}</span>
+      </span><span class="tail">${icon("arrow")}</span>
+    </button>
+    <div class="project-panes" role="group" aria-label="${t("Разделы проекта","Project sections")}">
+      ${([["tasks", t("Задачи","Tasks"), open.length], ["notes", t("Записи","Notes"), entries?.length]] as const)
+        .map(([key,label,count]) => `<button aria-pressed="${projectPane === key}" aria-controls="project-work"
+          data-action="project-pane" data-id="${key}">${label}${count ? `<small>${count}</small>` : ""}</button>`).join("")}
+    </div>
+    <div id="project-work">${projectPane === "tasks" ? projectTasks(id, open, done, entries?.find(entry => entry.kind === "decision")) : projectNotes(id, entries)}</div>`;
 }
 
-function entryRow(entry: ProjectEntry) {
-  const label = {decision:t("Решение","Decision"), question:t("Открытый вопрос","Open question"), material:t("Материал","Material")}[entry.kind];
-  const material = entry.kind === "material" && /^https:\/\/\S+$/.test(entry.text);
-  return `<article class="entry-card surface"><small>${label}</small><div dir="auto">${material
-    ? `<a href="${e(entry.text)}" target="_blank" rel="noopener noreferrer">${e(entry.text)}</a>` : e(entry.text)}</div>
-    ${entry.source ? `<details><summary>${t("Из сообщения","From the message")}</summary><p dir="auto">${e(entry.source)}</p></details>` : ""}
-    <button class="entry-remove" aria-label="${t("Удалить запись","Remove entry")}" data-action="remove-entry" data-id="${entry.id}">${icon("trash")}</button>
-  </article>`;
+function projectTasks(id: number, open: Task[], done: Task[], decision?: ProjectEntry) {
+  return `<section aria-labelledby="project-tasks-title">
+    <div class="project-section-head"><h2 id="project-tasks-title">${t("В работе","In progress")}</h2>
+      ${projectAdd("new-task", t("Добавить задачу","Add task"), id)}</div>
+    ${open.length ? `<div class="panel">${open.map(task => taskRow(task,false)).join("")}</div>` :
+      `<div class="project-empty panel">${glyph("home")}<div><strong>${t("Пока задач нет","No open tasks")}</strong>
+        <p>${t("Добавь задачу здесь или поручи её Алефу в чате.","Add a task here or ask Aleph in chat.")}</p></div></div>`}
+    ${done.length ? `<details class="project-done"${projectDoneOpen ? " open" : ""}>
+      <summary>${t("Завершённые","Completed")}<small>${done.length}</small>${icon("arrow")}</summary>
+      <div class="panel">${done.map(task => taskRow(task,false)).join("")}</div></details>` : ""}
+    ${decision ? `<button class="setting-row project-resume" data-action="project-entry" data-id="${decision.id}">
+      ${glyph("bookmark")}<span class="setting-copy"><strong>${t("Последнее решение","Latest decision")}</strong>
+      <span class="setting-detail" dir="auto">${e(decision.text)}</span></span><span class="tail">${icon("arrow")}</span>
+    </button>` : ""}
+  </section>`;
+}
+
+function entryKindLabel(kind: ProjectEntry["kind"]) {
+  return {
+    decision: t("Решение", "Decision"),
+    question: t("Открытый вопрос", "Open question"),
+    material: t("Материал", "Material"),
+  }[kind];
+}
+
+function projectNotes(id: number, entries?: ProjectEntry[]) {
+  const groups = [
+    ["decision", t("Решения","Decisions")],
+    ["question", t("Открытые вопросы","Open questions")],
+    ["material", t("Материалы","Materials")],
+  ] as const;
+
+  return `<section aria-labelledby="project-notes-title">
+    <div class="project-section-head"><h2 id="project-notes-title">${t("Заметки и ссылки","Notes and links")}</h2>
+      ${projectAdd("new-entry", t("Добавить запись","Add note"))}</div>
+    ${entries?.length ? groups.map(([kind,label]) => {
+      const notes = entries.filter(entry => entry.kind === kind);
+      return notes.length ? `<section class="project-note-group"><h3>${label}</h3><div class="panel">${notes.map(entry =>
+        `<button class="setting-row project-note-row" data-action="project-entry" data-id="${entry.id}">
+          <span class="project-note-text" dir="auto">${e(entry.text)}</span><span class="tail">${icon("arrow")}</span>
+        </button>`).join("")}</div></section>` : "";
+    }).join("") : entries ? `<div class="project-empty panel">${glyph("bookmark")}<div>
+      <strong>${t("Пока записей нет","No notes yet")}</strong><p>${t("Сохрани решение, открытый вопрос или ссылку на материал.","Save a decision, an open question or a link.")}</p></div></div>`
+      : projectLoadErrors.has(id) ? `<p class="muted" role="status">${t("Не удалось загрузить записи.","Couldn’t load notes.")}</p>
+        <button class="small-action" data-action="reload-project" data-id="${id}">${t("Повторить","Try again")}</button>`
+        : `<p class="muted" role="status">${t("Загрузка…","Loading…")}</p>`}
+  </section>`;
 }
 
 async function loadProject(id: number) {
-  if (!id) return;
+  if (!id || loadingProjects.has(id)) return;
   if (demo) { if (!projectEntries.has(id)) projectEntries.set(id, []); render(); return; }
-  projectLoadError = 0;
+  loadingProjects.add(id);
+  if (projectLoadErrors.delete(id) && projectDetail === id) render();
+  const previous = projectEntries.get(id);
+  let changed = false;
   try {
     const entries = await request(`/api/projects/${id}/entries`);
-    projectEntries.set(id, entries);
-  } catch { projectLoadError = id; }
+    changed = projectEntries.get(id) !== previous;
+    if (!changed) projectEntries.set(id, entries);
+  } catch { projectLoadErrors.add(id); }
+  finally { loadingProjects.delete(id); }
+  if (changed) { void loadProject(id); return; }
   if (projectDetail === id) render();
 }
+
+function projectContextSheet(project: Project) {
+  if (!project.context.trim()) {
+    projectSheet(project);
+    return;
+  }
+  openSheet(t("Контекст и инструкции", "Context and instructions"), `
+    <div class="project-reading" dir="auto">${e(project.context)}</div>
+    <div class="submit-row"><button class="button" data-action="edit-project" data-id="${project.id}">${icon("edit")}${t("Изменить","Edit")}</button></div>`);
+}
+
+function projectEntrySheet(entry: ProjectEntry) {
+  const link = entry.kind === "material" && /^https:\/\/\S+$/.test(entry.text);
+  openSheet(entryKindLabel(entry.kind), `
+    <div class="project-entry-body">
+      <div class="project-reading" dir="auto">${link
+        ? `<a href="${e(entry.text)}" target="_blank" rel="noopener noreferrer" data-external-link>${e(entry.text)}</a>` : e(entry.text)}</div>
+      ${entry.source ? `<details class="task-details"><summary>${t("Из сообщения","From the message")}</summary>
+        <p class="project-reading" dir="auto">${e(entry.source)}</p></details>` : ""}
+    </div>
+    <p class="form-error" role="alert"></p>
+    <button class="small-action project-entry-remove" data-action="remove-entry" data-id="${entry.id}">${icon("trash")}${t("Удалить запись","Remove note")}</button>`);
+}
+
 function projectSheet(item?: Project) {
   openSheet(
-    item ? t("О проекте", "About the project") : t("Новый проект", "New project"),
+    item ? t("Редактировать проект", "Edit project") : t("Новый проект", "New project"),
     `<form id="project-form" data-id="${e(item?.id || "")}">
       <label class="field">${t("Название", "Name")}<input name="name" maxlength="64" required value="${e(item?.name || "")}" dir="auto" placeholder="${t("Например, Пилот", "For example, Pilot")}"></label>
-      <label class="field">${t("Контекст", "Context")}<textarea name="context" maxlength="10000" rows="6" dir="auto" placeholder="${t("Цели проекта, важные детали, ссылки…", "Goals, important details, links…")}">${e(item?.context || "")}</textarea></label>
+      <label class="field">${t("Контекст и инструкции", "Context and instructions")}<textarea name="context" maxlength="10000" rows="6" dir="auto" placeholder="${t("Цель проекта, важные детали и правила для Алефа", "Goal, important details and instructions for Aleph")}">${e(item?.context || "")}</textarea></label>
       <label class="file-label">${icon("plus")}${t("Добавить текстовый файл", "Add a text file")}<input type="file" accept=".txt,.md,.csv,.json,.tsv" name="reference"></label>
       ${submit(item ? saveLabel() : t("Создать проект", "Create project"))}
     </form>`);
@@ -1255,23 +1361,46 @@ async function act(action: string, id?: string) {
       break;
     case "new-project":
       if (bridge()) openChat();
-      else projectSheet();
+      else {
+        projectListScroll = activeView()?.panel.scrollTop || 0;
+        projectSheet();
+      }
       break;
     case "edit-project":
-      if (bridge()) openChat();
-      else projectSheet((state.projects || []).find((p) => String(p.id) === String(id)));
+    case "project-context": {
+      const project = selectedProject();
+      if (!project || project.id !== Number(id)) break;
+      if (action === "edit-project") projectSheet(project);
+      else projectContextSheet(project);
       break;
+    }
     case "project-list":
       showProjectList();
       break;
-    case "view-project":
-    case "reload-project":
+    case "view-project": {
+      const next = Number(id);
+      if (next !== 0 && !state.projects?.some(project => project.id === next)) break;
       if (page === "projects" && projectDetail === null) projectListScroll = activeView()?.panel.scrollTop || 0;
-      projectDetail = Number(id);
+      if (projectDetail !== next) {
+        projectPane = "tasks";
+        projectDoneOpen = false;
+        projectDetail = next;
+      }
       if (page !== "projects") navigate("projects");
       render();
       activeView()?.panel.scrollTo({top: 0});
-      await loadProject(projectDetail);
+      activeView()?.heading.focus({preventScroll: true});
+      await loadProject(next);
+      break;
+    }
+    case "reload-project":
+      if (projectDetail === Number(id)) await loadProject(projectDetail);
+      break;
+    case "project-pane":
+      if (!selectedProject() || (id !== "tasks" && id !== "notes") || id === projectPane) break;
+      projectPane = id;
+      selectionFeedback();
+      render();
       break;
     case "continue-project": {
       const project_id = Number(id);
@@ -1282,11 +1411,18 @@ async function act(action: string, id?: string) {
     case "new-entry":
       if (selectedProject()) entrySheet();
       break;
+    case "project-entry": {
+      const project = selectedProject();
+      const entry = project && projectEntries.get(project.id)?.find(item => item.id === Number(id));
+      if (entry) projectEntrySheet(entry);
+      break;
+    }
     case "remove-entry": {
       const selected = selectedProject();
       if (!selected || !window.confirm(t("Удалить эту запись?","Remove this note?"))) return;
-      await write(`/api/projects/${selected.id}/entries/${Number(id)}`,"DELETE",undefined,
-        () => projectEntries.set(selected.id,(projectEntries.get(selected.id) || []).filter(entry => entry.id !== Number(id))), "");
+      if (await write(`/api/projects/${selected.id}/entries/${Number(id)}`,"DELETE",undefined,
+        () => projectEntries.set(selected.id,(projectEntries.get(selected.id) || []).filter(entry => entry.id !== Number(id))),
+        t("Запись удалена","Note removed"))) closeSheet();
       break;
     }
     case "load-agenda":
@@ -1475,7 +1611,7 @@ document.addEventListener("click", (event) => {
   if (link && webapp()?.openLink) {
     event.preventDefault();
     webapp()?.openLink?.(link.href);
-    if (!link.closest(".task-result")) closeSheet();
+    if (!link.closest(".task-result, .project-entry-body")) closeSheet();
     return;
   }
   const el = target?.closest("button");
@@ -1488,6 +1624,12 @@ document.addEventListener("click", (event) => {
     render();
   } else if (el.dataset.action) void act(el.dataset.action, el.dataset.id);
 });
+app.addEventListener("toggle", event => {
+  const target = event.target;
+  if (target instanceof HTMLDetailsElement && target.isConnected && target.matches(".project-done")) {
+    projectDoneOpen = target.open;
+  }
+}, true);
 sheet.addEventListener("close", () => {
   viewedReportId = undefined;
   syncBack();
@@ -1533,7 +1675,12 @@ sheet.addEventListener("submit", async (event) => {
         const project=result || {id:id || Date.now(),name,context};
         mergeRecord(state.projects,project);
         projectDetail = project.id;
-        if (!id) projectEntries.set(project.id, []);
+        if (!id) {
+          projectPane = "tasks";
+          projectDoneOpen = false;
+          projectEntries.set(project.id, []);
+          activeView()?.panel.scrollTo({top: 0});
+        }
       }, id ? t("Контекст сохранён", "Context saved") : t("Проект создан", "Project created"));
     } else if (form.id === "entry-form" && projectDetail) {
       const id = projectDetail;
