@@ -227,17 +227,24 @@ dialog {
   border: 1px solid var(--line); border-bottom: 0; border-radius: 25px 25px 0 0;
   color: var(--text); background: var(--bg); overscroll-behavior: contain;
   box-shadow: 0 -12px 48px var(--glass-drop);
+  transform: translate3d(0, var(--sheet-y, 0px), 0);
 }
-dialog::backdrop { background: var(--scrim); }
-dialog[open] { animation: sheet-in .21s var(--ease); }
-dialog[open].closing { animation: sheet-out .17s ease-in forwards; }
-dialog[open]::backdrop { animation: fade-in .18s ease-out; }
-dialog[open].closing::backdrop { animation: fade-out .16s ease-in forwards; }
-dialog[open].dragging { animation: none; }
-.sheet-body { padding: 8px 21px calc(20px + var(--safe-bottom)); }
-.sheet-grab { display: grid; place-items: center; width: 65px; height: 18px; margin: 0 auto 5px; touch-action: none; cursor: grab; }
-.sheet-grab::before { content: ""; width: 28px; height: 3px; border-radius: 3px; background: var(--hint); opacity: .55; }
-.sheet-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 18px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+dialog::backdrop { background: var(--scrim); opacity: var(--sheet-shade, 1); }
+dialog.opening { animation: sheet-in .21s var(--ease); }
+dialog.opening::backdrop { animation: fade-in .18s ease-out; }
+dialog:is(.settling,.closing) { transition: transform var(--sheet-duration) var(--ease); }
+dialog:is(.settling,.closing)::backdrop { transition: opacity var(--sheet-duration) var(--ease); }
+dialog.closing { pointer-events: none; }
+.sheet-body { --sheet-gutter: 21px; padding: 0 var(--sheet-gutter) calc(20px + var(--safe-bottom)); }
+.sheet-header {
+  position: sticky; top: 0; z-index: 1;
+  margin: 0 calc(-1 * var(--sheet-gutter)) 18px; padding: 3px var(--sheet-gutter) 0;
+  background: var(--bg); touch-action: none; user-select: none; -webkit-user-select: none; cursor: grab;
+}
+.dragging .sheet-header { cursor: grabbing; }
+.sheet-grab { display: grid; place-items: center; height: 27px; }
+.sheet-grab::before { content: ""; width: 34px; height: 4px; border-radius: 4px; background: var(--hint); opacity: .65; }
+.sheet-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
 .sheet-head h2 { font: 570 clamp(22px, 6vw, 29px)/1.15 var(--voice); letter-spacing: -.025em; overflow-wrap: anywhere; }
 .icon-button { display: grid; place-items: center; flex: 0 0 44px; height: 44px; }
 .icon-button .icon { width: 20px; height: 20px; }
@@ -359,10 +366,8 @@ button:is(.button,.action-plus,.icon-button,.nav-item):active { transform: scale
 button:is(.project-row,.setting-row,.context-row,.add-line,.segment):active { background: var(--pressed); }
 .saving :is(.task-toggle,.task-body,.project-row,.switch,.project-chat), [aria-busy="true"].pending { cursor: progress; }
 .saving .project-row[aria-current="true"], button.pending, button[aria-busy="true"], .task-row.pending { opacity: .62; }
-@keyframes sheet-in { from { opacity: .55; transform: translateY(22px); } }
-@keyframes sheet-out { from { transform: translateY(var(--sheet-release, 0px)); } to { opacity: 0; transform: translateY(calc(var(--sheet-release, 0px) + 18px)); } }
+@keyframes sheet-in { from { transform: translateY(22px); } }
 @keyframes fade-in { from { opacity: 0; } }
-@keyframes fade-out { to { opacity: 0; } }
 @media (hover: hover) and (pointer: fine) {
   :is(.project-row,.setting-row,.context-row,.add-line,.segment):is(button):hover, .task-row:has(.task-body:hover) { background-color: var(--wash); }
   .task-toggle:hover .ring { border-color: var(--text); }
@@ -371,14 +376,15 @@ button:is(.project-row,.setting-row,.context-row,.add-line,.segment):active { ba
   .workspace { padding-top: calc(19px + var(--safe-top)); }
 
   dialog { inset: 0; margin: auto; border-radius: 6px; border-bottom: 1px solid var(--line); }
-  .sheet-body { padding: 16px 25px 24px; }
+  .sheet-body { --sheet-gutter: 25px; padding-bottom: 24px; }
+  .sheet-header { padding-top: 16px; }
   .sheet-grab { display: none; }
 }
 @media (max-width: 350px) {
   .workspace { padding-inline: 15px; }
 
   .setting-row,  .project-row { gap: 8px; padding-inline: 9px; }
-  .sheet-body { padding-inline: 15px; }
+  .sheet-body { --sheet-gutter: 15px; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition-duration: .01ms !important; animation-duration: .01ms !important; scroll-behavior: auto !important; }

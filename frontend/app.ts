@@ -1,5 +1,6 @@
 import { icon } from "./icons.js";
 import { revealMiniApp } from "./telegram.js";
+import { bindSheetMotion } from "./sheet-motion.js";
 import type { IconName } from "./icons.js";
 import type { RequestOptions, WriteMethod, Writes } from "./store.js";
 import type { CalendarEvent, ChatGPTConnection, ChatGPTPairing, ProjectEntry, ReplyStyle, SavedMemory, Service, ModelCatalog, ModelChoice, ModelProvider, Project, ProviderModel, Settings, Task, ThemeMode, WorkspaceState } from "./types.js";
@@ -128,7 +129,30 @@ function initTelegram() {
   });
   syncBack();
 }
+let restoreTelegramSwipes: (() => void) | undefined;
+function unlockSheetSwipes() {
+  restoreTelegramSwipes?.();
+  restoreTelegramSwipes = undefined;
+}
+function syncSheetSwipes() {
+  if (!sheet.open) {
+    unlockSheetSwipes();
+    return;
+  }
+  const tg = webapp();
+  if (restoreTelegramSwipes || !tg?.disableVerticalSwipes || !tg.enableVerticalSwipes ||
+      tg.isVerticalSwipesEnabled === false || tg.isVersionAtLeast?.("7.7") === false) return;
+  try {
+    tg.disableVerticalSwipes();
+    restoreTelegramSwipes = () => {
+      try { tg.enableVerticalSwipes?.(); } catch {}
+    };
+  } catch {}
+}
+window.addEventListener("pagehide", unlockSheetSwipes);
+window.addEventListener("pageshow", syncSheetSwipes);
 function syncBack() {
+  syncSheetSwipes();
   const back = webapp()?.BackButton;
   if (!back || !webapp()?.isVersionAtLeast?.("6.1")) return;
   if (sheet.open || page !== "home") back.show();
@@ -178,6 +202,7 @@ function nav() {
   ).join("");
 }
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+const sheetMotion = bindSheetMotion(sheet, reducedMotion, () => pending);
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
 interface View {
@@ -212,10 +237,7 @@ let trackWidth = 0, tabWidth = 0, suppressTap = false;
 let swipe: Swipe | undefined;
 let navigationFrame = 0;
 let navigationPosition = 0;
-let closeTimer: number | undefined;
-let closeListener: ((event?: AnimationEvent) => void) | undefined;
 let focusTarget: string | null = null;
-let sheetDrag: { id: number; start: number; offset: number } | undefined;
 let refreshRunning = false;
 const activeView = () => views.find((view) => view.key === page);
 
@@ -962,64 +984,25 @@ function openSheet(title: string, html: string) {
     returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     focusTarget = controlSelector(returnFocus);
   }
-  clearTimeout(closeTimer);
-  if (closeListener) sheet.removeEventListener("animationend",closeListener);
-  sheet.classList.remove("closing");
-  sheet.style.removeProperty("--sheet-release");
-  sheet.innerHTML = `<div class="sheet-body"><div class="sheet-grab" aria-hidden="true"></div><div class="sheet-head"><h2 id="sheet-heading">${e(title)}</h2><button class="icon-button" aria-label="${t("Закрыть", "Close")}" data-action="close">${icon("close")}</button></div>${html}</div>`;
+  sheetMotion.reset();
+  sheet.innerHTML = `<div class="sheet-body"><div class="sheet-header">
+    <div class="sheet-grab" aria-hidden="true"></div>
+    <div class="sheet-head"><h2 id="sheet-heading">${e(title)}</h2>
+      <button class="icon-button" aria-label="${t("Закрыть", "Close")}" data-action="close">${icon("close")}</button>
+    </div>
+  </div>${html}</div>`;
   sheet.setAttribute("aria-labelledby", "sheet-heading");
-  if (!sheet.open) sheet.showModal();
+  if (!sheet.open) sheetMotion.open();
+  else sheet.scrollTop = 0;
   syncBack();
 }
 function closeSheet() {
-  if (!sheet.open || sheet.classList.contains("closing")) return;
-  if (reducedMotion.matches) { sheet.close(); return; }
-  function finish(event?: AnimationEvent) {
-    if (event && (event.target !== sheet || event.pseudoElement)) return;
-    clearTimeout(closeTimer);
-    sheet.removeEventListener("animationend", finish);
-    closeListener = undefined;
-    sheet.close();
-    sheet.classList.remove("closing");
-    sheet.style.removeProperty("--sheet-release");
-  }
-  closeListener = finish;
-  sheet.classList.add("closing");
-  sheet.addEventListener("animationend", finish);
-  closeTimer=window.setTimeout(finish,220);
+  sheetMotion.close();
 }
-sheet.addEventListener("cancel", event=>{
+sheet.addEventListener("cancel", event => {
   event.preventDefault();
-  if(!pending) closeSheet();
+  if (!pending) closeSheet();
 });
-sheet.addEventListener("pointerdown", (event) => {
-  if (pending || sheetDrag || sheet.classList.contains("closing") ||
-      !event.isPrimary || event.button !== 0 || !(event.target instanceof Element) || !event.target.closest(".sheet-grab")) return;
-  sheetDrag = { id: event.pointerId, start: event.clientY, offset: 0 };
-  sheet.setPointerCapture(event.pointerId);
-  sheet.classList.add("dragging");
-});
-sheet.addEventListener("pointermove", (event) => {
-  if (sheetDrag?.id !== event.pointerId) return;
-  sheetDrag.offset = Math.max(0, event.clientY - sheetDrag.start);
-  sheet.style.transform = `translateY(${sheetDrag.offset}px)`;
-});
-function releaseSheet(event: PointerEvent) {
-  if (sheetDrag?.id !== event.pointerId) return;
-  const offset = sheetDrag.offset;
-  sheetDrag = undefined;
-  sheet.classList.remove("dragging");
-  sheet.style.removeProperty("transform");
-  if (event.type === "pointerup" && offset > 70 && !pending) {
-    sheet.style.setProperty("--sheet-release", `${offset}px`);
-    closeSheet();
-  } else if (offset && !reducedMotion.matches) {
-    sheet.animate([{transform:`translateY(${offset}px)`},{transform:"translateY(0)"}],
-                  {duration:175,easing:"cubic-bezier(.2,.8,.2,1)"});
-  }
-}
-sheet.addEventListener("pointerup", releaseSheet);
-sheet.addEventListener("pointercancel", releaseSheet);
 const saveLabel = () =>
   bridge()
     ? t("Сохранить и вернуться в чат", "Save and return to chat")

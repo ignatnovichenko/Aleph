@@ -15,6 +15,9 @@ interface TelegramWebApp {
   sendData(data: string): void;
   openLink?(url: string): void;
   isVersionAtLeast?(version: string): boolean;
+  isVerticalSwipesEnabled?: boolean;
+  disableVerticalSwipes?(): void;
+  enableVerticalSwipes?(): void;
   onEvent?(event: "themeChanged", callback: () => void): void;
   setHeaderColor?(color: string): void;
   setBackgroundColor?(color: string): void;
