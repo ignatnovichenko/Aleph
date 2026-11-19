@@ -4,6 +4,7 @@ from datetime import datetime
 import hashlib
 import hmac
 import json
+import os
 import re
 import time
 from urllib.parse import parse_qsl
@@ -16,7 +17,7 @@ from .chatgpt_auth import ChatGPTError
 from .chatgpt_pair import IMPORT_PATH, MAX_PACKET, owner as chatgpt_owner
 from .feeds import feed_catalog
 from .links import mini_app_url
-from . import models, projects, widgets
+from . import connections, drive_picker, integrations, models, projects, widgets
 from .store import UTC
 
 
@@ -131,21 +132,88 @@ def install_api(app, store, token, model_key=None):
                                   "projects": projects.list_projects(store, uid), "active_project_id": projects.active(store, uid),
                                   "routines": store.list_routines(uid), "settings": store.get_settings(uid), "integrations": {"rss": True, "calendar": True},
                                   "feeds": store.list_feeds(uid), "feed_catalog": feed_catalog(),
-                                  "feed_items": store.feed_items(uid)}
+                                  "feed_items": store.feed_items(uid), "connections": connections.statuses(store, uid)}
         if chatgpt_owner(uid):
             result["model"] = models.describe(store, uid, catalogs.opencode_model)
         return web.json_response(result)
 
+    async def connection(request, user):
+        provider = request.match_info["provider"]
+        uid = user["id"]
+        if request.method == "DELETE":
+            connections.disconnect(store, uid, provider)
+            return web.json_response(connections.statuses(store, uid))
+        return web.json_response({"url": connections.start(store, uid, provider)})
+
+    async def agenda(request, user):
+        try:
+            async with aiohttp.ClientSession(trust_env=True) as session:
+                data = await integrations.google_agenda(store, session, user["id"],
+                    request.query.get("start", ""), request.query.get("end", ""))
+        except connections.ConnectionError as error:
+            return web.json_response({"error": str(error)}, status=503)
+        return web.json_response(data)
+
+    async def picker_start(request, user):
+        return web.json_response({"url": drive_picker.start(store, user["id"])})
+
+    async def picker_page(request):
+        try:
+            async with aiohttp.ClientSession(trust_env=True) as session:
+                html, policy = await drive_picker.page(store, session, request.query.get("ticket", ""))
+        except connections.ConnectionError as error:
+            return web.Response(text=str(error), status=400, headers={"Cache-Control": "no-store"})
+        return web.Response(text=html, content_type="text/html", headers={
+            "Cache-Control": "no-store", "Referrer-Policy": "strict-origin-when-cross-origin",
+            "Content-Security-Policy": policy, "X-Content-Type-Options": "nosniff",
+        })
+
+    async def oauth_callback(request):
+        from html import escape
+
+        provider = request.match_info["provider"]
+        try:
+            async with aiohttp.ClientSession(trust_env=True) as session:
+                await connections.finish(store, session, provider, request.query.get("state", ""), request.query.get("code", ""))
+        except (ValueError, KeyError) as error:
+            status = 400
+            text = escape(str(error.args[0]) if error.args else "Открой Алефа и попробуй ещё раз.")
+        else:
+            status = 200
+            text = f"{connections.NAMES[provider]} подключён. Вернись в Telegram, чтобы продолжить."
+        username = os.getenv("ALEPH_BOT_USERNAME", "AlephAgentBot").lstrip("@")
+        return_link = (f'<a href="https://t.me/{username}">Открыть Алефа в Telegram</a>'
+                       if re.fullmatch(r"[A-Za-z0-9_]{5,32}", username) else "")
+        page = (f'<!doctype html><html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width">'
+                f'<title>Aleph</title><main><h1>Aleph</h1><p>{text}</p>{return_link}</main></html>')
+        return web.Response(text=page, status=status, content_type="text/html", headers={
+            "Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'",
+        })
+
+    async def project_entries(request, user):
+        uid, project_id = user["id"], int(request.match_info["id"])
+        if request.method == "GET":
+            return web.json_response(projects.entries(store, uid, project_id))
+        if request.method == "DELETE":
+            projects.remove_entry(store, uid, project_id, int(request.match_info["entry"]))
+            return web.Response(status=204)
+        fields = await body(request)
+        if fields.keys() != {"kind", "text"}:
+            raise ValueError("Укажи тип и текст записи.")
+        return web.json_response(projects.add_entry(store, uid, project_id, fields["kind"], fields["text"]), status=201)
+
     async def create(request, user):
         fields = await body(request)
-        if fields.keys() - {"title", "notes", "due_at", "project_id"}:
+        if fields.keys() - {"title", "notes", "due_at", "project_id", "remind_at"}:
             raise ValueError("Неизвестное поле задачи.")
         request_key = request.headers.get("Idempotency-Key", "")
         if request_key and not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", request_key):
             raise ValueError("Проверь идентификатор запроса.")
+        reminder = {"remind_at": fields["remind_at"]} if "remind_at" in fields else {}
         task = store.create_task(user["id"], fields.get("title"), fields.get("due_at"),
                                  fields.get("notes", ""), "api:" + request_key if request_key else None,
-                                 project_id=fields.get("project_id", 0))
+                                 project_id=fields.get("project_id", 0), **reminder)
         return web.json_response(task, status=201)
 
     async def update(request, user):
@@ -172,11 +240,12 @@ def install_api(app, store, token, model_key=None):
 
     async def create_project(request, user):
         fields = await body(request)
-        if fields.keys() - {"name", "context"}:
+        if fields.keys() - {"name", "context", "activate"} or type(fields.get("activate", True)) is not bool:
             raise ValueError("Неизвестное поле проекта.")
         uid = user["id"]
         item = projects.create(store, uid, fields.get("name"), fields.get("context", ""))
-        projects.choose(store, uid, item["id"])
+        if fields.get("activate", True):
+            projects.choose(store, uid, item["id"])
         return web.json_response(item, status=201)
 
     async def update_project(request, user):
@@ -274,6 +343,17 @@ def install_api(app, store, token, model_key=None):
                ("GET", "/api/models", model_settings), ("PATCH", "/api/models", model_settings),
                ("GET", "/api/chatgpt", chatgpt_status), ("POST", "/api/chatgpt/pair", chatgpt_pair),
                ("DELETE", "/api/chatgpt", chatgpt_disconnect)]
+    provider_path = r"{provider:calendar|notion|drive|gmail}"
+    app.router.add_post(f"/api/connections/{provider_path}/start", scoped(connection))
+    app.router.add_delete(f"/api/connections/{provider_path}", scoped(connection))
+    app.router.add_get(f"/oauth/{provider_path}/callback", oauth_callback)
+    app.router.add_get("/api/connections/calendar/events", scoped(agenda))
+    app.router.add_post("/api/connections/drive/picker", scoped(picker_start))
+    app.router.add_get("/oauth/drive/picker", picker_page)
+    for method in ("GET", "POST"):
+        app.router.add_route(method, "/api/projects/{id:[0-9]+}/entries", scoped(project_entries))
+    app.router.add_delete("/api/projects/{id:[0-9]+}/entries/{entry:[0-9]+}", scoped(project_entries))
+
     for method, path, handler in routes:
         app.router.add_route(method, path, scoped(handler))
     app.router.add_post(IMPORT_PATH, chatgpt_import)

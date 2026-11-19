@@ -81,3 +81,18 @@ In **Settings → Chat replies**, the owner can choose ChatGPT or OpenCode, then
     python -m unittest discover -s tests -v
 
 GET /healthz checks the HTTP process and SQLite. The Mini App API returns 401 without Telegram authentication. Data handling and the chat-based erasure procedure are described in [the privacy notice](web/privacy.html).
+
+## Calendar, Notion, Drive and Gmail
+
+Set an HTTPS origin under your control as `ALEPH_INTEGRATIONS_ORIGIN`, for example `https://aleph.example.com`. Every callback must use that exact origin. Set `ALEPH_BOT_USERNAME` to your bot’s username for the return link shown in the browser. Generate the encryption key with `python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'` and put it in `ALEPH_INTEGRATIONS_KEY`. Keep this key with your private backups. Changing it requires reconnecting existing accounts. A bare-metal deployment can use the `_FILE` variant for each client secret and the encryption key. In Compose use a private `.env` file, never commit it.
+
+| Service | Setup | What Aleph can do |
+| --- | --- | --- |
+| Google Calendar | Enable Calendar API. Register `/oauth/calendar/callback` on a Google Web OAuth client. Set `ALEPH_GOOGLE_CLIENT_ID` and `ALEPH_GOOGLE_CLIENT_SECRET`. | Read the primary calendar and the Aleph calendar. Create events after confirmation in Telegram. |
+| Notion | Create a Notion OAuth integration. Enable read and insert capabilities, register `/oauth/notion/callback`, then set `ALEPH_NOTION_CLIENT_ID` and `ALEPH_NOTION_CLIENT_SECRET`. | Search and read granted pages. Append approved notes. Paste a Notion page link into a project material to make it available as project context. |
+| Google Drive | Enable Drive and Picker APIs. Register `/oauth/drive/callback`. Make a browser-restricted Picker key and configure `ALEPH_GOOGLE_PICKER_KEY` and `ALEPH_GOOGLE_PROJECT_NUMBER`. | Read Google Docs and selected text formats. Create approved Google Docs. The file picker grants per-file access. |
+| Gmail | Enable Gmail API on the Google project and register `/oauth/gmail/callback`. | Search and read messages on request. Save approved drafts to Gmail. |
+
+In Google Cloud, add your accounts as testers to exercise Calendar, Drive and Gmail while the app is in Testing. Google testing tokens for these scopes expire after seven days. Review the Google verification requirements before publishing, especially Gmail’s restricted scopes. Notion public OAuth allows other workspaces to connect after setting up the integration as public. Each Telegram user grants their own access in Settings → Connections. Disconnect removes the app’s stored credentials. Provider account settings control revocation of the wider OAuth grant.
+
+The app uses structured Telegram Rich Messages for longer Markdown responses. If Telegram rejects the formatting, the bot sends the answer as ordinary messages. Task deadlines and reminders have separate fields. Existing timed tasks keep their original reminder times. A reminder can be completed or postponed from Telegram.

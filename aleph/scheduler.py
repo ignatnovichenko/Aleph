@@ -9,6 +9,7 @@ import aiohttp
 
 from .feeds import fetch_feed
 from .routines import SourceUnavailable, eligible, format_routine, queue_routines
+from . import reminders
 from .store import UTC, timestamp
 
 log = logging.getLogger(__name__)
@@ -67,10 +68,10 @@ def queue_messages(store, now):
     queue_routines(store, now)
     db = store.db
     now_s = timestamp(now)
-    due = db.execute("""SELECT t.id,t.user_id,t.due_at FROM tasks t JOIN users u ON u.id=t.user_id
-        WHERE t.status='open' AND t.due_at<=? AND COALESCE(u.blocked_until,'')<=? AND NOT EXISTS
-        (SELECT 1 FROM deliveries WHERE key='task:'||t.id||':'||t.due_at AND status<>'cancelled')
-        ORDER BY t.due_at LIMIT 100""", (now_s, now_s)).fetchall()
+    due = db.execute("""SELECT t.id,t.user_id,t.remind_at AS due_at FROM tasks t JOIN users u ON u.id=t.user_id
+        WHERE t.status='open' AND t.remind_at<=? AND COALESCE(u.blocked_until,'')<=? AND NOT EXISTS
+        (SELECT 1 FROM deliveries WHERE key='task:'||t.id||':'||t.remind_at AND status<>'cancelled')
+        ORDER BY t.remind_at LIMIT 100""", (now_s, now_s)).fetchall()
     for task in due:
         key = f"task:{task['id']}:{task['due_at']}"
         db.execute("""INSERT INTO deliveries(key,user_id,kind,task_id,due_at,body,available_at)
@@ -111,7 +112,7 @@ def delivery_text(store, item, now):
         task = store.get_task(item["user_id"], item["task_id"])
     except KeyError:
         return None
-    if task["status"] != "open" or task["due_at"] != item["due_at"]:
+    if task["status"] != "open" or task["remind_at"] != item["due_at"]:
         return None
     prefix = "Напоминаю" if russian(user) else "Reminder"
     return telegram_text(f"{prefix}: {task['title']}" + ("\n\n" + task["notes"][:3200] if task["notes"] else ""))
@@ -162,9 +163,10 @@ async def deliver(store, session, token, *, now=None, weather=None):
                 db.execute("""UPDATE deliveries SET status='pending',attempts=attempts-1,available_at=?
                     WHERE key=?""", (timestamp(now + timedelta(minutes=1)), key))
                 continue
-            async with session.post(f"https://api.telegram.org/bot{token}/sendMessage", json={
-                "chat_id": uid, "text": text, "link_preview_options": {"is_disabled": True},
-            }, timeout=aiohttp.ClientTimeout(total=15), allow_redirects=False) as response:
+            params = {"chat_id": uid, "text": text, "link_preview_options": {"is_disabled": True}}
+            if item["kind"] == "reminder":
+                params["reply_markup"] = reminders.keyboard(item["task_id"], item["due_at"], russian(store.get_user(uid)))
+            async with session.post(f"https://api.telegram.org/bot{token}/sendMessage", json=params, timeout=aiohttp.ClientTimeout(total=15), allow_redirects=False) as response:
                 try:
                     data = await response.json(content_type=None)
                 except (ValueError, UnicodeError):

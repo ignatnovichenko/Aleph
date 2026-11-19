@@ -15,7 +15,7 @@ from .hermes import create_agent
 from .links import settings_url
 from . import models, projects
 from .llm import ChatGPTUnavailable, ModelRejectsPhoto, ModelUnavailable, RegionUnavailable
-from . import media, memory, documents, widgets
+from . import articles, capture, integrations, media, memory, documents, reminders, widgets
 
 log = logging.getLogger(__name__)
 PLAN_ALIASES = {"/plan", "открой план", "открыть план", "открой мини-апп", "open plan", "open mini app"}
@@ -122,6 +122,12 @@ class Inbox:
             self.db.execute("ALTER TABLE bot_inbox ADD COLUMN project_id INTEGER")
         if "chatgpt_client" not in columns:
             self.db.execute("ALTER TABLE bot_inbox ADD COLUMN chatgpt_client TEXT")
+        if "approval_outbox" not in columns:
+            self.db.execute("ALTER TABLE bot_inbox ADD COLUMN approval_outbox TEXT")
+        if "article_fallback" not in columns:
+            self.db.execute("ALTER TABLE bot_inbox ADD COLUMN article_fallback INTEGER NOT NULL DEFAULT 0")
+        if "source" not in columns:
+            self.db.execute("ALTER TABLE bot_inbox ADD COLUMN source TEXT NOT NULL DEFAULT ''")
         if "model_choice" not in columns:
             self.db.execute("ALTER TABLE bot_inbox ADD COLUMN model_choice TEXT")
 
@@ -239,7 +245,7 @@ class Inbox:
             for i, call in enumerate(json.loads(row["message"]).get("tool_calls") or []):
                 name = call.get("function", {}).get("name")
                 result = self.get_tool(f"tg:{update_id}:{row['step']}:{i}")
-                if name in {"create_task","update_task","change_settings","subscribe_feed","unsubscribe_feed","remember_fact","forget_fact","create_routine","set_routine_active","delete_routine","create_document","set_project_context"} and isinstance(result, dict) and "error" not in result:
+                if name in {"create_task","update_task","change_settings","subscribe_feed","unsubscribe_feed","remember_fact","forget_fact","create_routine","set_routine_active","delete_routine","create_document","set_project_context","capture_project_update"} and isinstance(result, dict) and "error" not in result:
                     results.append(result.get("title") or {"change_settings": "Настройки", "remember_fact": "Память", "forget_fact": "Память", "create_document": "Файл", "delete_routine": "Расписание", "set_routine_active": "Расписание", "set_project_context": "Контекст проекта"}.get(name, "Подписка"))
         return results
 
@@ -345,6 +351,8 @@ async def _compose(row, store, inbox, tg, agent):
         russian_question = MODEL_QUESTION_RU.fullmatch(query.strip())
         if russian_question or MODEL_QUESTION_EN.fullmatch(query.strip()):
             return query, models.identity_reply(store, uid, agent.model, russian=bool(russian_question))
+    source = query.split("\n\n[Attached document content]", 1)[0][:900]
+    store.db.execute("UPDATE bot_inbox SET source=? WHERE id=?", (source, row["id"]))
     answer = await agent.respond(store, uid, query, photo, inbox, row["id"])
     historical = ("[Фото] " if photo else "") + query
     return historical, answer
@@ -454,7 +462,44 @@ async def _handle(row, store, inbox, tg, agent):
         command = (original.get("text") or "").strip().lower().split("@",1)[0].rstrip(".!")
         show_plan = (command.split(" ", 1)[0] in ("/start", "/help", "/plan") or command in PLAN_ALIASES
                      or bool(original.get("web_app_data")) or inbox.opened_plan(update_id))
+        approvals = json.loads(row["approval_outbox"]) if row["approval_outbox"] else []
+        if not approvals:
+            pending = []
+            project_choice = capture.for_update(store, uid, update_id)
+            external = integrations.for_update(store, uid, update_id)
+            if project_choice:
+                pending.append(capture.preview(store, uid, project_choice, ru))
+            if external:
+                pending.append({"text": integrations.preview(external, ru), "reply_markup": integrations.keyboard(external, ru)})
+            for item in pending:
+                parts = list(chunks(item["text"]))
+                approvals.extend({"text": part} for part in parts[:-1])
+                approvals.append({"text": parts[-1], "reply_markup": item["reply_markup"]})
+            if approvals:
+                inbox.db.execute("UPDATE bot_inbox SET approval_outbox=? WHERE id=?", (json.dumps(approvals), update_id))
+        if approvals:
+            for n, packet in enumerate(approvals):
+                if n < row["sent_chunks"]:
+                    continue
+                await tg.call("sendMessage", chat_id=uid, link_preview_options={"is_disabled": True}, **packet)
+                inbox.db.execute("UPDATE bot_inbox SET sent_chunks=? WHERE id=?", (n+1, update_id))
+            inbox.done(update_id)
+            return
         reply = await _send_widget(store, tg, uid, update_id, reply, show_plan, russian=ru)
+        if (not show_plan and not row["sent_chunks"] and not row["article_fallback"]
+                and not widgets.for_update(store, update_id)):
+            rich = articles.rich_content(reply)
+            if rich:
+                try:
+                    await tg.call("sendRichMessage", chat_id=uid, rich_message=rich)
+                except TelegramError as error:
+                    if error.code not in (400, 404, 405, 413):
+                        raise
+                    log.info("Telegram rejected rich formatting status=%s", error.code)
+                    inbox.db.execute("UPDATE bot_inbox SET article_fallback=1 WHERE id=?", (update_id,))
+                else:
+                    inbox.done(update_id)
+                    return
         for n, chunk in enumerate(chunks(reply)):
             if n < row["sent_chunks"]:
                 continue
@@ -468,7 +513,16 @@ async def _handle(row, store, inbox, tg, agent):
                 if url:
                     params["reply_markup"] = {"inline_keyboard": [[{"text": "Настройки" if ru else "Settings",
                                                                      "web_app": {"url": url}}]]}
-            await tg.call("sendMessage", **params)
+            formatted = articles.basic_content(chunk)
+            if formatted:
+                try:
+                    await tg.call("sendMessage", **{**params, "text":formatted, "parse_mode":"HTML"})
+                except TelegramError as error:
+                    if error.code != 400:
+                        raise
+                    await tg.call("sendMessage", **params)
+            else:
+                await tg.call("sendMessage", **params)
             inbox.db.execute("UPDATE bot_inbox SET sent_chunks=? WHERE id=?", (n+1, update_id))
         inbox.done(update_id)
     except TelegramError as error:
@@ -511,7 +565,7 @@ async def _work(store, inbox, tg, agent, changed):
             task.cancel()
         await asyncio.gather(*active.values(), return_exceptions=True)
 
-async def _widget_updates(store, telegram, updates):
+async def _widget_updates(store, telegram, updates, queue_external=None):
     # Process independent messages concurrently. Serialize taps on one widget
     # so an earlier edit cannot win after a later one.
     lanes = {}
@@ -530,6 +584,15 @@ async def _widget_updates(store, telegram, updates):
                 try:
                     if native:
                         await widgets.handle_query(store, telegram, query)
+                    elif str(query.get("data", "")).startswith("cap:"):
+                        await capture.handle(store, telegram, query)
+                    elif str(query.get("data", "")).startswith("ext:"):
+                        if queue_external:
+                            queue_external(query)
+                        else:
+                            await integrations.handle(store, telegram, query)
+                    elif str(query.get("data", "")).startswith("rem:"):
+                        await reminders.handle(store, telegram, query)
                     else:
                         await widgets.handle_fallback_query(store, telegram, query)
                 except TelegramError as error:
@@ -545,6 +608,23 @@ async def run_bot(store, session, token, model_key):
     agent = create_agent(session, model_key)
     log.info("Telegram conversation engine: %s", type(agent).__name__)
     worker = asyncio.create_task(_work(store, inbox, telegram, agent, changed))
+    confirmations = set()
+    external_slots = asyncio.Semaphore(6)
+
+    async def confirm_external(query):
+        async with external_slots:
+            try:
+                await integrations.handle(store, telegram, query)
+            except TelegramError as error:
+                log.info("External confirmation delivery status=%s", error.code)
+            except Exception as error:
+                log.error("External confirmation failed type=%s", type(error).__name__)
+
+    def queue_external(query):
+        task = asyncio.create_task(confirm_external(query))
+        confirmations.add(task)
+        task.add_done_callback(confirmations.discard)
+
     try:
         while True:
             if worker.done():
@@ -554,10 +634,12 @@ async def run_bot(store, session, token, model_key):
                 if updates:
                     inbox.ingest(updates)
                     changed.set()
-                    await _widget_updates(store, telegram, updates)
+                    await _widget_updates(store, telegram, updates, queue_external)
             except TelegramError as error:
                 log.warning("Polling Telegram status=%s", error.code)
                 await asyncio.sleep(max(4, error.retry_after))
     finally:
         worker.cancel()
-        await asyncio.gather(worker, return_exceptions=True)
+        for task in confirmations:
+            task.cancel()
+        await asyncio.gather(worker, *confirmations, return_exceptions=True)

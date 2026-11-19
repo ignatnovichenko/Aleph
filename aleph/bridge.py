@@ -18,7 +18,7 @@ def keyboard_markup(store, uid, base_url):
     state["active_project_id"] = current
     state["projects"] = [{"id": x["id"], "name": x["name"][:64], "context": "", "open_tasks": x["open_tasks"]}
                          for x in projects.list_projects(store, uid) if x["id"] == current]
-    tasks = store.list_tasks(uid, project_id=current)
+    tasks = store.list_tasks(uid)
 
     def link():
         data = json.dumps(state, ensure_ascii=False, separators=(",", ":")).encode()
@@ -33,7 +33,7 @@ def keyboard_markup(store, uid, base_url):
             state["routines"].pop()
             break
     for task in tasks[:30]:
-        state["tasks"].append(task)
+        state["tasks"].append({key: value for key, value in task.items() if key != "source"})
         if len(link()) > 1800:
             state["tasks"].pop()
             break
@@ -53,9 +53,10 @@ def apply_web_action(store, uid, raw_data, request_key):
         raise ValueError("Некорректное действие.")
     ru = store.get_user(uid)["language_code"] in ("", "ru", "uk", "be")
     if (method, path) == ("POST", "/api/tasks"):
-        if fields.keys() - {"title", "notes", "due_at", "project_id"}:
+        if fields.keys() - {"title", "notes", "due_at", "project_id", "remind_at"}:
             raise ValueError("Неизвестное поле задачи.")
-        task = store.create_task(uid, fields.get("title"), fields.get("due_at"), fields.get("notes", ""), request_key=request_key, project_id=fields.get("project_id", 0))
+        reminder = {"remind_at": fields["remind_at"]} if "remind_at" in fields else {}
+        task = store.create_task(uid, fields.get("title"), fields.get("due_at"), fields.get("notes", ""), request_key=request_key, project_id=fields.get("project_id", 0), **reminder)
         return ("Добавил в план: " if ru else "Added to your plan: ") + task["title"]
     match = re.fullmatch(r"/api/tasks/(\d{1,18})", path)
     if method == "PATCH" and match:

@@ -13,6 +13,7 @@ interface TelegramWebApp {
   expand(): void;
   close(): void;
   sendData(data: string): void;
+  openLink?(url: string): void;
   isVersionAtLeast?(version: string): boolean;
   onEvent?(event: "themeChanged", callback: () => void): void;
   setHeaderColor?(color: string): void;
@@ -37,6 +38,8 @@ export interface Task {
   notes: string;
   status: TaskStatus;
   due_at: string | null;
+  remind_at?: string | null;
+  source?: string;
   project_id?: number;
 }
 
@@ -44,6 +47,24 @@ export interface Project {
   id: number;
   name: string;
   context: string;
+}
+
+export type Service = "calendar" | "notion" | "drive" | "gmail";
+export type ConnectionStatus = "unavailable" | "disconnected" | "connected" | "reconnect";
+export type Connections = Record<Service, ConnectionStatus>;
+export interface CalendarEvent {
+  title: string;
+  start: { dateTime?: string; date?: string };
+  end: { dateTime?: string; date?: string };
+  url: string;
+  location: string;
+}
+export interface ProjectEntry {
+  id: number;
+  kind: "decision" | "question" | "material";
+  text: string;
+  source: string;
+  created_at: string;
 }
 
 export interface Settings {
@@ -82,6 +103,7 @@ export interface WorkspaceState {
   snapshot_total?: number;
   integrations?: { rss: boolean; calendar: boolean };
   model?: ModelSummary;
+  connections?: Connections;
 }
 
 export type ModelProvider = "chatgpt" | "opencode";

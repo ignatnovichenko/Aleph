@@ -18,6 +18,18 @@ def initialize(db):
           text TEXT NOT NULL, normalized TEXT NOT NULL,
           UNIQUE(project_id, normalized)
         );
+        CREATE TABLE IF NOT EXISTS project_entries (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          kind TEXT NOT NULL CHECK(kind IN ('decision','question','material')),
+          text TEXT NOT NULL,
+          source TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL,
+          request_key TEXT,
+          UNIQUE(user_id,request_key)
+        );
+        CREATE INDEX IF NOT EXISTS project_entries_scope ON project_entries(user_id,project_id,id);
     """)
     for table, column in (("users", "active_project_id"), ("tasks", "project_id"),
                           ("history", "project_id"), ("routines", "project_id")):
@@ -149,3 +161,49 @@ def forget(store, uid, project_id, fact_id):
     if not row:
         raise KeyError("Заметка не найдена.")
     return dict(row)
+
+
+def named(store, uid, name):
+    match = store.db.execute("SELECT id FROM projects WHERE user_id=? AND normalized=?",
+                             (uid, normalized(name))).fetchone()
+    if not match:
+        raise KeyError("Проект не найден. Уточни его название.")
+    return match["id"]
+
+
+def entries(store, uid, project_id, *, limit=40, kind=None):
+    get(store, uid, project_id)
+    fields = (uid, project_id, limit) if kind is None else (uid, project_id, kind, limit)
+    condition = "" if kind is None else " AND kind=?"
+    return [dict(row) for row in store.db.execute("""
+        SELECT id,kind,text,source,created_at FROM project_entries
+        WHERE user_id=? AND project_id=?""" + condition + """ ORDER BY id DESC LIMIT ?
+    """, fields)]
+
+
+def add_entry(store, uid, project_id, kind, text, source="", *, request_key=None):
+    from .store import bounded_text, timestamp
+    get(store, uid, project_id)
+    if kind not in ("decision", "question", "material") or not project_id:
+        raise ValueError("Выбери проект и тип записи.")
+    text = bounded_text(text, 2000, required=True)
+    source = bounded_text(source, 900)
+    saved = store.db.execute("""
+        INSERT INTO project_entries(user_id,project_id,kind,text,source,created_at,request_key)
+        VALUES(?,?,?,?,?,?,?) ON CONFLICT(user_id,request_key) DO NOTHING
+        RETURNING id,kind,text,source,created_at
+    """, (uid, project_id, kind, text, source, timestamp(), request_key)).fetchone()
+    if saved is None:
+        saved = store.db.execute("""SELECT id,kind,text,source,created_at FROM project_entries
+            WHERE user_id=? AND project_id=? AND request_key=?""", (uid, project_id, request_key)).fetchone()
+    if saved is None:
+        raise ValueError("Этот запрос уже использован в другом проекте.")
+    return dict(saved)
+
+
+def remove_entry(store, uid, project_id, entry_id):
+    get(store, uid, project_id)
+    changed = store.db.execute("DELETE FROM project_entries WHERE user_id=? AND project_id=? AND id=?",
+                               (uid, project_id, entry_id)).rowcount
+    if not changed:
+        raise KeyError("Запись не найдена.")

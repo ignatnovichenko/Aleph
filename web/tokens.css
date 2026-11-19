@@ -1,27 +1,27 @@
 /* Paper and Void, with glass reserved for navigation. */
 :root {
   color-scheme: light;
-  --bg: #edede8;
-  --panel: #e7e7e1;
-  --paper: #f4f4ee;
-  --text: #171716;
-  --hint: #565653;
+  --bg: #f5f2eb;
+  --panel: #fbf9f4;
+  --paper: #fffdf8;
+  --text: #292520;
+  --hint: #696259;
   --line: #1919192a;
   --hair: #19191915;
   --wash: #19191906;
   --pressed: #19191913;
   --button: #161618;
   --button-text: #f3eee6;
-  --signal: #ff3b1f;
+  --signal: #a24231;
   --critical: #9d3021;
-  --dock-bed: #f2f2e964;
+  --dock-bed: #f7f2e781;
   --dock-web: #efefe8e8;
   --dock-ink: #51514c;
   --glass-bright: #ffffffec;
   --glass-highlight: #ffffffa8;
   --glass-refract: #fcfff494;
-  --glass-depth: #777b664f;
-  --glass-drop: #36372b3a;
+  --glass-depth: #77664c38;
+  --glass-drop: #3a32263a;
   --lens-body: #f7faeb30;
   --lens-highlight: #fff9;
   --lens-deep: #62685b63;
@@ -38,12 +38,12 @@
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --bg: #000;
-  --panel: #0b0b0c;
-  --paper: #161618;
+  --bg: #141313;
+  --panel: #1e1c1b;
+  --paper: #272423;
   --text: #f3eee6;
   --hint: #a19f9a;
-  --line: #f3eee640;
+  --line: #f3eee627;
   --hair: #f3eee620;
   --wash: #f3eee609;
   --pressed: #f3eee61b;

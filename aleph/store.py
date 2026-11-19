@@ -7,10 +7,11 @@ import sqlite3
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .feeds import CATALOG
-from . import projects
+from . import capture, connections, projects
 from .routines import day_names
 
 UTC = timezone.utc
+DEFAULT_REMINDER = object()
 
 
 def timestamp(dt=None):
@@ -107,6 +108,19 @@ class Store:
             self.db.execute("ALTER TABLE deliveries ADD COLUMN routine_id INTEGER REFERENCES routines(id)")
 
         projects.initialize(self.db)
+        connections.initialize(self.db)
+        capture.initialize(self.db)
+        task_columns = {row["name"] for row in self.db.execute("PRAGMA table_info(tasks)")}
+        if "remind_at" not in task_columns:
+            self.db.executescript("""
+                BEGIN IMMEDIATE;
+                ALTER TABLE tasks ADD COLUMN remind_at TEXT;
+                UPDATE tasks SET remind_at=due_at;
+                COMMIT;
+            """)
+        if "source" not in task_columns:
+            self.db.execute("ALTER TABLE tasks ADD COLUMN source TEXT NOT NULL DEFAULT ''")
+        self.db.execute("CREATE INDEX IF NOT EXISTS tasks_reminder ON tasks(status,remind_at)")
 
     def close(self):
         self.db.close()
@@ -163,23 +177,26 @@ class Store:
         if project_id is not None:
             condition += " AND project_id=?"
             args += (project_id,)
-        rows = self.db.execute("""SELECT id,title,notes,due_at,status,created_at,updated_at,project_id
+        rows = self.db.execute("""SELECT id,title,notes,due_at,status,created_at,updated_at,project_id,remind_at,source
             FROM tasks WHERE user_id=?""" + condition + """
             ORDER BY status='done', due_at IS NULL, due_at, id DESC""", args)
         return [dict(row) for row in rows]
 
     def get_task(self, uid, task_id):
-        row = self.db.execute("""SELECT id,title,notes,due_at,status,created_at,updated_at,project_id
+        row = self.db.execute("""SELECT id,title,notes,due_at,status,created_at,updated_at,project_id,remind_at,source
             FROM tasks WHERE user_id=? AND id=?""", (uid, task_id)).fetchone()
         if row is None:
             raise KeyError("Задача не найдена.")
         return dict(row)
 
-    def create_task(self, uid, title, due_at=None, notes="", request_key=None, *, project_id=0):
+    def create_task(self, uid, title, due_at=None, notes="", request_key=None, *, project_id=0, remind_at=DEFAULT_REMINDER, source=""):
         projects.get(self, uid, project_id)
         title = bounded_text(title, 300, required=True)
         notes = bounded_text(notes, 4000)
-        due_at = parse_due(due_at, self.get_settings(uid)["timezone"])
+        zone = self.get_settings(uid)["timezone"]
+        due_at = parse_due(due_at, zone)
+        remind_at = due_at if remind_at is DEFAULT_REMINDER else parse_due(remind_at, zone)
+        source = bounded_text(source, 900)
         now = timestamp()
         if request_key:
             row = self.db.execute("SELECT id FROM tasks WHERE user_id=? AND request_key=?", (uid, request_key)).fetchone()
@@ -187,9 +204,9 @@ class Store:
                 return self.get_task(uid, row["id"])
         if self.db.execute("SELECT COUNT(*) FROM tasks WHERE user_id=? AND status='open'", (uid,)).fetchone()[0] >= 500:
             raise ValueError("Достигнут лимит в 500 открытых задач.")
-        self.db.execute("""INSERT INTO tasks(user_id,title,notes,due_at,created_at,updated_at,request_key,project_id)
-            VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(user_id,request_key) DO NOTHING""",
-            (uid, title, notes, due_at, now, now, request_key, project_id))
+        self.db.execute("""INSERT INTO tasks(user_id,title,notes,due_at,created_at,updated_at,request_key,project_id,remind_at,source)
+            VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id,request_key) DO NOTHING""",
+            (uid, title, notes, due_at, now, now, request_key, project_id, remind_at, source))
         if request_key:
             task_id = self.db.execute("SELECT id FROM tasks WHERE user_id=? AND request_key=?", (uid, request_key)).fetchone()[0]
         else:
@@ -197,9 +214,9 @@ class Store:
         return self.get_task(uid, task_id)
 
     def update_task(self, uid, task_id, fields):
-        self.get_task(uid, task_id)
+        old = self.get_task(uid, task_id)
         fields = dict(fields)
-        if not fields or fields.keys() - {"title", "notes", "status", "due_at"}:
+        if not fields or fields.keys() - {"title", "notes", "status", "due_at", "remind_at", "project_id"}:
             raise ValueError("Неизвестное поле задачи.")
         if "title" in fields:
             fields["title"] = bounded_text(fields["title"], 300, required=True)
@@ -207,8 +224,15 @@ class Store:
             fields["notes"] = bounded_text(fields["notes"], 4000)
         if "status" in fields and fields["status"] not in ("open", "done"):
             raise ValueError("Неизвестный статус задачи.")
+        zone = self.get_settings(uid)["timezone"]
+        if "project_id" in fields:
+            projects.get(self, uid, fields["project_id"])
         if "due_at" in fields:
-            fields["due_at"] = parse_due(fields["due_at"], self.get_settings(uid)["timezone"])
+            fields["due_at"] = parse_due(fields["due_at"], zone)
+            if "remind_at" not in fields and old["due_at"] == old["remind_at"]:
+                fields["remind_at"] = fields["due_at"]
+        if "remind_at" in fields:
+            fields["remind_at"] = parse_due(fields["remind_at"], zone)
         fields["updated_at"] = timestamp()
         sql = ",".join(key + "=?" for key in fields)
         self.db.execute(f"UPDATE tasks SET {sql} WHERE id=? AND user_id=?", (*fields.values(), task_id, uid))

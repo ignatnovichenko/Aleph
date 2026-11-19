@@ -1,5 +1,5 @@
 import { bridge, bridgeRequest } from "./bridge.js";
-import type { ChatGPTConnection, ChatGPTPairing, Feed, ModelCatalog, ModelSummary, Project, Settings, Task, WidgetState, WorkspaceState } from "./types.js";
+import type { CalendarEvent, ChatGPTConnection, ChatGPTPairing, Connections, Service, ProjectEntry, Feed, ModelCatalog, ModelSummary, Project, Settings, Task, WidgetState, WorkspaceState } from "./types.js";
 
 export { bridge };
 
@@ -8,12 +8,15 @@ type Reads = {
   "/api/calendar.ics": Blob;
   "/api/chatgpt": ChatGPTConnection;
   "/api/models": ModelCatalog;
+  [path: `/api/connections/calendar/events?${string}`]: {events: CalendarEvent[]; more: boolean};
+  [path: `/api/projects/${number}/entries`]: ProjectEntry[];
   [path: `/api/widgets/${string}`]: WidgetState & { html: string };
 };
 
 export type Writes = {
   "/api/projects": Project;
-  [path: `/api/projects/${string}`]: Project;
+  "/api/projects/active": Project;
+  [path: `/api/projects/${number}`]: Project;
   "/api/tasks": Task;
   [path: `/api/tasks/${string}`]: Task;
   "/api/settings": Settings;
@@ -21,9 +24,13 @@ export type Writes = {
   "/api/chatgpt": ChatGPTConnection;
   "/api/chatgpt/pair": ChatGPTPairing;
   "/api/models": ModelSummary;
+  "/api/connections/drive/picker": {url: string};
+  [path: `/api/projects/${number}/entries`]: ProjectEntry;
+  [path: `/api/projects/${number}/entries/${number}`]: null;
   [path: `/api/feeds/${string}`]: null;
   [path: `/api/widgets/${string}`]: WidgetState;
-};
+} & { [path in `/api/connections/${Service}/start`]: {url: string} }
+  & { [path in `/api/connections/${Service}`]: Connections };
 
 export type WriteMethod = "POST" | "PATCH" | "DELETE";
 export interface RequestOptions { requestKey?: string | null }
@@ -117,6 +124,7 @@ export function demoState(ru: boolean): WorkspaceState {
     tasks: texts.map((title, i) => ({
       id: i + 1,
       title,
+      project_id: i === 2 ? 1 : 0,
       status: i === 3 ? "done" : "open",
       notes: "",
       due_at: [
