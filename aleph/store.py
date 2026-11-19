@@ -7,7 +7,7 @@ import sqlite3
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .feeds import CATALOG
-from . import capture, connections, projects
+from . import capture, connections, projects, reports
 from .routines import day_names
 
 UTC = timezone.utc
@@ -110,6 +110,7 @@ class Store:
         projects.initialize(self.db)
         connections.initialize(self.db)
         capture.initialize(self.db)
+        reports.initialize(self.db)
         task_columns = {row["name"] for row in self.db.execute("PRAGMA table_info(tasks)")}
         if "remind_at" not in task_columns:
             self.db.executescript("""
@@ -177,13 +178,15 @@ class Store:
         if project_id is not None:
             condition += " AND project_id=?"
             args += (project_id,)
-        rows = self.db.execute("""SELECT id,title,notes,due_at,status,created_at,updated_at,project_id,remind_at,source
+        rows = self.db.execute("""SELECT id,title,notes,due_at,status,created_at,updated_at,project_id,remind_at,source,
+            (SELECT state FROM scheduled_reports WHERE task_id=tasks.id) AS report_state
             FROM tasks WHERE user_id=?""" + condition + """
             ORDER BY status='done', due_at IS NULL, due_at, id DESC""", args)
         return [dict(row) for row in rows]
 
     def get_task(self, uid, task_id):
-        row = self.db.execute("""SELECT id,title,notes,due_at,status,created_at,updated_at,project_id,remind_at,source
+        row = self.db.execute("""SELECT id,title,notes,due_at,status,created_at,updated_at,project_id,remind_at,source,
+            (SELECT state FROM scheduled_reports WHERE task_id=tasks.id) AS report_state
             FROM tasks WHERE user_id=? AND id=?""", (uid, task_id)).fetchone()
         if row is None:
             raise KeyError("Задача не найдена.")
@@ -221,7 +224,7 @@ class Store:
         if "title" in fields:
             fields["title"] = bounded_text(fields["title"], 300, required=True)
         if "notes" in fields:
-            fields["notes"] = bounded_text(fields["notes"], 4000)
+            fields["notes"] = bounded_text(fields["notes"], 4000, required=bool(old["report_state"]))
         if "status" in fields and fields["status"] not in ("open", "done"):
             raise ValueError("Неизвестный статус задачи.")
         zone = self.get_settings(uid)["timezone"]
@@ -233,9 +236,25 @@ class Store:
                 fields["remind_at"] = fields["due_at"]
         if "remind_at" in fields:
             fields["remind_at"] = parse_due(fields["remind_at"], zone)
+        if old["report_state"]:
+            if old["report_state"] == "sent" and fields != {"status": "done"}:
+                raise ValueError("Этот ответ уже доставлен. Для повтора создай новое поручение.")
+            if "due_at" in fields and fields["due_at"] is None:
+                raise ValueError("У поручения Алефу должно быть время запуска.")
+            if fields.get("remind_at"):
+                raise ValueError("Для поручения Алефу укажи время запуска.")
         fields["updated_at"] = timestamp()
         sql = ",".join(key + "=?" for key in fields)
-        self.db.execute(f"UPDATE tasks SET {sql} WHERE id=? AND user_id=?", (*fields.values(), task_id, uid))
+        self.db.execute("SAVEPOINT edit_task")
+        try:
+            self.db.execute(f"UPDATE tasks SET {sql} WHERE id=? AND user_id=?", (*fields.values(), task_id, uid))
+            if old["report_state"] == "failed" and fields.get("due_at", "") > timestamp():
+                self.db.execute("UPDATE scheduled_reports SET state='pending' WHERE task_id=?", (task_id,))
+        except BaseException:
+            self.db.execute("ROLLBACK TO edit_task")
+            raise
+        finally:
+            self.db.execute("RELEASE edit_task")
         return self.get_task(uid, task_id)
 
     def list_routines(self, uid):

@@ -40,6 +40,7 @@ export interface Task {
   due_at: string | null;
   remind_at?: string | null;
   source?: string;
+  report_state?: "pending" | "failed" | "sent" | null;
   project_id?: number;
 }
 

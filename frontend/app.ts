@@ -70,7 +70,7 @@ function formatDate(kind: keyof typeof dateFormats, value: string | number) {
 }
 const timeLabel = (time?: string) => String(time || "").slice(0, 5);
 const navs = (): [Page, string][] => [
-  ["home", t("План", "Plan")],
+  ["home", t("Задачи", "Tasks")],
   ["projects", t("Проекты", "Projects")],
   ["settings", t("Настройки", "Settings")],
 ];
@@ -457,8 +457,21 @@ function taskRow(task: Task, withProject = true) {
   const sharedTime = task.remind_at === task.due_at;
   const date = task.due_at ? `<span class="task-date ${late ? "late" : ""}">${e(when(task.due_at))}${sharedTime && !done ? `<span aria-label="${t("Есть напоминание","Has reminder")}">${icon("bell")}</span>` : ""}</span>` : "";
   const reminder = task.remind_at && !sharedTime && !done ? `<span class="task-time" title="${t("Напоминание","Reminder")}">${icon("bell")}${e(when(task.remind_at))}</span>` : "";
-  return `<article class="task-row ${done ? "done" : ""}"><button class="task-toggle" data-action="toggle-task" data-id="${task.id}" aria-label="${e((done ? t("Вернуть в работу", "Reopen") : t("Завершить", "Complete")) + " · " + task.title)}" aria-pressed="${done}"><span class="ring">${done ? icon("check") : ""}</span></button>
-  <button class="task-body" data-action="edit-task" data-id="${task.id}"><span class="task-title" dir="auto">${e(task.title)}</span><span class="task-meta">${withProject ? `<span class="task-project">${e(projectName(task.project_id))}</span>` : ""}${date}${reminder}</span></button><span class="arrow">${icon("arrow")}</span></article>`;
+  const report = task.report_state;
+  const reportLabels = {
+    pending: done ? t("На паузе","Paused") : t("Алеф подготовит ответ", "Aleph will prepare the result"),
+    failed: t("Нужно новое время", "Needs a new time"),
+    sent: t("Доставлено в чат", "Delivered to chat"),
+  };
+  const kind = report ? `<span class="task-time report-status ${report === "failed" ? "late" : ""}">${icon("sparkle")}${reportLabels[report]}</span>` : "";
+  const toggleLabel = report
+    ? (done ? t("Возобновить","Resume") : t("Приостановить","Pause"))
+    : (done ? t("Вернуть в работу","Reopen") : t("Завершить","Complete"));
+  const toggle = report === "sent"
+    ? `<span class="task-toggle" aria-hidden="true"><span class="ring">${icon("check")}</span></span>`
+    : `<button class="task-toggle" data-action="toggle-task" data-id="${task.id}" aria-label="${e(toggleLabel + " · " + task.title)}" aria-pressed="${done}"><span class="ring">${done ? icon("check") : ""}</span></button>`;
+  return `<article class="task-row ${done ? "done" : ""}">${toggle}
+  <button class="task-body" data-action="edit-task" data-id="${task.id}"><span class="task-title" dir="auto">${e(task.title)}</span><span class="task-meta">${withProject ? `<span class="task-project">${e(projectName(task.project_id))}</span>` : ""}${date}${reminder}${kind}</span></button><span class="arrow">${icon("arrow")}</span></article>`;
 }
 function switcher() {
   return `<button class="switch" role="switch" aria-label="${t("Проактивность", "Proactive updates")}" aria-checked="${Boolean(state.settings.proactive)}" data-action="proactive"></button>`;
@@ -645,7 +658,7 @@ function overview() {
   const empty = {today: t("На сегодня всё спокойно", "You’re clear for today"),
     upcoming: t("Впереди пока ничего", "Nothing scheduled yet"),
     inbox: t("Входящие разобраны", "Inbox clear"), done: t("Здесь будут выполненные", "Completed tasks will appear here")};
-  return `<div class="plan-tabs" role="group" aria-label="${t("Разделы плана", "Plan views")}">${filters.map(([key,label]) =>
+  return `<div class="plan-tabs" role="group" aria-label="${t("Разделы задач", "Task views")}">${filters.map(([key,label]) =>
     `<button data-filter="${key}" aria-pressed="${key === filter}">${label}${sections[key].length ? `<small>${sections[key].length}</small>` : ""}</button>`).join("")}
     </div>
     <div class="plan-heading">${sectionHead(t("Поручения","Tasks"))}<button class="action-plus" data-action="new-task" aria-label="${t("Добавить поручение","Add task")}">${icon("plus")}</button></div>
@@ -840,16 +853,25 @@ function submit(label = saveLabel()) {
   return `<p class="form-error" role="alert"></p><div class="submit-row"><button type="submit" class="button primary">${label}</button></div>`;
 }
 function taskSheet(task?: Task, projectId = activeId()) {
+  if (task?.report_state === "sent") {
+    openSheet(task.title, `<p class="sheet-desc">${t("Ответ доставлен в чат с Алефом.","The result was delivered to your Aleph chat.")}</p>
+      <p class="sheet-desc" dir="auto">${e(task.notes)}</p>`);
+    return;
+  }
+  const report = Boolean(task?.report_state);
   const fields = [ {id:0,name:t("Личное","Personal")}, ...(state.projects || []) ];
   const selected = task?.project_id ?? projectId;
   openSheet(task ? t("Поручение", "Task") : t("Новое поручение", "New task"),
-    `<form id="task-form" data-id="${task?.id || ""}">
+    `${report ? `<p class="sheet-desc">${task?.report_state === "failed"
+      ? t("Алеф не смог выполнить задачу. Назначь новое время запуска.","Aleph couldn’t finish. Set a new time to retry.")
+      : t("Алеф подготовит и пришлёт результат в чат.","Aleph will prepare the result and send it in chat.")}</p>` : ""}
+    <form id="task-form" data-id="${task?.id || ""}">
       <label class="field">${t("Что нужно сделать?","What needs to happen?")}<input name="title" value="${e(task?.title || "")}" required maxlength="300" placeholder="${t("Например, сверить макеты","For example, review the designs")}" dir="auto"></label>
       <label class="field">${t("Проект","Project")}<select name="project_id">${fields.map(project => `<option value="${project.id}" ${project.id === selected ? "selected" : ""}>${e(project.name)}</option>`).join("")}</select></label>
-      <details class="task-details" ${task?.due_at || task?.remind_at || task?.notes ? "open" : ""}><summary>${t("Срок, напоминание и заметки","Due date, reminder and notes")}</summary>
-        <label class="field">${t("Срок","Due date")}<input name="due_at" type="datetime-local" value="${e(localDateTime(task?.due_at ?? null,zone()))}"></label>
-        <label class="field">${t("Напомнить","Remind me")}<input name="remind_at" type="datetime-local" value="${e(localDateTime(task?.remind_at ?? null,zone()))}"><small>${e(zone())}</small></label>
-        <label class="field">${t("Заметки","Notes")}<textarea name="notes" maxlength="4000" rows="3" dir="auto">${e(task?.notes || "")}</textarea></label>
+      <details class="task-details" ${task?.due_at || task?.remind_at || task?.notes ? "open" : ""}><summary>${report ? t("Запуск и поручение","Schedule and instructions") : t("Срок, напоминание и заметки","Due date, reminder and notes")}</summary>
+        <label class="field">${report ? t("Время запуска","Run at") : t("Срок","Due date")}<input name="due_at" type="datetime-local" ${report ? "required" : ""} value="${e(localDateTime(task?.due_at ?? null,zone()))}">${report ? `<small>${e(zone())}</small>` : ""}</label>
+        ${report ? "" : `<label class="field">${t("Напомнить","Remind me")}<input name="remind_at" type="datetime-local" value="${e(localDateTime(task?.remind_at ?? null,zone()))}"><small>${e(zone())}</small></label>`}
+        <label class="field">${report ? t("Что подготовить","What to prepare") : t("Заметки","Notes")}<textarea name="notes" maxlength="4000" rows="3" dir="auto" ${report ? "required" : ""}>${e(task?.notes || "")}</textarea></label>
       </details>
       ${task?.source ? `<details class="task-details"><summary>${t("Исходное сообщение","Original message")}</summary><p class="sheet-desc" dir="auto">${e(task.source)}</p></details>` : ""}
       ${submit()}</form>`);
@@ -1190,11 +1212,14 @@ async function act(action: string, id?: string) {
                       {duration:150,easing:"ease-out",fill:"both"})
         : undefined;
       const displayAfter = animation?.finished.catch(() => undefined);
+      const notice = item.report_state
+        ? (status === "done" ? t("Запуск на паузе","Scheduled run paused") : t("Запуск возобновлён","Scheduled run resumed"))
+        : (status === "done" ? t("Поручение выполнено","Task complete") : t("Поручение в работе","Task reopened"));
       const ok = await write(`/api/tasks/${item.id}`,"PATCH",{status},
-        task => Object.assign(item,task || {status}), status === "done" ? t("Поручение выполнено","Task complete") : t("Поручение в работе","Task reopened"), {displayAfter});
+        task => Object.assign(item,task || {status}), notice, {displayAfter});
       animation?.cancel();
       if (ok && !bridge() && action === "toggle-task") {
-        message(status === "done" ? t("Поручение выполнено","Task complete") : t("Поручение в работе","Task reopened"), 6500);
+        message(notice, 6500);
         undoTask = item.id;
         const button = document.createElement("button");
         button.textContent = t("Отменить","Undo");

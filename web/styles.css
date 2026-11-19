@@ -297,6 +297,7 @@ button:is(.integration-row,.project-row,.setting-row,.context-row,.add-line,.seg
 .task-project, .task-time, .task-date { color: var(--hint); font-size: 11px; }
 .task-time { display: inline-flex; align-items: center; gap: 3px; }
 .task-time .icon { width: 12px; height: 12px; }
+.report-status.late { color: var(--critical); }
 .task-toggle:active .ring, .action-plus:active, .button:active, .project-card:active { transform: scale(.95); }
 .workspace-section, .routine-block { margin-top: 24px; }
 .workspace-section .plan-heading { margin-bottom: 8px; }

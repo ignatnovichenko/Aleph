@@ -37,7 +37,7 @@ def keyboard_markup(store, uid, base_url):
         if len(link()) > 1800:
             state["tasks"].pop()
             break
-    label = "Открыть план" if who["language_code"] in ("", "ru", "uk", "be") else "Open plan"
+    label = "Открыть задачи" if who["language_code"] in ("", "ru", "uk", "be") else "Open tasks"
     return {"keyboard": [[{"text": label, "web_app": {"url": link()}}]],
             "resize_keyboard": True, "one_time_keyboard": True, "is_persistent": False}
 

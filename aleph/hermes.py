@@ -11,10 +11,9 @@ import time
 
 from aiohttp import web
 
-from .llm import Aleph, ModelUnavailable, TOOLS
+from .llm import Aleph, ModelUnavailable, REPORT_TOOLS, TOOLS
 
 log = logging.getLogger(__name__)
-TOOL_NAMES = {tool["function"]["name"] for tool in TOOLS}
 MAX_STEPS = 12
 MAX_PARALLEL_CALLS = 12
 TURN_TIMEOUT = 265
@@ -41,11 +40,13 @@ def create_agent(session, model_key):
 class TurnBroker:
     """A private, authenticated loopback endpoint for exactly one inbound update."""
 
-    def __init__(self, agent, store, uid, ledger, update_id, model, opencode_model, project_id):
+    def __init__(self, agent, store, uid, ledger, update_id, model, opencode_model, project_id, *, toolset=TOOLS):
         self.agent, self.store, self.uid = agent, store, uid
         self.ledger, self.update_id, self.model = ledger, update_id, model
         self.opencode_model = opencode_model
         self.project_id = project_id
+        self.toolset = toolset
+        self.tool_names = {tool["function"]["name"] for tool in toolset}
         self.token = secrets.token_urlsafe(32)
         self.step = 0
         self.failure = None
@@ -71,7 +72,7 @@ class TurnBroker:
                 reply = self.ledger.get_step(self.update_id, step)
                 if reply is None:
                     reply = await self.agent.complete_turn(
-                        data["messages"], self.opencode_model, tools=bool(data.get("tools")) and step < MAX_STEPS - 1,
+                        data["messages"], self.opencode_model, tools=self.toolset if data.get("tools") and step < MAX_STEPS - 1 else False,
                         uid=self.uid, project_id=self.project_id, ledger=self.ledger, update_id=self.update_id, step=step,
                     )
                     self.ledger.save_step(self.update_id, step, reply)
@@ -97,7 +98,7 @@ class TurnBroker:
         payload = await request.json()
         name, args = payload.get("name"), payload.get("arguments")
         match = self.calls.get(payload.get("id"))
-        if not match or name not in TOOL_NAMES:
+        if not match or name not in self.tool_names:
             return web.json_response({"error": "Tool not authorized for this conversation."}, status=400)
         step, n, call = match
         function = call["function"]
@@ -116,12 +117,13 @@ class HermesAleph(Aleph):
         super().__init__(session, model_key)
         self.python = python
 
-    async def respond(self, store, uid, text, photo, ledger, update_id):
+    async def respond(self, store, uid, text, photo, ledger, update_id, *, scheduled=False):
         project_id = ledger.bind_project(update_id, uid)
-        messages, opencode_model = self.turn_context(store, uid, text, photo, project_id)
+        messages, opencode_model = self.turn_context(store, uid, text, photo, project_id, scheduled=scheduled)
         choice, _ = self.bind_turn_model(uid, ledger, update_id, opencode_model)
         model = choice["model"] or choice["provider"]
-        broker = TurnBroker(self, store, uid, ledger, update_id, model, opencode_model, project_id)
+        toolset = REPORT_TOOLS if scheduled else TOOLS
+        broker = TurnBroker(self, store, uid, ledger, update_id, model, opencode_model, project_id, toolset=toolset)
         app = web.Application(client_max_size=24 * 1024 * 1024)
         app.router.add_post("/v1/chat/completions", broker.complete)
         app.router.add_post("/tool", broker.tool)
@@ -132,7 +134,7 @@ class HermesAleph(Aleph):
             await site.start()
             port = runner.addresses[0][1]
             turn = {"endpoint": f"http://127.0.0.1:{port}", "key": broker.token,
-                    "model": model, "messages": messages, "tools": TOOLS, "max_steps": MAX_STEPS - 1}
+                    "model": model, "messages": messages, "tools": toolset, "max_steps": MAX_STEPS - 1}
             answer = await self.run_hermes(turn, broker)
             return answer[:14000]
         finally:

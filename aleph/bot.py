@@ -15,10 +15,10 @@ from .hermes import create_agent
 from .links import settings_url
 from . import models, projects
 from .llm import ChatGPTUnavailable, ModelRejectsPhoto, ModelUnavailable, RegionUnavailable
-from . import articles, capture, integrations, media, memory, documents, reminders, widgets
+from . import articles, capture, integrations, media, memory, documents, reminders, reports, widgets
 
 log = logging.getLogger(__name__)
-PLAN_ALIASES = {"/plan", "открой план", "открыть план", "открой мини-апп", "open plan", "open mini app"}
+PLAN_ALIASES = {"/plan", "/tasks", "открой задачи", "открыть задачи", "open tasks", "открой план", "открыть план", "открой мини-апп", "open plan", "open mini app"}
 MODEL_QUESTION_RU = re.compile(
     r"(?:(?:привет|здравствуй|слушай)[,.!]?\s+)?"
     r"(?:какая (?:ты модель|у тебя модель|модель у тебя|модель (?:сейчас )?работает|сейчас (?:у тебя )?модель)"
@@ -31,10 +31,10 @@ MODEL_QUESTION_EN = re.compile(
     re.IGNORECASE,
 )
 HELLO_RU = ("Привет, я Алеф. Можешь писать мне как обычно или отправить голосовое. "
-            "Если что-то нужно запомнить, скажи, когда вернуться к этому, и я напомню здесь.\n\n"
-            "Что сейчас на уме? Для напоминаний по местному времени можешь сразу назвать свой город.")
-HELLO_EN = ("Hey, I’m Aleph. Send me a message or a voice note. If something needs a nudge later, "
-            "tell me when and I’ll remind you right here.\n\nWhat’s on your mind? If you want reminders in local time, you can tell me your city.")
+            "Могу напомнить о деле или сам подготовить и прислать результат в указанное время.\n\n"
+            "Что сейчас на уме? Для задач по местному времени можешь сразу назвать свой город.")
+HELLO_EN = ("Hey, I’m Aleph. Send me a message or a voice note. I can remind you about something or "
+            "prepare a result and send it at a time you choose.\n\nWhat’s on your mind? You can tell me your city to use local time.")
 
 class TelegramError(Exception):
     def __init__(self, code=0, retry_after=0, description=""):
@@ -186,9 +186,16 @@ class Inbox:
             self.db.execute("DELETE FROM runtime_state WHERE key IN ('telegram_offset','telegram_last_batch')")
         return self.store.get_offset()
 
-    def pending(self):
-        return self.db.execute("""SELECT b.* FROM bot_inbox AS b
-            WHERE b.available <= ? AND NOT EXISTS (SELECT 1 FROM bot_inbox AS p WHERE p.uid=b.uid AND p.id<b.id)
+    def pending(self, *, scheduled=False):
+        if scheduled:
+            return self.db.execute("""SELECT b.* FROM bot_inbox b
+                WHERE b.id<0 AND b.available<=?
+                  AND NOT EXISTS (SELECT 1 FROM bot_inbox p WHERE p.uid=b.uid AND p.id<0
+                    AND (json_extract(p.message,'$.due_at'), -p.id) < (json_extract(b.message,'$.due_at'), -b.id))
+                ORDER BY json_extract(b.message,'$.due_at'), -b.id LIMIT 24""", (time.time(),)).fetchall()
+        return self.db.execute("""SELECT b.* FROM bot_inbox b
+            WHERE b.id>=0 AND b.available<=?
+              AND NOT EXISTS (SELECT 1 FROM bot_inbox p WHERE p.uid=b.uid AND p.id>=0 AND p.id<b.id)
             ORDER BY b.id LIMIT 24""", (time.time(),)).fetchall()
 
     def get_step(self, update_id, step):
@@ -227,8 +234,21 @@ class Inbox:
             self.db.execute("ROLLBACK")
             raise
 
-    def done(self, update_id):
-        self.db.execute("DELETE FROM bot_inbox WHERE id=?", (update_id,))
+    def done(self, update_id, *, delivered=False):
+        if update_id >= 0 or not delivered:
+            self.db.execute("DELETE FROM bot_inbox WHERE id=?", (update_id,))
+            return
+        self.db.execute("SAVEPOINT finish_report")
+        try:
+            row = self.db.execute("SELECT * FROM bot_inbox WHERE id=?", (update_id,)).fetchone()
+            if row:
+                reports.finish(self.store, row)
+                self.db.execute("DELETE FROM bot_inbox WHERE id=?", (update_id,))
+        except BaseException:
+            self.db.execute("ROLLBACK TO finish_report")
+            raise
+        finally:
+            self.db.execute("RELEASE finish_report")
 
     def retry(self, row, delay):
         self.db.execute("UPDATE bot_inbox SET available=?, retries=retries+1 WHERE id=?",
@@ -245,7 +265,7 @@ class Inbox:
             for i, call in enumerate(json.loads(row["message"]).get("tool_calls") or []):
                 name = call.get("function", {}).get("name")
                 result = self.get_tool(f"tg:{update_id}:{row['step']}:{i}")
-                if name in {"create_task","update_task","change_settings","subscribe_feed","unsubscribe_feed","remember_fact","forget_fact","create_routine","set_routine_active","delete_routine","create_document","set_project_context","capture_project_update"} and isinstance(result, dict) and "error" not in result:
+                if name in {"create_task","update_task","change_settings","subscribe_feed","unsubscribe_feed","remember_fact","forget_fact","create_routine","set_routine_active","delete_routine","create_document","set_project_context","capture_project_update","schedule_report"} and isinstance(result, dict) and "error" not in result:
                     results.append(result.get("title") or {"change_settings": "Настройки", "remember_fact": "Память", "forget_fact": "Память", "create_document": "Файл", "delete_routine": "Расписание", "set_routine_active": "Расписание", "set_project_context": "Контекст проекта"}.get(name, "Подписка"))
         return results
 
@@ -327,10 +347,10 @@ async def _compose(row, store, inbox, tg, agent):
             return None, apply_web_action(store, uid, web_data.get("data", ""), f"tg:{row['id']}:web")
         except (ValueError, KeyError, TypeError):
             return None, "Не удалось применить изменение. Открой свежую версию плана."
-    if (msg.get("text") or "").strip().lower().rstrip(".!") in PLAN_ALIASES:
+    if (msg.get("text") or "").strip().lower().split("@",1)[0].rstrip(".!?") in PLAN_ALIASES:
         if not _uses_russian(msg):
-            return None, ("Tap Open plan below the chat." if bridge_url else "Open your plan from the menu button below the chat.")
-        return None, ("Нажми «Открыть план» внизу чата." if bridge_url else "Открой план кнопкой меню внизу чата.")
+            return None, ("Tap Open tasks below the chat." if bridge_url else "Open Tasks from the Aleph menu.")
+        return None, ("Нажми «Открыть задачи» внизу чата." if bridge_url else "Открой «Задачи» кнопкой Aleph внизу чата.")
     command = (msg.get("text") or "").partition(" ")[0].partition("@")[0]
     if command in ("/start", "/help"):
         ru = _uses_russian(msg)
@@ -392,13 +412,21 @@ async def _handle(row, store, inbox, tg, agent):
     uid, update_id = row["uid"], row["id"]
     original = json.loads(row["message"])
     ru = _uses_russian(original)
+    scheduled = update_id < 0
+    report = reports.current(store, row) if scheduled else None
+    if scheduled and report is None:
+        inbox.done(update_id)
+        return
     try:
         reply = row["reply"]
         if reply is None:
             typing = asyncio.create_task(_typing(tg, uid))
             query = None
             try:
-                query, reply = await _compose(row, store, inbox, tg, agent)
+                if report:
+                    reply = await agent.respond(store, uid, report["notes"], None, inbox, update_id, scheduled=True)
+                else:
+                    query, reply = await _compose(row, store, inbox, tg, agent)
             except media.MediaError as error:
                 if ru:
                     reply = str(error)
@@ -416,14 +444,21 @@ async def _handle(row, store, inbox, tg, agent):
                 using_chatgpt = isinstance(error, ChatGPTUnavailable)
                 log.warning("%s unavailable status=%d", "ChatGPT" if using_chatgpt else "OpenCode", error.status)
                 retry_statuses = (0, 500, 502, 503, 504) if using_chatgpt else (0, 429, 500, 502, 503, 504)
-                if error.status in retry_statuses and row["retries"] == 0:
-                    inbox.retry(row, 3)
+                limit = 2 if scheduled else 1
+                if error.status in retry_statuses and row["retries"] < limit:
+                    delay = (20 * (row["retries"] + 1)) if scheduled else 3
+                    inbox.retry(row, delay)
                     return
                 saved = inbox.successful_mutations(update_id)
-                if widgets.for_update(store, update_id):
+                if report:
+                    if reports.current(store, row):
+                        reports.fail(store.db, uid, update_id)
+                    reply = (f"Не удалось подготовить «{report['title']}». Можно назначить новое время во вкладке «Задачи»."
+                             if ru else f"I couldn’t finish “{report['title']}”. You can set a new time in Tasks.")
+                elif widgets.for_update(store, update_id):
                     reply = "Подготовил виджет." if ru else "Here’s the widget."
                 elif saved:
-                    reply = "Сохранил изменения: " + ", ".join(saved) + ". Подробности есть в плане."
+                    reply = "Сохранил изменения: " + ", ".join(saved) + ". Подробности есть во вкладке «Задачи»."
                 elif using_chatgpt and error.status == 429:
                     reply = ("Лимит ChatGPT для Алефа достигнут. Проверь его в настройках ChatGPT: https://chatgpt.com/settings/usage" if ru else
                              "Aleph has reached a ChatGPT limit. Check it at https://chatgpt.com/settings/usage")
@@ -446,6 +481,9 @@ async def _handle(row, store, inbox, tg, agent):
                 typing.cancel()
                 with suppress(asyncio.CancelledError):
                     await typing
+            if scheduled and not reports.current(store, row):
+                inbox.done(update_id)
+                return
             inbox.save_reply(row, query, reply)
         for artifact in inbox.db.execute("SELECT * FROM bot_documents WHERE update_id=? AND sent=0 ORDER BY rowid", (update_id,)).fetchall():
             try:
@@ -460,7 +498,7 @@ async def _handle(row, store, inbox, tg, agent):
             inbox.db.execute("UPDATE bot_documents SET sent=1 WHERE key=?", (artifact["key"],))
 
         command = (original.get("text") or "").strip().lower().split("@",1)[0].rstrip(".!")
-        show_plan = (command.split(" ", 1)[0] in ("/start", "/help", "/plan") or command in PLAN_ALIASES
+        show_plan = (command.split(" ", 1)[0] in ("/start", "/help", "/plan", "/tasks") or command in PLAN_ALIASES
                      or bool(original.get("web_app_data")) or inbox.opened_plan(update_id))
         approvals = json.loads(row["approval_outbox"]) if row["approval_outbox"] else []
         if not approvals:
@@ -498,11 +536,14 @@ async def _handle(row, store, inbox, tg, agent):
                     log.info("Telegram rejected rich formatting status=%s", error.code)
                     inbox.db.execute("UPDATE bot_inbox SET article_fallback=1 WHERE id=?", (update_id,))
                 else:
-                    inbox.done(update_id)
+                    inbox.done(update_id, delivered=True)
                     return
         for n, chunk in enumerate(chunks(reply)):
             if n < row["sent_chunks"]:
                 continue
+            if scheduled and not reports.current(store, row):
+                inbox.done(update_id)
+                return
             params = {"chat_id": uid, "text": chunk, "link_preview_options": {"is_disabled": True}}
             bridge_url = os.getenv("MINI_APP_BRIDGE_URL", "").strip()
             if n == 0 and bridge_url and show_plan:
@@ -524,10 +565,12 @@ async def _handle(row, store, inbox, tg, agent):
             else:
                 await tg.call("sendMessage", **params)
             inbox.db.execute("UPDATE bot_inbox SET sent_chunks=? WHERE id=?", (n+1, update_id))
-        inbox.done(update_id)
+        inbox.done(update_id, delivered=True)
     except TelegramError as error:
         if error.code in (400, 403):
             log.info("Telegram rejected conversation delivery status=%s", error.code)
+            if scheduled and reports.current(store, row):
+                reports.fail(store.db, uid, update_id)
             inbox.done(update_id)
         else:
             inbox.retry(row, max(error.retry_after, min(300, 2 ** min(row["retries"]+1, 8))))
@@ -538,32 +581,38 @@ async def _handle(row, store, inbox, tg, agent):
         if row["retries"] < 2:
             inbox.retry(row, 5)
         elif row["reply"] is None:
-            inbox.save_reply(row, None, "Не удалось закончить поручение. Проверь план и попробуй ещё раз.")
+            if scheduled and reports.current(store, row):
+                reports.fail(store.db, uid, update_id)
+            inbox.save_reply(row, None, "Не удалось закончить поручение. Проверь вкладку «Задачи» и попробуй ещё раз."
+                             if ru else "I couldn't finish this request. Check Tasks and try again.")
         else:
             inbox.retry(row, 60)
 
 async def _work(store, inbox, tg, agent, changed):
-    active = {}
+    interactive, scheduled = {}, {}
     try:
         while True:
             changed.clear()
-            for uid, task in list(active.items()):
-                if task.done():
-                    await task
-                    del active[uid]
-            for row in inbox.pending():
-                if len(active) >= 8:
-                    break
-                if row["uid"] not in active:
-                    task = asyncio.create_task(_handle(row, store, inbox, tg, agent))
-                    task.add_done_callback(lambda _: changed.set())
-                    active[row["uid"]] = task
+            reports.enqueue(inbox.db)
+            for is_scheduled, active, limit in ((False, interactive, 8), (True, scheduled, 2)):
+                for uid, task in list(active.items()):
+                    if task.done():
+                        await task
+                        del active[uid]
+                for row in inbox.pending(scheduled=is_scheduled):
+                    if len(active) >= limit:
+                        break
+                    if row["uid"] not in active:
+                        task = asyncio.create_task(_handle(row, store, inbox, tg, agent))
+                        task.add_done_callback(lambda _: changed.set())
+                        active[row["uid"]] = task
             with suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(changed.wait(), 1)
     finally:
-        for task in active.values():
+        tasks = [*interactive.values(), *scheduled.values()]
+        for task in tasks:
             task.cancel()
-        await asyncio.gather(*active.values(), return_exceptions=True)
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 async def _widget_updates(store, telegram, updates, queue_external=None):
     # Process independent messages concurrently. Serialize taps on one widget
