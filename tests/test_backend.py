@@ -43,6 +43,25 @@ class BackendAPI(unittest.IsolatedAsyncioTestCase):
     def headers(self, uid=1):
         return {"Authorization": "tma " + auth(uid)}
 
+    async def test_compact_startup_is_private_and_skips_unused_news(self):
+        self.assertEqual((await self.client.get("/api/state?compact=1")).status, 401)
+        headers = {**self.headers(), "Accept-Encoding": "gzip"}
+        with patch.object(self.store, "feed_items", return_value=[]) as headlines, patch.dict(
+            os.environ, {"ALEPH_CHATGPT_OWNER_ID": "1"}
+        ):
+            response = await self.client.get("/api/state?compact=1", headers=headers)
+            data = await response.json()
+            self.assertEqual(response.headers["Cache-Control"], "no-store")
+            self.assertEqual(response.headers["Content-Encoding"], "gzip")
+            self.assertTrue(data["chatgpt_connection"]["available"])
+            self.assertNotIn("feed_items", data)
+            headlines.assert_not_called()
+            other = await (await self.client.get("/api/state?compact=1", headers=self.headers(2))).json()
+            self.assertNotIn("chatgpt_connection", other)
+            full = await (await self.client.get("/api/state", headers=headers)).json()
+            self.assertIn("feed_items", full)
+            headlines.assert_called_once_with(1)
+
     async def test_appearance_is_persisted_for_the_signed_user(self):
         headers = self.headers()
         self.assertEqual((await self.client.patch("/api/settings", json={"theme": "dark"})).status, 401)

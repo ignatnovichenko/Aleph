@@ -1,4 +1,5 @@
 import { icon } from "./icons.js";
+import { revealMiniApp } from "./telegram.js";
 import type { IconName } from "./icons.js";
 import type { RequestOptions, WriteMethod, Writes } from "./store.js";
 import type { CalendarEvent, ChatGPTConnection, ChatGPTPairing, ProjectEntry, ReplyStyle, SavedMemory, Service, ModelCatalog, ModelChoice, ModelProvider, Project, ProviderModel, Settings, Task, ThemeMode, WorkspaceState } from "./types.js";
@@ -6,6 +7,8 @@ import {
   bridge,
   demo,
   request,
+  signed,
+  workspaceState,
   demoState,
   saveDemo,
   escapeHtml as e,
@@ -13,6 +16,7 @@ import {
   zonedISO,
 } from "./store.js";
 
+declare const __ALEPH_MARK_URL__: string;
 type Page = "home" | "projects" | "settings";
 
 function requiredElement<T extends HTMLElement>(scope: ParentNode, selector: string): T {
@@ -102,8 +106,7 @@ function initTelegram() {
   const tg = webapp();
   if (!tg || sdkBound) return;
   sdkBound = true;
-  tg.ready();
-  tg.expand();
+  revealMiniApp();
   setTheme();
   tg.onEvent?.("themeChanged", setTheme);
   tg.BackButton?.onClick(() => {
@@ -193,6 +196,7 @@ let stage: HTMLElement | undefined;
 let track: HTMLElement, dock: HTMLElement, lens: HTMLElement, tabs: HTMLButtonElement[];
 let views: View[] = [];
 let sizeObserver: ResizeObserver | undefined;
+let warmingViews = false;
 let trackWidth = 0, tabWidth = 0, suppressTap = false;
 let swipe: Swipe | undefined;
 let navigationFrame = 0;
@@ -216,7 +220,7 @@ function mountShell() {
     <main class="page-stage"><div class="page-track">${navs().map(([key, label]) => `
       <section class="page-panel" data-view="${key}" aria-labelledby="title-${key}"${page === key ? "" : ' inert aria-hidden="true"'}>
         <div class="workspace">
-          <header class="page-head"><img class="app-mark" src="./aleph.webp" width="30" height="30" alt="Aleph">
+          <header class="page-head"><img class="app-mark" src="${__ALEPH_MARK_URL__}" width="30" height="30" alt="Aleph" decoding="async">
             <h1 class="page-title" id="title-${key}" tabindex="-1">${label}</h1>
             ${key === "home" ? '<p class="page-kicker"></p>' : ""}
           </header>
@@ -248,23 +252,38 @@ function mountShell() {
   showPage(activeView()?.index ?? 0, false);
 }
 
+function renderView(view: View) {
+  const markup = view.key === "home" ? overview() : view.key === "projects" ? projectsPage() : settingsPage();
+  if (view.markup === markup) return;
+  const restore = view.content.contains(document.activeElement) ? controlSelector(document.activeElement) : null;
+  view.content.innerHTML = markup;
+  view.markup = markup;
+  if (restore) view.content.querySelector<HTMLElement>(restore)?.focus({preventScroll: true});
+}
+
 function render() {
   if (!state) return;
   if (!stage?.isConnected) mountShell();
   const date = formatDate("date", Date.now());
   const kicker = requiredElement(track, ".page-kicker");
   if (kicker.textContent !== date) kicker.textContent = date;
-  // Each view keeps its own scroller and stays mounted during navigation.
   for (const view of views) {
-    const markup = view.key === "home" ? overview() : view.key === "projects" ? projectsPage() : settingsPage();
-    if (view.markup === markup) continue;
-    const restore = view.content.contains(document.activeElement) ? controlSelector(document.activeElement) : null;
-    view.content.innerHTML = markup;
-    view.markup = markup;
-    if (restore) view.content.querySelector<HTMLElement>(restore)?.focus({preventScroll: true});
+    if (view.key === page || view.markup !== undefined) renderView(view);
   }
   app.setAttribute("aria-busy", "false");
   syncBack();
+  if (!warmingViews && views.some(view => view.markup === undefined)) {
+    warmingViews = true;
+    // Give the first screen a paint before preparing the other tabs.
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const warm = () => {
+        warmingViews = false;
+        for (const view of views) if (view.markup === undefined) renderView(view);
+      };
+      if (typeof requestIdleCallback === "function") requestIdleCallback(warm, {timeout: 250});
+      else warm();
+    }));
+  }
 }
 
 function paintNavigation(position: number) {
@@ -310,6 +329,7 @@ function showPage(index: number, animate = true, velocity = 0) {
   if (animate && !reducedMotion.matches && navigationPosition !== index) settleNavigation(index, velocity);
   else paintNavigation(index);
   if (current !== previous) {
+    if (current.markup === undefined) renderView(current);
     const transferFocus = previous.panel.contains(document.activeElement);
     previous.panel.inert = true;
     previous.panel.setAttribute("aria-hidden", "true");
@@ -400,6 +420,7 @@ function moveSwipe(event: PointerEvent) {
     if (Math.max(x, y) < 9) return;
     if (y >= x || (y > 18 && x < 1.35 * y)) { resetSwipe(); return; }
     if (x < 1.35 * y) return;
+    for (const view of views) if (view.markup === undefined) renderView(view);
     gesture.origin = {position: navigationPosition, x: gesture.startX + Math.sign(dx) * 7};
     suppressTap = true;
     stopNavigation();
@@ -1121,13 +1142,14 @@ async function load() {
   if (demo) {
     state = demoState(ru);
   } else {
-    state = await request("/api/state");
+    state = await workspaceState();
     setLanguage(
       state.user.language_code ||
         webapp()?.initDataUnsafe?.user?.language_code ||
         "ru",
     );
   }
+  chatgpt = state.chatgpt_connection;
   state.feeds ??= [];
   state.settings.digest_time ??= "09:00";
   if (!initialTaskOpened) {
@@ -1145,7 +1167,7 @@ async function load() {
   }
   setTheme();
   render();
-  if (!demo && !bridge()) void syncChatGPT();
+  if (state.model_configurable && !chatgpt && !bridge()) void syncChatGPT();
 }
 
 async function syncChatGPT(showStatus = false) {
@@ -1633,6 +1655,21 @@ sheet.addEventListener("input", event => {
   requiredElement<HTMLSelectElement>(zoneField,"select").required = needsZone;
 });
 let loading = false;
+async function waitForTelegramAuth() {
+  const sdk = document.getElementById("telegram-sdk");
+  if (!sdk || webapp() || signed()) return;
+  await new Promise<void>(resolve => {
+    const finish = () => {
+      clearTimeout(timer);
+      sdk.removeEventListener("load", finish);
+      sdk.removeEventListener("error", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, 2500);
+    sdk.addEventListener("load", finish, {once: true});
+    sdk.addEventListener("error", finish, {once: true});
+  });
+}
 async function start() {
   if (loading) return;
   loading = true;
@@ -1641,13 +1678,14 @@ async function start() {
     initTelegram();
     if (!demo && !bridge() && location.hostname.endsWith(".github.io"))
       throw new Error("static-plan");
+    if (!demo && !bridge() && !signed()) await waitForTelegramAuth();
     await load();
   } catch (error) {
     app.setAttribute("aria-busy", "false");
     sizeObserver?.disconnect();
     stage = undefined;
     views = [];
-    app.innerHTML = `<main class="failure"><img src="./aleph.webp" width="45" alt=""><h1>Aleph</h1><p>${e(errorMessage(error))}</p><div class="actions"><button class="button" data-action="retry">${t("Повторить", "Try again")}</button><button class="button primary" data-action="chat">${t("В чат", "Open chat")}</button></div></main>`;
+    app.innerHTML = `<main class="failure"><img src="${__ALEPH_MARK_URL__}" width="45" alt=""><h1>Aleph</h1><p>${e(errorMessage(error))}</p><div class="actions"><button class="button" data-action="retry">${t("Повторить", "Try again")}</button><button class="button primary" data-action="chat">${t("В чат", "Open chat")}</button></div></main>`;
   } finally {
     loading = false;
   }
@@ -1667,10 +1705,11 @@ async function refresh(reportsOnly = false) {
   const sequence = revision;
   refreshRunning = true;
   try {
-    const fresh = await request("/api/state");
+    const fresh = await workspaceState();
     if (!pending && (!sheet.open || (viewing && viewing.id === viewedReportId)) && !swipe?.origin && sequence === revision) {
       const previouslyConnected = state.connections?.calendar;
       state = fresh;
+      if (!reportsOnly) chatgpt = fresh.chatgpt_connection;
       if (!reportsOnly) setTheme();
       render();
       const current = viewing && byId(String(viewing.id));
@@ -1679,7 +1718,7 @@ async function refresh(reportsOnly = false) {
       if (page === "projects" && projectDetail) void loadProject(projectDetail);
       if (fresh.connections?.calendar === "connected" && (previouslyConnected !== "connected" || page === "home")) void loadAgenda();
       if (previouslyConnected === "connected" && fresh.connections?.calendar !== "connected") agenda = undefined;
-      if (chatgpt?.available) void syncChatGPT();
+      if (fresh.model_configurable && !chatgpt) void syncChatGPT();
     }
   } catch {} finally { refreshRunning = false; }
 }

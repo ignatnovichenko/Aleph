@@ -3,6 +3,7 @@ import asyncio
 import logging
 import os
 from pathlib import Path
+import re
 import signal
 
 import aiohttp
@@ -17,6 +18,7 @@ from .widgets import WIDGET_SCRIPT
 
 CONFIG = Path.home() / ".config/telegram-agent"
 WEB = WIDGET_SCRIPT.parent / "web"
+VERSIONED_ASSET = re.compile(r"(?:.+-[a-f0-9]{12}|chunk-[A-Z0-9]{8})\.(?:js|css|woff2|webp)")
 log = logging.getLogger("aleph")
 
 
@@ -58,8 +60,9 @@ def application(store, token, model_key=None):
         path = WEB / filename
         if not path.is_file() or path.suffix not in {".html", ".css", ".js", ".webp", ".svg", ".png", ".woff2", ".txt"}:
             raise web.HTTPNotFound()
+        cache = "public, max-age=31536000, immutable" if VERSIONED_ASSET.fullmatch(filename) else "no-cache"
         return web.FileResponse(path, headers={"Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff",
-                                             "Cache-Control": "no-cache"})
+                                             "Cache-Control": cache})
     app.router.add_get("/healthz", health)
     app.router.add_get("/", asset)
     app.router.add_get(r"/{filename:[a-zA-Z0-9_.-]+}", asset)
@@ -68,7 +71,7 @@ def application(store, token, model_key=None):
 
 async def main():
     os.umask(0o077)
-    if not (WEB / "app.js").is_file() or not WIDGET_SCRIPT.is_file():
+    if not (WEB / "index.html").is_file() or not WIDGET_SCRIPT.is_file():
         raise SystemExit("Build Aleph's frontend with npm ci and npm run build before starting the server.")
     token = secret("TELEGRAM_BOT_TOKEN", "bot-token")
     key = secret("OPENCODE_API_KEY", "opencode-key")

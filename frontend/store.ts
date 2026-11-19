@@ -1,10 +1,14 @@
 import { bridge, bridgeRequest } from "./bridge.js";
+import { apiRequest, statePath } from "./transport.js";
+import type { RequestOptions, WriteMethod } from "./transport.js";
 import type { CalendarEvent, ChatGPTConnection, ChatGPTPairing, Connections, Service, ProjectEntry, Feed, ModelCatalog, ModelSummary, Project, SavedMemory, Settings, Task, WidgetState, WorkspaceState } from "./types.js";
 
 export { bridge };
+export type { RequestOptions, WriteMethod };
 
 type Reads = {
   "/api/state": WorkspaceState;
+  [statePath]: WorkspaceState;
   "/api/calendar.ics": Blob;
   "/api/chatgpt": ChatGPTConnection;
   "/api/models": ModelCatalog;
@@ -35,9 +39,6 @@ export type Writes = {
 } & { [path in `/api/connections/${Service}/start`]: {url: string} }
   & { [path in `/api/connections/${Service}`]: Connections };
 
-export type WriteMethod = "POST" | "PATCH" | "DELETE";
-export interface RequestOptions { requestKey?: string | null }
-
 const hash = new URLSearchParams(location.hash.slice(1));
 export const signed = () =>
   window.Telegram?.WebApp?.initData || hash.get("tgWebAppData") || "";
@@ -55,29 +56,21 @@ export const catalog = [
 ];
 export function request<Path extends keyof Reads>(path: Path): Promise<Reads[Path]>;
 export function request<Path extends keyof Writes>(path: Path, method: WriteMethod, body?: object, options?: RequestOptions): Promise<Writes[Path]>;
-export async function request(path: string, method: "GET" | WriteMethod = "GET", body?: object, { requestKey }: RequestOptions = {}): Promise<unknown> {
+export async function request(path: string, method: "GET" | WriteMethod = "GET", body?: object, options?: RequestOptions): Promise<unknown> {
   if (bridge()) return bridgeRequest(path, method, body);
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 18000);
-  try {
-    const response = await fetch(path, {
-      method,
-      signal: controller.signal,
-      credentials: "omit",
-      cache: "no-store",
-      headers: {
-        Authorization: "tma " + signed(),
-        ...(requestKey ? {"Idempotency-Key":requestKey} : {}),
-        ...(body ? { "Content-Type": "application/json" } : {}),
-      },
-      ...(body ? { body: JSON.stringify(body) } : {}),
-    });
-    if (!response.ok) throw new Error(String(response.status));
-    if (path.endsWith(".ics")) return await response.blob();
-    return response.status === 204 ? null : await response.json();
-  } finally {
-    clearTimeout(timeout);
+  return apiRequest(path, signed(), method, body, options);
+}
+
+export async function workspaceState() {
+  const startup = window.alephStartup;
+  delete window.alephStartup;
+  if (bridge()) return request("/api/state");
+  if (startup?.initData === signed()) {
+    const result = await startup.response;
+    if ("error" in result) throw result.error;
+    return result.state;
   }
+  return request(statePath);
 }
 function sampleDate(days: number, hour: number, minute: number) {
   const d = new Date();

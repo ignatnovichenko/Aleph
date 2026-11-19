@@ -109,6 +109,7 @@ export interface Routine {
 }
 
 export interface WorkspaceState {
+  chatgpt_connection?: ChatGPTConnection;
   user: TelegramUser;
   tasks: Task[];
   settings: Settings;

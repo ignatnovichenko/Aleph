@@ -128,14 +128,24 @@ def install_api(app, store, token, model_key=None):
 
     async def state(request, user):
         uid = user["id"]
+        compact = request.query.get("compact") == "1"
         result = {"user": user, "tasks": store.list_tasks(uid),
                                   "projects": projects.list_projects(store, uid), "active_project_id": projects.active(store, uid),
                                   "routines": store.list_routines(uid), "settings": store.get_settings(uid), "integrations": {"rss": True, "calendar": True},
                                   "feeds": store.list_feeds(uid), "feed_catalog": feed_catalog(),
-                                  "feed_items": store.feed_items(uid), "connections": connections.statuses(store, uid)}
+                                  "connections": connections.statuses(store, uid)}
         result["model"] = models.describe(store, uid, catalogs.opencode_model)
         result["model_configurable"] = chatgpt_owner(uid)
-        return web.json_response(result)
+        if not compact:
+            result["feed_items"] = store.feed_items(uid)
+        elif result["model_configurable"]:
+            result["chatgpt_connection"] = chatgpt.status(uid)
+        response = web.Response(text=json.dumps(result, ensure_ascii=False, separators=(",", ":")),
+                                content_type="application/json", zlib_executor_size=64 * 1024)
+        if response.content_length > 1024:
+            response.enable_compression()
+            response.headers["Vary"] = "Accept-Encoding"
+        return response
 
     async def connection(request, user):
         provider = request.match_info["provider"]

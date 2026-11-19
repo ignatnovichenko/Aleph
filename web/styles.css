@@ -294,11 +294,14 @@ dialog[open].dragging { animation: none; }
   transition: opacity .18s, transform .18s var(--ease);
 }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
-.boot, .failure { display: grid; justify-items: center; gap: 12px; padding: 17dvh 20px 24px; text-align: center; }
-.boot img, .failure img { border-radius: 50%; }
+.boot-head { display: flex; align-items: center; gap: 12px; padding-block: 13px 5px; margin-bottom: 32px; }
+.boot-head img, .failure img { border-radius: 50%; }
+.boot-head span, .boot-list span { display: block; border-radius: 12px; background: var(--wash); }
+.boot-head span { width: min(138px, 42%); height: 27px; }
+.boot-list { display: grid; gap: 11px; }
+.boot-list span { height: 61px; }
+.failure { display: grid; justify-items: center; gap: 12px; padding: 17dvh 20px 24px; text-align: center; }
 .failure h1 { font: italic 500 44px/1 var(--title); }
-.loading-track { width: 42px; height: 1px; overflow: hidden; background: var(--line); }
-.loading-track::after { display: block; content: ""; height: 100%; width: 45%; background: var(--hint); animation: loading-progress 1.3s ease-in-out infinite alternate; }
 .actions { display: flex; gap: 9px; }
 :where(.context-row,.project-row,.setting-row,.nav-item,.task-toggle,.task-body,.add-line,.segment):focus-visible { outline-offset: -3px; }
 button:is(.button,.action-plus,.icon-button,.nav-item):active { transform: scale(.965); }
@@ -306,7 +309,6 @@ button:is(.button,.action-plus,.icon-button,.nav-item):active { transform: scale
 button:is(.project-row,.setting-row,.context-row,.add-line,.segment):active { background: var(--pressed); }
 .saving :is(.task-toggle,.task-body,.project-row,.switch,.project-chat), [aria-busy="true"].pending { cursor: progress; }
 .saving .project-row[aria-current="true"], button.pending, button[aria-busy="true"], .task-row.pending { opacity: .62; }
-@keyframes loading-progress { to { transform: translateX(125%); } }
 @keyframes sheet-in { from { opacity: .55; transform: translateY(22px); } }
 @keyframes sheet-out { from { transform: translateY(var(--sheet-release, 0px)); } to { opacity: 0; transform: translateY(calc(var(--sheet-release, 0px) + 18px)); } }
 @keyframes fade-in { from { opacity: 0; } }
@@ -330,7 +332,6 @@ button:is(.project-row,.setting-row,.context-row,.add-line,.segment):active { ba
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition-duration: .01ms !important; animation-duration: .01ms !important; scroll-behavior: auto !important; }
-  .loading-track::after { animation: none; }
 }
 
 
