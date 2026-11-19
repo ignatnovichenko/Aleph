@@ -5,7 +5,7 @@ import { ApiMessage } from "./transport.js";
 import type { IconName } from "./icons.js";
 import type { RequestOptions, WriteMethod, Writes } from "./store.js";
 import type { CalendarEvent, ChatGPTConnection, ChatGPTPairing, ProjectEntry, ReplyStyle, SavedMemory, Service, ModelCatalog, ModelChoice, ModelProvider, Project, ProviderModel, Settings, Task, ThemeMode, WorkspaceState } from "./types.js";
-import type { ProjectSkills, SkillDraft, SkillSummary } from "./types.js";
+import type { ProjectSkills, ProjectSource, SkillDraft, SkillSummary, SourcePreview } from "./types.js";
 import {
   bridge,
   demo,
@@ -39,13 +39,16 @@ let page: Page = initialView.get("view") === "settings" ? "settings" : "home";
 type PlanFilter = "today" | "upcoming" | "inbox" | "done";
 let filter: PlanFilter = "today";
 let projectDetail: number | null = null;
-let projectPane: "tasks" | "notes" = "tasks";
+let projectPane: "tasks" | "notes" | "sources" = "tasks";
 let projectDoneOpen = false;
 let projectListScroll = 0;
 let undoTask: number | undefined;
 const projectEntries = new Map<number, ProjectEntry[]>();
 const loadingProjects = new Set<number>();
 const projectLoadErrors = new Set<number>();
+const projectSources = new Map<number, ProjectSource[]>();
+const loadingSources = new Set<number>();
+const sourceLoadErrors = new Set<number>();
 let agenda: CalendarEvent[] | undefined;
 let agendaError = false;
 let chatgpt: ChatGPTConnection | undefined;
@@ -857,11 +860,13 @@ function projectPage(project?: Project) {
       ${settingRow("skills", t("Скиллы", "Skills"), undefined, "project-skills", String(id))}
     </div>
     <div class="project-panes" role="group" aria-label="${t("Разделы проекта","Project sections")}">
-      ${([["tasks", t("Задачи","Tasks"), open.length], ["notes", t("Записи","Notes"), entries?.length]] as const)
+      ${([["tasks", t("Задачи","Tasks"), open.length], ["notes", t("Записи","Notes"), entries?.length],
+          ["sources", t("Источники","Sources"), projectSources.get(id)?.length]] as const)
         .map(([key,label,count]) => `<button aria-pressed="${projectPane === key}" aria-controls="project-work"
           data-action="project-pane" data-id="${key}">${label}${count ? `<small>${count}</small>` : ""}</button>`).join("")}
     </div>
-    <div id="project-work">${projectPane === "tasks" ? projectTasks(id, open, done, entries?.find(entry => entry.kind === "decision")) : projectNotes(id, entries)}</div>`;
+    <div id="project-work">${projectPane === "tasks" ? projectTasks(id, open, done, entries?.find(entry => entry.kind === "decision"))
+      : projectPane === "notes" ? projectNotes(id, entries) : sourcesPane(id)}</div>`;
 }
 
 function projectTasks(id: number, open: Task[], done: Task[], decision?: ProjectEntry) {
@@ -911,6 +916,197 @@ function projectNotes(id: number, entries?: ProjectEntry[]) {
         <button class="small-action" data-action="reload-project" data-id="${id}">${t("Повторить","Try again")}</button>`
         : `<p class="muted" role="status">${t("Загрузка…","Loading…")}</p>`}
   </section>`;
+}
+
+const sourceIcons: Record<ProjectSource["kind"], IconName> = {
+  web: "link", youtube: "video", notion: "document", drive: "table", file: "document",
+};
+const importOptions = {showApiMessage: true, timeoutMs: 35000};
+const sourceFormats = ".pdf,.docx,.xlsx,.pptx,.csv,.tsv,.txt,.md,.json,.html,.htm,.srt,.vtt";
+
+function sourceLabel(kind: ProjectSource["kind"]) {
+  return {
+    web: t("Веб-страница","Web page"), youtube: "YouTube", notion: "Notion",
+    drive: "Google Drive", file: t("Файл","File"),
+  }[kind];
+}
+
+function sourceStatus(status: ProjectSource["status"]) {
+  return {
+    ready: t("Доступен Алефу","Available to Aleph"),
+    partial: t("Доступен частично","Partially available"),
+    link: t("Ссылка сохранена","Link saved"),
+  }[status];
+}
+
+function sourceReason(reason: string) {
+  const messages: Record<string, string> = {
+    captions: t("Расшифровка видео недоступна. Можно прикрепить TXT, SRT или VTT к этой ссылке.",
+      "The video’s transcript is unavailable. You can attach a TXT, SRT or VTT file to this link."),
+    notion_access: t("Чтобы прочитать закрытую страницу, подключи Notion и дай Алефу доступ. Затем обнови источник.",
+      "To read a private page, connect Notion and grant Aleph access, then refresh the source."),
+    drive_access: t("Дай доступ к файлу через Google Drive и нажми «Обновить». Можно также загрузить его экспорт.",
+      "Grant access through Google Drive, then choose Refresh. You can also upload an exported copy."),
+    access: t("Сайт ограничил доступ к тексту. Можно загрузить файл или попробовать обновить ссылку.",
+      "The site restricted access to the text. Upload a copy or try refreshing the link."),
+    truncated: t("Сохранена часть содержимого. Для работы с остальными данными загрузи нужный фрагмент отдельно.",
+      "Part of the content was saved. Upload another excerpt to work with the remaining data."),
+    format: t("Содержимое в этом формате недоступно. Можно загрузить текстовый экспорт.",
+      "This format is unavailable for reading. You can upload a text export."),
+    too_large: t("Источник слишком большой. Можно загрузить нужный фрагмент отдельным файлом.",
+      "This source is too large. You can upload an excerpt as a separate file."),
+    unavailable: t("Источник пока недоступен. Можешь обновить его позже.", "The source is unavailable for now. Try refreshing it later."),
+    no_text: t("На странице не найден читаемый текст. Можно загрузить файл с содержимым.",
+      "No readable text was found. You can upload a file containing the text."),
+  };
+  return messages[reason] || "";
+}
+
+function sourcesPane(projectId: number) {
+  const items = projectSources.get(projectId);
+  return `<section aria-labelledby="sources-heading">
+    <div class="project-section-head"><h2 id="sources-heading">${t("Источники","Sources")}</h2>
+      ${projectAdd("add-source", t("Добавить источник","Add source"), projectId)}</div>
+    ${items?.length ? `<div class="panel source-list">${items.map(item => `
+      <button class="setting-row source-row" data-action="view-source" data-id="${item.id}">
+        ${glyph(sourceIcons[item.kind])}<span class="setting-copy">
+          <strong dir="auto">${e(item.title)}</strong>
+          <span class="setting-detail">${sourceLabel(item.kind)} <span class="source-dot">·</span> ${sourceStatus(item.status)}</span>
+        </span><span class="tail">${icon("arrow")}</span>
+      </button>`).join("")}</div>`
+      : items ? `<div class="project-empty panel">${glyph("link")}<div>
+        <strong>${t("Дай Алефу материалы для работы","Give Aleph reference material")}</strong>
+        <p>${t("Добавь файл или ссылку на статью, YouTube, Notion или Google Drive.","Add a file or link to an article, YouTube, Notion or Google Drive.")}</p>
+      </div></div>`
+      : sourceLoadErrors.has(projectId) ? `<button class="small-action" data-action="load-sources" data-id="${projectId}">${t("Повторить загрузку","Try again")}</button>`
+      : `<p class="muted" role="status">${t("Загружаю источники…","Loading sources…")}</p>`}
+  </section>`;
+}
+
+async function loadSources(projectId: number) {
+  if (loadingSources.has(projectId)) return;
+  if (demo) { projectSources.set(projectId, []); render(); return; }
+  loadingSources.add(projectId);
+  sourceLoadErrors.delete(projectId);
+  const previous = projectSources.get(projectId);
+  try {
+    const items = await request(`/api/projects/${projectId}/sources`);
+    if (projectSources.get(projectId) === previous) projectSources.set(projectId, items);
+  } catch { sourceLoadErrors.add(projectId); }
+  finally { loadingSources.delete(projectId); }
+  if (projectDetail === projectId && projectPane === "sources") render();
+}
+
+function saveSource(projectId: number, item: ProjectSource | null) {
+  if (!item) return;
+  projectSources.set(projectId, [item, ...(projectSources.get(projectId) || []).filter(source => source.id !== item.id)]
+    .sort((a,b) => b.id - a.id));
+}
+
+function sourceFileField(projectId: number, transcript?: number) {
+  return `<label class="button file-label source-file-action">${icon("download")}
+    ${transcript === undefined ? t("Загрузить файл","Upload a file") : t("Прикрепить расшифровку","Attach a transcript")}
+    <input type="file" name="project_source_file" accept="${transcript === undefined ? sourceFormats : ".srt,.vtt,.txt"}"
+      data-project="${projectId}"${transcript === undefined ? "" : ` data-source="${transcript}"`}></label>`;
+}
+
+function newSourceSheet(projectId: number) {
+  if (demo) {
+    openSheet(t("Источники проекта","Project sources"), `<p class="sheet-desc">${t("Чтобы добавить источник, открой Алефа в Telegram.","Open Aleph in Telegram to add a source.")}</p>
+      <button class="button primary" data-action="chat">${t("Открыть Алефа","Open Aleph")}</button>`);
+    return;
+  }
+  openSheet(t("Добавить источник","Add a source"), `
+    <form id="source-link-form" data-project="${projectId}">
+      <p class="sheet-desc source-intro">${t("Подойдут веб-страницы, YouTube, Notion и файлы из Google Drive.",
+        "Paste a link to a web page, YouTube video, Notion page or Google Drive file.")}</p>
+      <label class="field">${t("Ссылка","Link")}<input name="url" required type="url" maxlength="3000" inputmode="url"
+        spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="https://…"></label>
+      ${submit(t("Добавить ссылку","Add link"))}
+    </form>
+    <div class="source-upload">
+      ${sourceFileField(projectId)}<p class="sheet-desc">${t("PDF, документы, таблицы, презентации и текст до 4 МБ.",
+        "PDFs, documents, spreadsheets, presentations and text files up to 4 MB.")}</p>
+    </div><p class="muted source-progress" data-source-progress role="status"></p>`);
+}
+
+function sourceAccess(item: ProjectSource) {
+  const drive = state.connections?.drive, notion = state.connections?.notion;
+  if (item.reason === "drive_access") {
+    if (drive === "connected") return `<button class="button" data-action="drive-picker">${t("Выбрать файл в Google Drive","Choose in Google Drive")}</button>`;
+    if (drive === "disconnected" || drive === "reconnect") return `<button class="button" data-action="connect-service" data-id="drive">Google Drive</button>`;
+  }
+  if (item.reason === "notion_access" && (notion === "disconnected" || notion === "reconnect")) {
+    return `<button class="button" data-action="connect-service" data-id="notion">${t("Подключить Notion","Connect Notion")}</button>`;
+  }
+  return "";
+}
+
+function showSource(projectId: number, item: SourcePreview) {
+  openSheet(item.title, `
+    <div class="source-detail">
+      <div class="source-meta">${glyph(sourceIcons[item.kind])}<span>${sourceLabel(item.kind)} · ${sourceStatus(item.status)}</span></div>
+      ${item.reason ? `<p class="sheet-desc">${sourceReason(item.reason)}</p>` : ""}
+      <div class="source-controls">
+        ${item.url ? `<a class="button" href="${e(item.url)}" data-external-link target="_blank" rel="noopener noreferrer">${icon("up")}${t("Открыть","Open")}</a>
+          <button class="button" data-action="refresh-source" data-id="${item.id}">${t("Обновить","Refresh")}</button>` : ""}
+        ${sourceAccess(item)}
+        ${item.kind === "youtube" ? sourceFileField(projectId, item.id) : ""}
+      </div>
+      ${item.content ? `<details class="task-details source-preview">
+        <summary>${t("Просмотреть сохранённый текст","Preview saved text")}</summary>
+        <div class="project-reading" dir="auto">${e(item.content)}${item.size > item.content.length ? "…" : ""}</div>
+      </details>` : ""}
+      ${item.kind === "web" && item.status === "link" ? `<div class="source-reader">
+        <p class="sheet-desc">${t("Для чтения публичной статьи можно передать её ссылку сервису Jina Reader.",
+          "To read a public article, you can share its link with Jina Reader.")}</p>
+        <button class="button" data-action="read-source-article" data-id="${item.id}">${t("Извлечь текст статьи","Extract article text")}</button>
+      </div>` : ""}
+      <p class="muted source-progress" data-source-progress role="status"></p>
+      <p class="form-error" role="alert"></p>
+      <button class="small-action project-entry-remove" data-action="remove-source" data-id="${item.id}">
+        ${icon("trash")}${t("Удалить источник","Remove source")}</button>
+    </div>`);
+}
+
+async function viewSource(projectId: number, itemId: number) {
+  openSheet(t("Источник","Source"), `<p class="sheet-desc" data-source-loading role="status">${t("Загружаю источник…","Loading source…")}</p>`);
+  const marker = requiredElement(sheet, "[data-source-loading]");
+  try {
+    const item = await request(`/api/projects/${projectId}/sources/${itemId}`);
+    if (marker.isConnected && sheet.open && !sheet.classList.contains("closing")) showSource(projectId, item);
+  } catch (error) {
+    if (marker.isConnected) marker.textContent = errorMessage(error);
+  }
+}
+
+function sourceProgress(value: string) {
+  const node = sheet.querySelector("[data-source-progress]");
+  if (node) node.textContent = value;
+}
+
+async function uploadSource(picker: HTMLInputElement) {
+  const file = picker.files?.[0];
+  if (!file || pending) return;
+  const error = requiredElement(sheet, ".form-error");
+  if (!file.size || file.size > 4 * 1024 * 1024) {
+    error.textContent = t("Выбери файл до 4 МБ.","Choose a file up to 4 MB.");
+    picker.value = "";
+    return;
+  }
+  const id = Number(picker.dataset.project);
+  const source = Number(picker.dataset.source);
+  const path = source ? `/api/projects/${id}/sources/${source}/transcript` as const : `/api/projects/${id}/sources/file` as const;
+  let itemId = 0;
+  error.textContent = "";
+  sourceProgress(t("Извлекаю текст и данные…","Extracting text and data…"));
+  await write(path, "POST", file, item => {
+    saveSource(id, item);
+    itemId = item?.id || 0;
+  }, "", {...importOptions, showApiMessage: ru});
+  sourceProgress("");
+  picker.value = "";
+  if (itemId) await viewSource(id, itemId);
 }
 
 async function loadProject(id: number) {
@@ -1546,11 +1742,44 @@ async function act(action: string, id?: string) {
       if (projectDetail === Number(id)) await loadProject(projectDetail);
       break;
     case "project-pane":
-      if (!selectedProject() || (id !== "tasks" && id !== "notes") || id === projectPane) break;
+      if (!selectedProject() || (id !== "tasks" && id !== "notes" && id !== "sources") || id === projectPane) break;
       projectPane = id;
       selectionFeedback();
       render();
+      if (id === "sources" && projectDetail) await loadSources(projectDetail);
       break;
+    case "load-sources":
+      if (projectDetail && projectDetail === Number(id)) await loadSources(projectDetail);
+      break;
+    case "add-source":
+      if (projectDetail && projectDetail === Number(id)) newSourceSheet(projectDetail);
+      break;
+    case "view-source":
+      if (projectDetail) await viewSource(projectDetail, Number(id));
+      break;
+    case "refresh-source":
+    case "read-source-article": {
+      const project = projectDetail, source = Number(id);
+      if (!project) break;
+      const error = sheet.querySelector(".form-error");
+      if (error) error.textContent = "";
+      const reader = action === "read-source-article";
+      sourceProgress(reader ? t("Извлекаю текст статьи…","Extracting article text…") : t("Обновляю источник…","Refreshing source…"));
+      const path = reader ? `/api/projects/${project}/sources/${source}/reader` as const : `/api/projects/${project}/sources/${source}` as const;
+      const ok = await write(path, "POST", undefined,
+        item => saveSource(project, item), "", {...importOptions, showApiMessage: ru});
+      sourceProgress("");
+      if (ok) await viewSource(project, source);
+      break;
+    }
+    case "remove-source": {
+      const project = projectDetail, source = Number(id);
+      if (!project || !window.confirm(t("Удалить источник из проекта?","Remove this source from the project?"))) break;
+      if (await write(`/api/projects/${project}/sources/${source}`, "DELETE", undefined, () => {
+        projectSources.set(project, (projectSources.get(project) || []).filter(item => item.id !== source));
+      }, t("Источник удалён","Source removed"))) closeSheet();
+      break;
+    }
     case "continue-project": {
       const project_id = Number(id);
       if (await write("/api/projects/active","PATCH",{project_id},
@@ -1760,7 +1989,7 @@ document.addEventListener("click", (event) => {
   if (link && webapp()?.openLink) {
     event.preventDefault();
     webapp()?.openLink?.(link.href);
-    if (!link.closest(".task-result, .project-entry-body, .skill-source")) closeSheet();
+    if (!link.closest(".task-result, .project-entry-body, .skill-source, .source-detail")) closeSheet();
     return;
   }
   const el = target?.closest("button");
@@ -1809,7 +2038,21 @@ sheet.addEventListener("submit", async (event) => {
   };
   let ok = false;
   try {
-    if (form.id === "skill-import-form") {
+    if (form.id === "source-link-form") {
+      const project = Number(form.dataset.project);
+      const url = field("url").trim();
+      if (!url || project !== projectDetail) return;
+      requiredElement(form, ".form-error").textContent = "";
+      sourceProgress(t("Читаю содержимое ссылки…","Reading the linked source…"));
+      let itemId = 0;
+      await write(`/api/projects/${project}/sources`, "POST", {url}, item => {
+        saveSource(project, item);
+        itemId = item?.id || 0;
+      }, "", {...importOptions, showApiMessage: ru});
+      sourceProgress("");
+      if (itemId) await viewSource(project, itemId);
+      return;
+    } else if (form.id === "skill-import-form") {
       const file = data.get("skill_file");
       const hasFile = file instanceof File && file.size > 0;
       const url = field("url").trim();
@@ -1967,6 +2210,10 @@ sheet.addEventListener("submit", async (event) => {
 });
 sheet.addEventListener("change", async (event) => {
   const picker = event.target;
+  if (picker instanceof HTMLInputElement && picker.name === "project_source_file") {
+    await uploadSource(picker);
+    return;
+  }
   if (picker instanceof HTMLInputElement && picker.form?.id === "skill-import-form" && picker.name === "skill_file") {
     const file = picker.files?.[0];
     requiredElement(picker.form, ".skill-file span").textContent = file?.name || t("Выбрать SKILL.md","Choose SKILL.md");

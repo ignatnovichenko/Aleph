@@ -506,6 +506,20 @@ button.pending, button[aria-busy="true"], .task-row.pending { opacity: .62; }
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;
   overflow-wrap: anywhere; font-size: 14px; line-height: 1.4;
 }
+.source-list .source-row { min-height: 62px; padding-inline: 12px; }
+.source-row .setting-copy { flex: 1; }
+.source-dot { padding-inline: 2px; }
+.source-intro { margin-bottom: 12px; }
+.source-upload { margin-top: 16px; padding-top: 13px; border-top: 1px solid var(--hair); }
+.source-upload .sheet-desc { margin-top: 6px; }
+.source-controls { display: flex; flex-wrap: wrap; gap: 8px; }
+.source-controls .button, .source-file-action { min-height: 44px; }
+.source-meta { display: flex; align-items: center; gap: 9px; color: var(--hint); font-size: 13px; }
+.source-detail { display: grid; gap: 10px; }
+.source-progress:empty, .source-detail .form-error:empty { display: none; }
+.source-preview .project-reading { padding: 11px 13px; background: var(--panel); border-radius: 12px; }
+.source-reader { display: grid; justify-items: start; gap: 7px; }
+.source-detail .project-entry-remove { margin-top: 0; justify-self: start; }
 .project-reading { font-size: 15px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
 .project-reading a { text-underline-offset: 3px; }
 .project-entry-remove { margin-top: 16px; color: var(--critical); }

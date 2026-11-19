@@ -7,7 +7,7 @@ import sqlite3
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .feeds import CATALOG
-from . import capture, connections, memory, projects, reports, skills
+from . import capture, connections, memory, project_sources, projects, reports, skills
 from .routines import day_names
 
 UTC = timezone.utc
@@ -129,6 +129,7 @@ class Store:
 
         memory.initialize(self.db)
         projects.initialize(self.db)
+        project_sources.initialize(self.db)
         skills.initialize(self.db)
         connections.initialize(self.db)
         capture.initialize(self.db)

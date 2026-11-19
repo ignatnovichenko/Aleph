@@ -88,6 +88,19 @@ export interface ProjectEntry {
   created_at: string;
 }
 
+export interface ProjectSource {
+  id: number;
+  kind: "web" | "youtube" | "notion" | "drive" | "file";
+  title: string;
+  url: string;
+  status: "ready" | "partial" | "link";
+  reason: string;
+  size: number;
+  updated_at: string;
+}
+
+export type SourcePreview = ProjectSource & {content: string};
+
 export type ThemeMode = "auto" | "white" | "dark";
 export type ReplyStyle = "short" | "balanced" | "detailed";
 

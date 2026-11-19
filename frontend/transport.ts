@@ -1,13 +1,14 @@
 export type WriteMethod = "POST" | "PATCH" | "DELETE";
-export interface RequestOptions { requestKey?: string | null; showApiMessage?: boolean }
+export interface RequestOptions { requestKey?: string | null; showApiMessage?: boolean; timeoutMs?: number }
 export class ApiMessage extends Error {}
 
 export const statePath = "/api/state?compact=1";
 
 export async function apiRequest(path: string, signed: string, method: "GET" | WriteMethod = "GET",
-  body?: object, { requestKey, showApiMessage }: RequestOptions = {}): Promise<unknown> {
+  body?: object, { requestKey, showApiMessage, timeoutMs = 18000 }: RequestOptions = {}): Promise<unknown> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 18000);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const file = body instanceof File ? body : undefined;
   try {
     const response = await fetch(path, {
       method,
@@ -17,9 +18,10 @@ export async function apiRequest(path: string, signed: string, method: "GET" | W
       headers: {
         Authorization: "tma " + signed,
         ...(requestKey ? {"Idempotency-Key": requestKey} : {}),
-        ...(body ? {"Content-Type": "application/json"} : {}),
+        ...(file ? {"Content-Type": "application/octet-stream", "X-Source-Name": encodeURIComponent(file.name)}
+          : body ? {"Content-Type": "application/json"} : {}),
       },
-      ...(body ? {body: JSON.stringify(body)} : {}),
+      ...(body ? {body: file ?? JSON.stringify(body)} : {}),
     });
     if (!response.ok) {
       if (showApiMessage && [400, 404].includes(response.status) &&

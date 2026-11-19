@@ -140,7 +140,7 @@ def start(store, uid, provider):
     })
 
 
-async def request(session, method, url, *, headers=None, as_text=False, **kwargs):
+async def request(session, method, url, *, headers=None, as_text=False, as_bytes=False, **kwargs):
     try:
         async with session.request(method, url, headers=headers, allow_redirects=False,
                                    timeout=aiohttp.ClientTimeout(total=25), **kwargs) as response:
@@ -149,8 +149,10 @@ async def request(session, method, url, *, headers=None, as_text=False, **kwargs
             body = bytearray()
             async for chunk in response.content.iter_chunked(16384):
                 body.extend(chunk)
-                if len(body) > 2_000_000:
+                if len(body) > (4 * 1024 * 1024 if as_bytes else 2_000_000):
                     raise ConnectionError("Ответ сервиса слишком большой.")
+            if as_bytes:
+                return bytes(body)
             return body.decode("utf-8", errors="replace") if as_text else json.loads(body) if body else {}
     except (ValueError, UnicodeError) as error:
         if isinstance(error, ConnectionError):

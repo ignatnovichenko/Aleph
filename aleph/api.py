@@ -7,7 +7,7 @@ import json
 import os
 import re
 import time
-from urllib.parse import parse_qsl
+from urllib.parse import parse_qsl, unquote
 
 import aiohttp
 from aiohttp import web
@@ -17,7 +17,7 @@ from .chatgpt_auth import ChatGPTError
 from .chatgpt_pair import IMPORT_PATH, MAX_PACKET, owner as chatgpt_owner
 from .feeds import feed_catalog
 from .links import mini_app_url
-from . import articles, connections, drive_picker, integrations, memory, models, projects, reports, skills, widgets
+from . import articles, connections, drive_picker, integrations, memory, models, project_sources, projects, public_fetch, reports, skills, source_text, widgets
 from .store import UTC
 
 
@@ -86,6 +86,13 @@ def calendar_export(tasks, uid):
 def install_api(app, store, token, model_key=None):
     catalogs = models.ModelCatalogs(model_key)
     github_imports = asyncio.Semaphore(4)
+    source_imports = asyncio.Semaphore(4)
+
+    async def source_slot(awaitable, *args):
+        if source_imports.locked():
+            raise ValueError("Сейчас загружается много источников. Попробуй чуть позже.")
+        async with source_imports:
+            return await awaitable(*args)
 
     async def body(request, limit=16384):
         if request.content_type != "application/json":
@@ -323,6 +330,55 @@ def install_api(app, store, token, model_key=None):
         selected = [skill["id"] for skill in skills.for_project(store, uid, project_id)]
         return web.json_response({"skills": skills.library(store, uid), "selected": selected, "limit": skills.MAX_ENABLED})
 
+    async def sources(request, user):
+        uid, project_id = user["id"], int(request.match_info["id"])
+        if request.method == "GET":
+            return web.json_response(project_sources.list_sources(store, uid, project_id))
+        fields = await body(request)
+        if fields.keys() != {"url"}:
+            raise ValueError("Вставь ссылку на источник.")
+        item = await source_slot(project_sources.add_link, store, uid, project_id, fields["url"])
+        return web.json_response(item, status=201)
+
+    async def source_item(request, user):
+        uid, project_id, source_id = user["id"], int(request.match_info["id"]), int(request.match_info["source"])
+        if request.method == "DELETE":
+            project_sources.delete(store, uid, project_id, source_id)
+            return web.Response(status=204)
+        if request.method == "POST":
+            item = await source_slot(project_sources.refresh, store, uid, project_id, source_id)
+            return web.json_response(item)
+        return web.json_response(project_sources.preview(store, uid, project_id, source_id))
+
+    async def source_article(request, user):
+        item = await source_slot(project_sources.read_article, store, user["id"],
+                                 int(request.match_info["id"]), int(request.match_info["source"]))
+        return web.json_response(item)
+
+    async def source_file(request, user):
+        uid, project_id = user["id"], int(request.match_info["id"])
+        project_sources.authorize(store, uid, project_id)
+        if request.content_type != "application/octet-stream":
+            raise ValueError("Выбери файл для загрузки.")
+        limit = source_text.MAX_FILE
+        if request.content_length is not None and request.content_length > limit:
+            raise ValueError("Выбери файл до 4 МБ.")
+        if source_imports.locked():
+            raise ValueError("Сейчас загружается много источников. Попробуй чуть позже.")
+        try:
+            name = unquote(request.headers.get("X-Source-Name", ""), errors="strict")
+            async with source_imports, asyncio.timeout(26):
+                raw = await public_fetch.bounded(request.content, limit)
+                if "source" in request.match_info:
+                    item = await project_sources.attach_transcript(store, uid, project_id, int(request.match_info["source"]), name, raw)
+                else:
+                    item = await project_sources.add_file(store, uid, project_id, name, raw)
+        except public_fetch.FetchError:
+            raise ValueError("Выбери файл до 4 МБ.") from None
+        except (TimeoutError, UnicodeError):
+            raise ValueError("Не удалось загрузить файл. Попробуй ещё раз.") from None
+        return web.json_response(item, status=201)
+
     async def widget_view(request, user):
         row = widgets.view(store, user["id"], int(request.match_info["id"]))
         html = widgets.render(json.loads(row["spec"]))
@@ -415,6 +471,12 @@ def install_api(app, store, token, model_key=None):
                ("POST", "/api/skills/preview", skill_preview)]
     routes += [(method, r"/api/skills/{id:\d{1,18}}", skill_item) for method in ("GET", "PATCH", "DELETE")]
     routes += [(method, r"/api/projects/{id:\d{1,18}}/skills", project_skills) for method in ("GET", "PATCH")]
+    source_path = r"/api/projects/{id:\d{1,18}}/sources"
+    routes += [(method, source_path, sources) for method in ("GET", "POST")]
+    routes += [(method, source_path + r"/{source:\d{1,18}}", source_item) for method in ("GET", "DELETE", "POST")]
+    routes += [("POST", source_path + "/file", source_file),
+               ("POST", source_path + r"/{source:\d{1,18}}/transcript", source_file),
+               ("POST", source_path + r"/{source:\d{1,18}}/reader", source_article)]
     provider_path = r"{provider:calendar|notion|drive|gmail}"
     app.router.add_post(f"/api/connections/{provider_path}/start", scoped(connection))
     app.router.add_delete(f"/api/connections/{provider_path}", scoped(connection))
