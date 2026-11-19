@@ -21,6 +21,7 @@ const paths = {
   sparkle:
     '<path d="m12 2 2.6 7.4L22 12l-7.4 2.6L12 22l-2.6-7.4L2 12l7.4-2.6L12 2Z"/>',
   skills: '<path d="m12 3 8.5 4.5L12 12 3.5 7.5 12 3Zm-8.5 9 8.5 4.5 8.5-4.5m-17 4.5 8.5 4.5 8.5-4.5"/>',
+  taskList: '<rect x="6.5" y="5.5" width="14" height="15" rx="3"/><path d="M4 16.5V6a3 3 0 0 1 3-3h9.5M10.5 10h6m-6 3.5h6m-6 3.5H15"/>',
   rss: '<path d="M5 5c7.5 0 14 6.5 14 14M5 11c4.2 0 8 3.8 8 8"/><circle cx="5.5" cy="18.5" r="1.4" fill="currentColor" stroke="none"/>',
   calendar:
     '<rect x="3.5" y="5" width="17" height="16" rx="3"/><path d="M7.5 3v4m9-4v4m-13 3h17m-13 4h3m3 0h3"/>',

@@ -36,8 +36,10 @@ let state: WorkspaceState;
 const initialView = new URLSearchParams(location.search);
 let initialTaskOpened = false;
 let page: Page = initialView.get("view") === "settings" ? "settings" : "home";
-type PlanFilter = "today" | "upcoming" | "inbox" | "done";
-let filter: PlanFilter = "today";
+type TaskSection = "today" | "upcoming" | "inbox" | "done";
+type PlanFilter = "all" | TaskSection;
+let filter: PlanFilter = "all";
+let taskScope: number | null = null;
 let projectDetail: number | null = null;
 let projectPane: "tasks" | "notes" | "sources" = "tasks";
 let projectDoneOpen = false;
@@ -559,12 +561,12 @@ function needsAttention(task: Task) {
 function taskDone(task: Task) {
   return task.report_state === "sent" || (!task.report_state && task.status === "done");
 }
-function taskFilter(task: Task): PlanFilter {
+function taskFilter(task: Task, today = localDateTime(Date.now(), zone()).slice(0, 10)): TaskSection {
   if (taskDone(task)) return "done";
   if (needsAttention(task)) return "today";
   const when = task.due_at || task.remind_at;
   if (!when) return "inbox";
-  return localDateTime(when,zone()).slice(0,10) > localDateTime(Date.now(),zone()).slice(0,10) ? "upcoming" : "today";
+  return localDateTime(when,zone()).slice(0,10) > today ? "upcoming" : "today";
 }
 function taskDate(value: string) {
   const day = localDateTime(value,zone()).slice(0,10);
@@ -586,7 +588,7 @@ function taskRow(task: Task, withProject = true) {
     ${toggle}
     <button class="task-body" data-action="edit-task" data-id="${task.id}">
       <span class="task-title" dir="auto">${e(task.title)}</span>
-      <span class="task-meta">${withProject ? `<span>${e(projectName(task.project_id))}</span>` : ""}
+      <span class="task-meta">${withProject ? `<span class="task-project-name" dir="auto">${e(projectName(task.project_id))}</span>` : ""}
         ${due ? `<span>${e(due)}</span>` : ""}${reminder ? `<span>${e(reminder)}</span>` : ""}</span>
       ${status ? `<span class="task-status ${urgent ? "task-status-alert" : ""}">${report ? t("Алеф","Aleph") + " · " : ""}${status}</span>` : ""}
     </button><span class="arrow">${icon("arrow")}</span></article>`;
@@ -753,41 +755,133 @@ async function openModelSettings() {
 function sectionHead(title: string) {
   return `<h2 class="section-title">${title}</h2>`;
 }
+function taskLabels(): Record<PlanFilter, string> {
+  return {all: t("Все", "All"), today: t("Сегодня", "Today"), upcoming: t("Скоро", "Upcoming"),
+    inbox: t("Без даты", "No date"), done: t("Готово", "Done")};
+}
+
+function taskScopeName(scope: number | null) {
+  return scope === null ? t("Все проекты", "All projects") : projectName(scope);
+}
+
+function taskScopeIcon(scope: number | null): IconName {
+  return scope === null ? "taskList" : scope === 0 ? "person" : "projects";
+}
+
+function taskScopeSheet() {
+  const counts = new Map<number, number>();
+  let total = 0;
+  for (const task of state.tasks) {
+    if (taskDone(task)) continue;
+    const id = task.project_id || 0;
+    counts.set(id, (counts.get(id) || 0) + 1);
+    total++;
+  }
+  const choice = (scope: number | null) => {
+    const selected = taskScope === scope;
+    const count = scope === null ? total : counts.get(scope) || 0;
+    return `<button class="task-scope-option setting-row" data-action="select-task-scope" data-id="${scope ?? "all"}" aria-pressed="${selected}">
+      ${glyph(taskScopeIcon(scope))}<strong dir="auto">${e(taskScopeName(scope))}</strong>
+      <span class="task-scope-option-count" aria-label="${t("В работе", "Open")} ${count}">${count || ""}</span>
+      <span class="task-scope-check" aria-hidden="true">${selected ? icon("check") : ""}</span>
+      </button>`;
+  };
+  openSheet(t("Задачи по проектам", "Tasks by project"), `
+    <div class="task-scope-choices" role="group" aria-label="${t("Проект для списка задач", "Project for the task list")}">
+      <div class="panel task-scope-all">${choice(null)}</div>
+      <div class="panel">${[0, ...(state.projects || []).map(project => project.id)].map(choice).join("")}</div>
+    </div>`);
+}
+
+function selectTaskScope(value?: string) {
+  const next = value === "all" ? null : Number(value);
+  if (next !== null && next !== 0 && !state.projects?.some(project => project.id === next)) return;
+  if (next === taskScope) {
+    closeSheet();
+    return;
+  }
+  taskScope = next;
+  selectionFeedback();
+  render();
+  closeSheet();
+  if (reducedMotion.matches) return;
+  const view = activeView();
+  view?.content.querySelector(".task-scope-copy")?.animate(
+    [{opacity: .3, transform: "translateY(5px)"}, {opacity: 1, transform: "translateY(0)"}],
+    {delay: 45, duration: 290, fill: "backwards", easing: "cubic-bezier(.16,1,.3,1)"});
+  view?.content.querySelector(".task-results")?.animate(
+    [{opacity: .25, transform: "translateY(10px)"}, {opacity: 1, transform: "translateY(0)"}],
+    {delay: 70, duration: 345, fill: "backwards", easing: "cubic-bezier(.16,1,.3,1)"});
+}
+
+function taskSection(title: string, items: Task[], withProject: boolean, attention = false) {
+  if (!items.length) return "";
+  return `<section class="task-section${attention ? " attention-block" : ""}">
+    <h2 class="section-title">${title}<small>${items.length}</small></h2>
+    <div class="agenda panel">${items.map(task => taskRow(task, withProject)).join("")}</div>
+  </section>`;
+}
+
+function groupedTasks(tasks: Task[]) {
+  const groups: Record<TaskSection, Task[]> = {today: [], upcoming: [], inbox: [], done: []};
+  const attention: Task[] = [];
+  const today = localDateTime(Date.now(), zone()).slice(0, 10);
+  for (const task of tasks) {
+    const group = taskFilter(task, today);
+    if (group === "today" && needsAttention(task)) attention.push(task);
+    else groups[group].push(task);
+  }
+  return {groups, attention};
+}
+
+function taskEmpty(first: boolean, next?: Task) {
+  const title = {
+    all: t("Задач пока нет", "No tasks yet"), today: t("На сегодня всё спокойно", "You’re clear for today"),
+    upcoming: t("Впереди пока ничего", "Nothing scheduled yet"), inbox: t("Задач без даты нет", "No undated tasks"),
+    done: t("Здесь будут выполненные задачи", "Completed tasks will appear here"),
+  }[filter];
+  return `<div class="empty surface">
+    <strong>${first ? t("С чего начнём?", "What shall we start with?") : title}</strong>
+    ${first ? `<p>${t("Попробуй: «Завтра в 18:00 пришли разбор SpaceX».", "Try: “Send me a SpaceX analysis tomorrow at 6 PM.”")}</p>
+      <button class="button primary" data-action="chat">${t("Поручить в чате","Ask in chat")}</button>
+      <button class="small-action" data-action="new-task">${t("Добавить задачу вручную","Add a task manually")}</button>`
+      : next ? `<p>${t("Ближайшее","Up next")} · ${e(taskDate(next.due_at || next.remind_at || ""))}</p>
+        <button class="small-action" data-action="edit-task" data-id="${next.id}">${e(next.title)} ${icon("arrow")}</button>` : ""}
+  </div>`;
+}
+
 function overview() {
-  const tasks = sorted();
-  const groups: Record<PlanFilter, Task[]> = {today: [], upcoming: [], inbox: [], done: []};
-  for (const task of tasks) groups[taskFilter(task)].push(task);
-  const list = groups[filter];
-  const attention = filter === "today" ? list.filter(needsAttention) : [];
-  const regular = list.filter(task => !attention.includes(task));
-  const filters: [PlanFilter, string][] = [["today", t("Сегодня", "Today")], ["upcoming", t("Скоро", "Upcoming")],
-    ["inbox", t("Без даты", "No date")], ["done", t("Готово", "Done")]];
-  const empty = {today: t("На сегодня всё спокойно", "You’re clear for today"),
-    upcoming: t("Впереди пока ничего", "Nothing scheduled yet"),
-    inbox: t("Задач без даты нет", "No undated tasks"), done: t("Здесь будут выполненные задачи", "Completed tasks will appear here")};
-  const first = tasks.length === 0 && filter === "today";
-  const next = filter === "today" && !list.length ? groups.upcoming[0] : undefined;
+  const allProjects = taskScope === null;
+  const tasks = sorted(allProjects ? state.tasks : state.tasks.filter(task => (task.project_id || 0) === taskScope));
+  const {groups, attention} = groupedTasks(tasks);
+  const labels = taskLabels();
+  const first = allProjects && !state.tasks.length && (filter === "all" || filter === "today");
+  const open = tasks.length - groups.done.length;
+  const scope = taskScopeName(taskScope);
+  const attentionSection = filter === "all" || filter === "today"
+    ? taskSection(t("Требует внимания", "Needs attention"), attention, allProjects, true) : "";
+  const results = filter === "all"
+    ? (Object.keys(groups) as TaskSection[]).map(key => taskSection(labels[key], groups[key], allProjects)).join("")
+    : groups[filter].length ? `<div class="agenda panel">${groups[filter].map(task => taskRow(task, allProjects)).join("")}</div>` : "";
   return `<div class="tasks-toolbar">
+    <button class="task-scope" data-action="task-scope" aria-haspopup="dialog" aria-controls="sheet"
+      aria-label="${e(t("Задачи по проектам", "Tasks by project") + " · " + scope)}">
+      ${glyph(taskScopeIcon(taskScope))}
+      <span class="task-scope-copy"><strong dir="auto">${e(scope)}</strong>
+        <small>${open ? t("В работе", "Open") + " · " + open : t("Задач в работе нет", "No open tasks")}</small></span>
+      <span class="task-scope-arrow">${icon("arrow")}</span>
+    </button>
+    ${first ? "" : `<button class="action-plus" data-action="new-task"${taskScope === null ? "" : ` data-id="${taskScope}"`}
+      aria-label="${t("Добавить задачу","Add task")}">${icon("plus")}</button>`}
+    </div>
     <button class="active-context" data-action="view-project" data-id="${activeId()}">${icon(activeId() ? "projects" : "person")}
       <span>${t("В чате", "In chat")} · <strong dir="auto">${e(projectName(activeId()))}</strong></span>${icon("arrow")}</button>
-    ${first ? "" : `<button class="action-plus" data-action="new-task" aria-label="${t("Добавить задачу","Add task")}">${icon("plus")}</button>`}
-    </div>
-    ${attention.length ? `<section class="attention-block"><h2 class="section-title">${t("Требует внимания","Needs attention")}</h2>
-      <div class="panel">${attention.map(task => taskRow(task)).join("")}</div></section>` : ""}
-    <div class="plan-tabs" role="group" aria-label="${t("Разделы задач", "Task views")}">${filters.map(([key,label]) => {
-      const count = groups[key].length;
-      return `<button data-filter="${key}" aria-pressed="${key === filter}">${label}${count ? `<small>${count}</small>` : ""}</button>`;
-    }).join("")}</div>
-    ${regular.length ? `<div class="agenda panel">${regular.map(task => taskRow(task)).join("")}</div>` :
-      attention.length ? "" : `<div class="empty surface">
-        <strong>${first ? t("С чего начнём?", "What shall we start with?") : empty[filter]}</strong>
-        ${first ? `<p>${t("Попробуй: «Завтра в 18:00 пришли разбор SpaceX».", "Try: “Send me a SpaceX analysis tomorrow at 6 PM.”")}</p>
-          <button class="button primary" data-action="chat">${t("Поручить в чате","Ask in chat")}</button>
-          <button class="small-action" data-action="new-task">${t("Добавить задачу вручную","Add a task manually")}</button>`
-          : next ? `<p>${t("Ближайшее","Up next")} · ${e(taskDate(next.due_at || next.remind_at || ""))}</p>
-            <button class="small-action" data-action="edit-task" data-id="${next.id}">${e(next.title)} ${icon("arrow")}</button>` : ""}
-      </div>`}
-    ${filter === "today" ? calendarSection() + routinesPanel() : ""}`;
+    <div class="plan-tabs" role="group" aria-label="${t("Разделы задач", "Task views")}">${Object.entries(labels).map(([key,label]) =>
+      `<button data-filter="${key}" aria-pressed="${key === filter}">${label}</button>`).join("")}</div>
+    <div class="task-results" role="region" aria-label="${e(scope)}">
+      ${attentionSection + results || taskEmpty(first, filter === "today" ? groups.upcoming[0] : undefined)}
+      ${allProjects && (filter === "all" || filter === "today") ? calendarSection() + routinesPanel() : ""}
+    </div>`;
 }
 function calendarSection() {
   if (state.connections?.calendar !== "connected") return "";
@@ -1683,6 +1777,12 @@ async function act(action: string, id?: string) {
     case "chat":
       openChat();
       break;
+    case "task-scope":
+      taskScopeSheet();
+      break;
+    case "select-task-scope":
+      selectTaskScope(id);
+      break;
     case "skill-library":
     case "project-skills":
     case "skill-list":
@@ -1995,7 +2095,7 @@ document.addEventListener("click", (event) => {
   const el = target?.closest("button");
   if (!el || el.disabled || sheet.classList.contains("closing")) return;
   if (el.dataset.page) navigate(el.dataset.page);
-  else if (el.dataset.filter && ["today","upcoming","inbox","done"].includes(el.dataset.filter)) {
+  else if (el.dataset.filter && Object.hasOwn(taskLabels(), el.dataset.filter)) {
     if(filter===el.dataset.filter)return;
     selectionFeedback();
     filter = el.dataset.filter as PlanFilter;
@@ -2159,7 +2259,7 @@ sheet.addEventListener("submit", async (event) => {
           });
           mergeRecord(state.tasks, record);
           if (confirmedZone) Object.assign(state.settings, {timezone: confirmedZone, timezone_confirmed: true});
-          if (page === "home") filter = taskFilter(record);
+          if (page === "home" && filter !== "all") filter = taskFilter(record);
         },
         t("Поручение сохранено","Task saved"),
         {requestKey: id ? null : form.dataset.requestKey}
