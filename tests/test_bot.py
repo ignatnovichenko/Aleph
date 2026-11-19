@@ -56,7 +56,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.tg.fail = True
         await bot._handle(self.inbox.pending()[0], self.store, self.inbox, self.tg, self.agent)
         self.assertEqual(len(self.store.list_tasks(11)), 1)
-        self.assertEqual(self.store.history(11)[-1]["content"], "Записал.")
+        self.assertEqual(self.store.history(11)[-1]["content"], "Записал.\n\nЗадача · Забрать книгу\nПроект «Личное»")
         self.assertEqual(len(self.agent.calls), 2)
         self.assertEqual(self.agent.calls[-1][-2]["reasoning_content"], "transient provider context")
 
@@ -64,7 +64,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         self.tg.fail = False
         await bot._handle(self.inbox.pending()[0], self.store, self.inbox, self.tg, self.agent)
         self.assertEqual(len(self.agent.calls), 2)
-        self.assertEqual(self.tg.sent[0]["text"], "Записал.")
+        self.assertEqual(self.tg.sent[0]["text"], self.store.history(11)[-1]["content"])
         self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM bot_steps").fetchone()[0], 0)
         self.inbox.ingest([telegram_update])
         self.assertEqual(self.inbox.pending(), [])

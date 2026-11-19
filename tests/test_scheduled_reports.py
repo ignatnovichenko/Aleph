@@ -1,6 +1,7 @@
 import json
 import unittest
 from datetime import datetime, timedelta
+from urllib.parse import parse_qs, urlsplit
 from unittest.mock import AsyncMock, patch
 
 from aleph import bot, projects, reports
@@ -47,6 +48,7 @@ class ScheduledReports(unittest.IsolatedAsyncioTestCase):
         reports.enqueue(self.store.db, self.run_at + timedelta(seconds=1))
         return self.inbox.pending(scheduled=True)[0]
 
+    @patch.dict("os.environ", {"MINI_APP_URL": "https://aleph.example"})
     async def test_schedule_voice_then_run_report_at_due_time(self):
         mock_call = {"id": "schedule", "type": "function", "function": {"name": "schedule_report", "arguments": json.dumps({
             "title": "Разбор SpaceX", "prompt": "Подготовь разбор SpaceX.", "run_at": timestamp(self.run_at),
@@ -68,6 +70,10 @@ class ScheduledReports(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(task["project_id"], self.project)
         self.assertEqual(task["report_state"], "pending")
         self.assertIsNone(task["remind_at"])
+        receipt = self.tg.sent[-1][1]
+        self.assertIn("Europe/Moscow · Проект «Исследования»", receipt["text"])
+        button = receipt["reply_markup"]["inline_keyboard"][0][0]
+        self.assertEqual(parse_qs(urlsplit(button["web_app"]["url"]).query), {"task": [str(task["id"])]})
         reports.enqueue(self.store.db, self.run_at - timedelta(seconds=1))
         self.assertFalse(self.inbox.pending(scheduled=True))
         projects.choose(self.store, 7, 0)
@@ -78,14 +84,32 @@ class ScheduledReports(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.tg.sent[-1][0], "sendRichMessage")
         self.assertIn("<h2>В чём бизнес</h2>", self.tg.sent[-1][1]["rich_message"]["html"])
         self.assertEqual(self.tg.sent[-1][1]["chat_id"], 7)
+        result_button = self.tg.sent[-1][1]["reply_markup"]["inline_keyboard"][0][0]
+        self.assertEqual(parse_qs(urlsplit(result_button["web_app"]["url"]).query),
+                         {"task": [str(task["id"])], "result": ["1"]})
         tools = self.agent.completion.await_args.kwargs["tools"]
         self.assertEqual({t["function"]["name"] for t in tools}, REPORT_TOOL_NAMES)
         self.assertEqual(self.store.get_task(7, task["id"])["status"], "done")
         self.assertEqual(self.store.get_task(7, task["id"])["report_state"], "sent")
+        self.assertEqual(reports.result(self.store, 7, task["id"])["text"], ARTICLE.strip())
         self.assertEqual(self.store.history(7, project_id=self.project)[-1]["content"], ARTICLE.strip())
         self.assertEqual(self.store.history(7), [])
         reports.enqueue(self.store.db, self.run_at + timedelta(seconds=2))
         self.assertFalse(self.inbox.pending(scheduled=True))
+
+    async def test_pausing_and_resuming_invalidates_a_running_attempt(self):
+        task = self.schedule()
+        row = self.queued()
+        reports.start(self.store.db, task["id"])
+        self.assertIsNotNone(self.store.get_task(7, task["id"])["report_started_at"])
+        self.store.update_task(7, task["id"], {"status": "done"})
+        self.store.update_task(7, task["id"], {"status": "open"})
+        self.assertIsNone(self.store.get_task(7, task["id"])["report_started_at"])
+        self.agent.completion = AsyncMock()
+        await bot._handle(row, self.store, self.inbox, self.tg, self.agent)
+        self.agent.completion.assert_not_awaited()
+        self.assertFalse(self.tg.sent)
+        self.assertIsNotNone(reports.current(self.store, self.queued()))
 
     async def test_retry_delivery_reuses_the_generated_result(self):
         task = self.schedule()

@@ -55,14 +55,17 @@ def apply_web_action(store, uid, raw_data, request_key):
         raise ValueError("Некорректное действие.")
     ru = store.get_user(uid)["language_code"] in ("", "ru", "uk", "be")
     if (method, path) == ("POST", "/api/tasks"):
-        if fields.keys() - {"title", "notes", "due_at", "project_id", "remind_at"}:
+        if fields.keys() - {"title", "notes", "due_at", "project_id", "remind_at", "timezone"}:
             raise ValueError("Неизвестное поле задачи.")
-        reminder = {"remind_at": fields["remind_at"]} if "remind_at" in fields else {}
-        task = store.create_task(uid, fields.get("title"), fields.get("due_at"), fields.get("notes", ""), request_key=request_key, project_id=fields.get("project_id", 0), **reminder)
+        def save(values):
+            reminder = {"remind_at": values["remind_at"]} if "remind_at" in values else {}
+            return store.create_task(uid, values.get("title"), values.get("due_at"), values.get("notes", ""),
+                                     request_key=request_key, project_id=values.get("project_id", 0), **reminder)
+        task = store.save_task_timezone(uid, fields, save)
         return ("Добавил в план: " if ru else "Added to your plan: ") + task["title"]
     match = re.fullmatch(r"/api/tasks/(\d{1,18})", path)
     if method == "PATCH" and match:
-        task = store.update_task(uid, int(match[1]), fields)
+        task = store.save_task_timezone(uid, fields, lambda values: store.update_task(uid, int(match[1]), values))
         return ("Сохранил изменения: " if ru else "Updated: ") + task["title"]
     if (method, path) == ("PATCH", "/api/settings"):
         store.patch_settings(uid, fields)

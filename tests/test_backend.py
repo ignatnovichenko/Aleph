@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, patch
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from aleph import chatgpt, chatgpt_auth, memory, projects
+from aleph import chatgpt, chatgpt_auth, memory, projects, reports
 from aleph.api import install_api, signed_user
 from aleph.chatgpt_pair import encrypt_for_vm
 from aleph.feeds import CATALOG, parse_feed
@@ -89,6 +89,35 @@ class BackendAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.client.delete(path, headers=self.headers(2))).status, 404)
         self.assertEqual((await self.client.delete(path, headers=owner)).status, 204)
         self.assertEqual(memory.list_memories(self.store.db, 1), [])
+
+    async def test_result_is_formatted_and_only_available_to_the_owner(self):
+        self.store.ensure_user(1)
+        task = reports.schedule(self.store, 1, 0, "Research", "Read the source.",
+                                timestamp(datetime.now(UTC) + timedelta(hours=1)), "research")
+        path = f"/api/tasks/{task['id']}/result"
+        self.assertEqual((await self.client.get(path, headers=self.headers())).status, 404)
+        self.store.db.execute("UPDATE scheduled_reports SET state='sent',result=? WHERE task_id=?",
+                              ("## Result\n\n<script>alert(1)</script>", task["id"]))
+        self.assertEqual((await self.client.get(path)).status, 401)
+        self.assertEqual((await self.client.get(path, headers=self.headers(2))).status, 404)
+        result = await (await self.client.get(path, headers=self.headers())).json()
+        self.assertIn("<h2>Result</h2>", result["html"])
+        self.assertIn("&lt;script&gt;", result["html"])
+
+    async def test_first_task_confirms_timezone_only_after_success(self):
+        headers = self.headers()
+        await self.client.get("/api/state", headers=headers)
+        self.assertFalse(self.store.get_settings(1)["timezone_confirmed"])
+        response = await self.client.post("/api/tasks", headers=headers,
+                                          json={"title": "", "timezone": "Europe/Moscow"})
+        self.assertEqual(response.status, 400)
+        self.assertFalse(self.store.get_settings(1)["timezone_confirmed"])
+        response = await self.client.post("/api/tasks", headers=headers, json={
+            "title": "Call", "remind_at": "2027-02-03T17:30", "timezone": "Europe/Moscow",
+        })
+        self.assertEqual(response.status, 201)
+        self.assertEqual((await response.json())["remind_at"], "2027-02-03T14:30:00Z")
+        self.assertTrue(self.store.get_settings(1)["timezone_confirmed"])
 
     async def test_signed_scope_mutations_export(self):
         self.assertEqual((await self.client.get("/api/state")).status, 401)

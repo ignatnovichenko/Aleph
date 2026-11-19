@@ -5,6 +5,7 @@ import secrets
 import time
 
 from . import projects
+from .links import task_button
 
 TASK_FIELDS = {"title", "notes", "due_at", "remind_at"}
 
@@ -84,6 +85,7 @@ async def handle(store, telegram, query):
     identifier, project_id = match[1], int(match[2])
     ru = ((query.get("from") or {}).get("language_code") or "ru").startswith(("ru", "uk", "be", "kk"))
     error_text = ""
+    keyboard = []
     store.db.execute("SAVEPOINT apply_capture")
     try:
         request = store.db.execute("""DELETE FROM pending_captures WHERE id=? AND user_id=? AND expires>?
@@ -94,6 +96,10 @@ async def handle(store, telegram, query):
             result = save(store, uid, project_id, json.loads(request["payload"]), request["source"], request["request_key"])
             name = result["project"]
             text = f"Сохранил в проекте «{name}»." if ru else f"Saved in “{name}”."
+            if result.get("task"):
+                button = task_button(result["task"]["id"], ru)
+                if button:
+                    keyboard.append([button])
         else:
             text = "Отменено." if ru else "Cancelled."
     except (ValueError, KeyError) as error:
@@ -109,4 +115,4 @@ async def handle(store, telegram, query):
         return
     await telegram.call("answerCallbackQuery", callback_query_id=query["id"])
     await telegram.call("editMessageText", chat_id=uid, message_id=message["message_id"], text=text,
-                        reply_markup={"inline_keyboard": []})
+                        reply_markup={"inline_keyboard": keyboard})

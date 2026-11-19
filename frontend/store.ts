@@ -9,6 +9,7 @@ type Reads = {
   "/api/chatgpt": ChatGPTConnection;
   "/api/models": ModelCatalog;
   "/api/memory": SavedMemory[];
+  [path: `/api/tasks/${number}/result`]: {html: string | null; delivered_at: string | null};
   [path: `/api/connections/calendar/events?${string}`]: {events: CalendarEvent[]; more: boolean};
   [path: `/api/projects/${number}/entries`]: ProjectEntry[];
   [path: `/api/widgets/${string}`]: WidgetState & { html: string };

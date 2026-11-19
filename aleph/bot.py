@@ -1,18 +1,20 @@
 """Telegram long polling, bounded parallel private chats and durable reply delivery."""
 import asyncio
 from contextlib import suppress
+from datetime import datetime
 import json
 import logging
 import os
 import re
 import time
+from zoneinfo import ZoneInfo
 
 import aiohttp
 
 from .chatgpt import plan as chatgpt
 from .chatgpt_pair import owner as chatgpt_owner
 from .hermes import create_agent
-from .links import settings_url
+from .links import settings_url, task_button, view_url
 from . import models, projects
 from .llm import ChatGPTUnavailable, ModelRejectsPhoto, ModelUnavailable, RegionUnavailable
 from . import articles, capture, integrations, media, documents, reminders, reports, widgets
@@ -30,11 +32,10 @@ MODEL_QUESTION_EN = re.compile(
     r"(?:what (?:ai )?model are you(?: (?:using|running))?|which model are you (?:using|running))[.!?]*",
     re.IGNORECASE,
 )
-HELLO_RU = ("Привет, я Алеф. Можешь писать мне как обычно или отправить голосовое. "
-            "Могу напомнить о деле или сам подготовить и прислать результат в указанное время.\n\n"
-            "Что сейчас на уме? Для задач по местному времени можешь сразу назвать свой город.")
-HELLO_EN = ("Hey, I’m Aleph. Send me a message or a voice note. I can remind you about something or "
-            "prepare a result and send it at a time you choose.\n\nWhat’s on your mind? You can tell me your city to use local time.")
+HELLO_RU = ("Привет, я Алеф. Напиши мне или отправь голосовое. Например: «Завтра в 18:00 пришли разбор SpaceX».\n\n"
+            "Я подготовлю разбор и пришлю его сюда. Чтобы поставить напоминание, скажи «напомни мне…».")
+HELLO_EN = ("Hey, I’m Aleph. Send a message or a voice note. Try “Send me a SpaceX analysis tomorrow at 6 PM”.\n\n"
+            "I’ll prepare it and send it here. To set a reminder, say “remind me to…”.")
 
 class TelegramError(Exception):
     def __init__(self, code=0, retry_after=0, description=""):
@@ -258,6 +259,11 @@ class Inbox:
         return any(call.get("function", {}).get("name") == "open_plan" for row in rows
                    for call in json.loads(row[0]).get("tool_calls") or [])
 
+    def created_tasks(self, uid, update_id):
+        rows = self.db.execute("SELECT id FROM tasks WHERE user_id=? AND request_key GLOB ? ORDER BY id LIMIT 4",
+                               (uid, f"tg:{update_id}:*"))
+        return [self.store.get_task(uid, row["id"]) for row in rows]
+
     def successful_mutations(self, update_id):
         results = []
         for row in self.db.execute("SELECT step,message FROM bot_steps WHERE update_id=? ORDER BY step", (update_id,)):
@@ -407,12 +413,40 @@ async def _send_widget(store, tg, uid, update_id, reply, show_plan, *, russian=T
     return "" if cap else reply
 
 
+def _task_receipt(store, uid, task, russian):
+    zone = store.get_settings(uid)["timezone"]
+    project = (projects.get(store, uid, task["project_id"])["name"] if task["project_id"]
+               else ("Личное" if russian else "Personal"))
+    def local(value):
+        fmt = "%d.%m.%Y, %H:%M" if russian else "%d %b %Y, %H:%M"
+        return datetime.fromisoformat(value).astimezone(ZoneInfo(zone)).strftime(fmt)
+    if task["report_state"]:
+        kind = "Алеф подготовит" if russian else "Aleph will prepare"
+        details = [f"{local(task['due_at'])} · {zone}"]
+    else:
+        kind = "Задача" if russian else "Task"
+        details = []
+        if task["due_at"]:
+            details.append(("Срок " if russian else "Due ") + local(task["due_at"]))
+        if task["remind_at"]:
+            details.append(("Напомню " if russian else "Reminder ") + local(task["remind_at"]))
+        if details:
+            details.append(zone)
+    details.append(("Проект «" + project + "»") if russian else ("Project: " + project))
+    return f"{kind} · {task['title']}\n" + " · ".join(details)
+
+
+def _report_failure(report, russian):
+    return (f"Не удалось подготовить «{report['title']}». Можно назначить новое время во вкладке «Задачи»."
+            if russian else f"I couldn’t finish “{report['title']}”. You can set a new time in Tasks.")
+
+
 async def _handle(row, store, inbox, tg, agent):
     uid, update_id = row["uid"], row["id"]
     original = json.loads(row["message"])
     ru = _uses_russian(original)
     scheduled = update_id < 0
-    report = reports.current(store, row) if scheduled else None
+    report = reports.current(store, row, allow_failed=True) if scheduled else None
     if scheduled and report is None:
         inbox.done(update_id)
         return
@@ -422,7 +456,10 @@ async def _handle(row, store, inbox, tg, agent):
             typing = asyncio.create_task(_typing(tg, uid))
             query = None
             try:
-                if report:
+                if report and report["report_state"] == "failed":
+                    reply = _report_failure(report, ru)
+                elif report:
+                    reports.start(store.db, report["id"])
                     reply = await agent.respond(store, uid, report["notes"], None, inbox, update_id, scheduled=True)
                 else:
                     query, reply = await _compose(row, store, inbox, tg, agent)
@@ -452,8 +489,7 @@ async def _handle(row, store, inbox, tg, agent):
                 if report:
                     if reports.current(store, row):
                         reports.fail(store.db, uid, update_id)
-                    reply = (f"Не удалось подготовить «{report['title']}». Можно назначить новое время во вкладке «Задачи»."
-                             if ru else f"I couldn’t finish “{report['title']}”. You can set a new time in Tasks.")
+                    reply = _report_failure(report, ru)
                 elif widgets.for_update(store, update_id):
                     reply = "Подготовил виджет." if ru else "Here’s the widget."
                 elif saved:
@@ -480,9 +516,13 @@ async def _handle(row, store, inbox, tg, agent):
                 typing.cancel()
                 with suppress(asyncio.CancelledError):
                     await typing
-            if scheduled and not reports.current(store, row):
+            if scheduled and not reports.current(store, row, allow_failed=True):
                 inbox.done(update_id)
                 return
+            if not scheduled:
+                tasks = inbox.created_tasks(uid, update_id)
+                if tasks:
+                    reply += "\n\n" + "\n\n".join(_task_receipt(store, uid, task, ru) for task in tasks)
             inbox.save_reply(row, query, reply)
         for artifact in inbox.db.execute("SELECT * FROM bot_documents WHERE update_id=? AND sent=0 ORDER BY rowid", (update_id,)).fetchall():
             try:
@@ -522,13 +562,37 @@ async def _handle(row, store, inbox, tg, agent):
                 inbox.db.execute("UPDATE bot_inbox SET sent_chunks=? WHERE id=?", (n+1, update_id))
             inbox.done(update_id)
             return
+        keyboard = []
+        if report:
+            state = store.get_task(uid, report["id"])["report_state"]
+            button = task_button(report["id"], ru, result=state != "failed")
+            if button:
+                keyboard.append([button])
+        else:
+            tasks = inbox.created_tasks(uid, update_id)
+            for task in tasks:
+                button = task_button(task["id"], ru, label=task["title"][:52] if len(tasks) > 1 else None)
+                if button:
+                    keyboard.append([button])
+            if show_plan and not os.getenv("MINI_APP_BRIDGE_URL", "").strip():
+                url = view_url()
+                if url:
+                    keyboard.append([{"text": "Открыть задачи" if ru else "Open tasks", "web_app": {"url": url}}])
+            if command.split(" ", 1)[0] == "/start" and chatgpt_owner(uid):
+                url = settings_url()
+                if url:
+                    keyboard.append([{"text": "Настройки" if ru else "Settings", "web_app": {"url": url}}])
+        markup = {"reply_markup": {"inline_keyboard": keyboard}} if keyboard else {}
+        if scheduled and not reports.current(store, row, allow_failed=True):
+            inbox.done(update_id)
+            return
         reply = await _send_widget(store, tg, uid, update_id, reply, show_plan, russian=ru)
         if (not show_plan and not row["sent_chunks"] and not row["article_fallback"]
                 and not widgets.for_update(store, update_id)):
             rich = articles.rich_content(reply)
             if rich:
                 try:
-                    await tg.call("sendRichMessage", chat_id=uid, rich_message=rich)
+                    await tg.call("sendRichMessage", chat_id=uid, rich_message=rich, **markup)
                 except TelegramError as error:
                     if error.code not in (400, 404, 405, 413):
                         raise
@@ -540,7 +604,7 @@ async def _handle(row, store, inbox, tg, agent):
         for n, chunk in enumerate(chunks(reply)):
             if n < row["sent_chunks"]:
                 continue
-            if scheduled and not reports.current(store, row):
+            if scheduled and not reports.current(store, row, allow_failed=True):
                 inbox.done(update_id)
                 return
             params = {"chat_id": uid, "text": chunk, "link_preview_options": {"is_disabled": True}}
@@ -548,11 +612,8 @@ async def _handle(row, store, inbox, tg, agent):
             if n == 0 and bridge_url and show_plan:
                 from .bridge import keyboard_markup
                 params["reply_markup"] = keyboard_markup(store, uid, bridge_url)
-            if n == 0 and command.split(" ", 1)[0] == "/start" and chatgpt_owner(uid):
-                url = settings_url()
-                if url:
-                    params["reply_markup"] = {"inline_keyboard": [[{"text": "Настройки" if ru else "Settings",
-                                                                     "web_app": {"url": url}}]]}
+            if n == 0:
+                params.update(markup)
             formatted = articles.basic_content(chunk)
             if formatted:
                 try:

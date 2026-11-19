@@ -8,9 +8,15 @@ def initialize(db):
     db.execute("""
         CREATE TABLE IF NOT EXISTS scheduled_reports (
             task_id INTEGER PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
-            state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','failed','sent'))
+            state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','failed','sent')),
+            started_at TEXT, result TEXT, delivered_at TEXT, revision INTEGER NOT NULL DEFAULT 0
         )
     """)
+    columns = {row["name"] for row in db.execute("PRAGMA table_info(scheduled_reports)")}
+    for column, kind in {"started_at": "TEXT", "result": "TEXT", "delivered_at": "TEXT",
+                         "revision": "INTEGER NOT NULL DEFAULT 0"}.items():
+        if column not in columns:
+            db.execute(f"ALTER TABLE scheduled_reports ADD COLUMN {column} {kind}")
 
 
 def schedule(store, uid, project_id, title, prompt, run_at, request_key, source=""):
@@ -61,7 +67,7 @@ def enqueue(db, now=None):
         INSERT OR IGNORE INTO bot_inbox(id,uid,message,project_id)
         SELECT -t.id, t.user_id,
             json_object('from',json_object('id',t.user_id,'language_code',u.language_code),
-                        'due_at',t.due_at,'notes',t.notes,'title',t.title), t.project_id
+                        'due_at',t.due_at,'notes',t.notes,'title',t.title,'revision',r.revision), t.project_id
         FROM tasks t JOIN scheduled_reports r ON r.task_id=t.id
         JOIN users u ON u.id=t.user_id
         WHERE t.status='open' AND r.state='pending' AND t.due_at<=?
@@ -71,30 +77,47 @@ def enqueue(db, now=None):
     """, (at, at))
 
 
-def current(store, row):
+def current(store, row, *, allow_failed=False):
     try:
         task = store.get_task(row["uid"], -row["id"])
     except KeyError:
         return None
     snapshot = json.loads(row["message"])
-    if (not task["report_state"] or task["report_state"] == "sent" or task["status"] != "open"
+    states = ("pending", "failed") if allow_failed else ("pending",)
+    if (task["report_state"] not in states or task["status"] != "open"
             or task["project_id"] != row["project_id"]
+            or task["report_revision"] != snapshot.get("revision", 0)
             or any(task[key] != snapshot.get(key) for key in ("due_at", "title", "notes"))):
         return None
     return task
 
 
+def start(db, task_id):
+    from .store import timestamp
+    db.execute("UPDATE scheduled_reports SET started_at=COALESCE(started_at,?) WHERE task_id=?",
+               (timestamp(), task_id))
+
+
 def fail(db, uid, update_id):
-    db.execute("""UPDATE scheduled_reports SET state='failed' WHERE task_id=? AND state='pending'
+    db.execute("""UPDATE scheduled_reports SET state='failed', started_at=NULL WHERE task_id=? AND state='pending'
         AND EXISTS (SELECT 1 FROM tasks WHERE id=task_id AND user_id=?)
     """, (-update_id, uid))
 
 
 def finish(store, row):
+    from .store import timestamp
     if not current(store, row):
         return
     db = store.db
-    if db.execute("UPDATE scheduled_reports SET state='sent' WHERE task_id=? AND state='pending'",
-                  (-row["id"],)).rowcount:
+    if db.execute("""UPDATE scheduled_reports SET state='sent', started_at=NULL, result=?, delivered_at=?
+        WHERE task_id=? AND state='pending'""", (row["reply"], timestamp(), -row["id"])).rowcount:
         store.update_task(row["uid"], -row["id"], {"status": "done"})
         store.add_history(row["uid"], "assistant", row["reply"], project_id=row["project_id"])
+
+
+def result(store, uid, task_id):
+    row = store.db.execute("""SELECT r.result AS text, r.delivered_at FROM scheduled_reports r
+        JOIN tasks t ON t.id=r.task_id WHERE t.id=? AND t.user_id=? AND r.state='sent'""", (task_id, uid)).fetchone()
+    if row is None:
+        raise KeyError("Результат не найден.")
+    return dict(row)

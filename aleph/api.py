@@ -17,7 +17,7 @@ from .chatgpt_auth import ChatGPTError
 from .chatgpt_pair import IMPORT_PATH, MAX_PACKET, owner as chatgpt_owner
 from .feeds import feed_catalog
 from .links import mini_app_url
-from . import connections, drive_picker, integrations, memory, models, projects, widgets
+from . import articles, connections, drive_picker, integrations, memory, models, projects, reports, widgets
 from .store import UTC
 
 
@@ -205,19 +205,30 @@ def install_api(app, store, token, model_key=None):
 
     async def create(request, user):
         fields = await body(request)
-        if fields.keys() - {"title", "notes", "due_at", "project_id", "remind_at"}:
+        if fields.keys() - {"title", "notes", "due_at", "project_id", "remind_at", "timezone"}:
             raise ValueError("Неизвестное поле задачи.")
         request_key = request.headers.get("Idempotency-Key", "")
         if request_key and not re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", request_key):
             raise ValueError("Проверь идентификатор запроса.")
-        reminder = {"remind_at": fields["remind_at"]} if "remind_at" in fields else {}
-        task = store.create_task(user["id"], fields.get("title"), fields.get("due_at"),
-                                 fields.get("notes", ""), "api:" + request_key if request_key else None,
-                                 project_id=fields.get("project_id", 0), **reminder)
+        uid = user["id"]
+        def save(values):
+            reminder = {"remind_at": values["remind_at"]} if "remind_at" in values else {}
+            return store.create_task(uid, values.get("title"), values.get("due_at"),
+                                     values.get("notes", ""), "api:" + request_key if request_key else None,
+                                     project_id=values.get("project_id", 0), **reminder)
+        task = store.save_task_timezone(uid, fields, save)
         return web.json_response(task, status=201)
 
     async def update(request, user):
-        return web.json_response(store.update_task(user["id"], int(request.match_info["id"]), await body(request)))
+        uid, task_id = user["id"], int(request.match_info["id"])
+        fields = await body(request)
+        return web.json_response(store.save_task_timezone(uid, fields,
+                                 lambda values: store.update_task(uid, task_id, values)))
+
+    async def result(request, user):
+        saved = reports.result(store, user["id"], int(request.match_info["id"]))
+        return web.json_response({"html": articles.MARKDOWN.render(saved["text"]) if saved["text"] else None,
+                                  "delivered_at": saved["delivered_at"]})
 
     async def settings(request, user):
         return web.json_response(store.patch_settings(user["id"], await body(request)))
@@ -341,6 +352,7 @@ def install_api(app, store, token, model_key=None):
 
     routes = [("GET", "/api/state", state), ("POST", "/api/tasks", create),
               ("PATCH", r"/api/tasks/{id:\d{1,18}}", update), ("PATCH", "/api/settings", settings),
+              ("GET", r"/api/tasks/{id:\d{1,18}}/result", result),
               ("GET", "/api/memory", memories), ("DELETE", r"/api/memory/{id:\d{1,18}}", forget_memory),
               ("POST", "/api/projects", create_project), ("PATCH", "/api/projects/active", choose_project),
               ("PATCH", r"/api/projects/{id:\d{1,18}}", update_project),

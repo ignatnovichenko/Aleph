@@ -41,6 +41,8 @@ export interface Task {
   remind_at?: string | null;
   source?: string;
   report_state?: "pending" | "failed" | "sent" | null;
+  report_started_at?: string | null;
+  report_has_result?: boolean | 0 | 1;
   project_id?: number;
 }
 
@@ -79,6 +81,7 @@ export interface Settings {
   daily_digest?: boolean;
   proactive: boolean;
   timezone: string;
+  timezone_confirmed?: boolean;
   quiet_start: string;
   quiet_end: string;
   digest_time?: string;

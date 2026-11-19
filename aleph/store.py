@@ -15,6 +15,10 @@ DEFAULT_REMINDER = object()
 REPLY_STYLES = ("short", "balanced", "detailed")
 SETTING_FLAGS = ("proactive", "daily_digest", "personal_memory")
 INSTRUCTIONS_LIMIT = 600
+TASK_REPORT_FIELDS = """(SELECT state FROM scheduled_reports WHERE task_id=tasks.id) AS report_state,
+    (SELECT started_at FROM scheduled_reports WHERE task_id=tasks.id) AS report_started_at,
+    (SELECT revision FROM scheduled_reports WHERE task_id=tasks.id) AS report_revision,
+    EXISTS(SELECT 1 FROM scheduled_reports WHERE task_id=tasks.id AND result IS NOT NULL) AS report_has_result"""
 
 
 def timestamp(dt=None):
@@ -118,6 +122,7 @@ class Store:
             "assistant_instructions": "TEXT NOT NULL DEFAULT ''",
             "personal_memory": "INTEGER NOT NULL DEFAULT 1",
             "daily_digest": "INTEGER NOT NULL DEFAULT 1",
+            "timezone_confirmed": "INTEGER NOT NULL DEFAULT 0",
         }.items():
             if name not in user_columns:
                 self.db.execute(f"ALTER TABLE users ADD COLUMN {name} {definition}")
@@ -162,11 +167,12 @@ class Store:
 
     def get_settings(self, uid):
         row = self.db.execute("""SELECT proactive,timezone,quiet_start,quiet_end,digest_time,theme,
-            reply_style,assistant_instructions,personal_memory,daily_digest
+            reply_style,assistant_instructions,personal_memory,daily_digest,timezone_confirmed
             FROM users WHERE id=?""", (uid,)).fetchone()
         if row is None:
             raise KeyError("Пользователь не найден.")
-        return {**dict(row), **{name: bool(row[name]) for name in SETTING_FLAGS}}
+        return {**dict(row), **{name: bool(row[name]) for name in SETTING_FLAGS},
+                "timezone_confirmed": bool(row["timezone_confirmed"] or row["timezone"] != "UTC")}
 
     def patch_settings(self, uid, fields):
         allowed = {*SETTING_FLAGS, "quiet_start", "quiet_end", "digest_time", "timezone",
@@ -195,6 +201,8 @@ class Store:
                     raise ValueError("Неизвестный часовой пояс.") from None
             elif not isinstance(value, str) or not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value):
                 raise ValueError("Укажи время в формате ЧЧ:ММ.")
+        if "timezone" in fields:
+            fields["timezone_confirmed"] = 1
         sql = ",".join(key + "=?" for key in fields)
         self.db.execute(f"UPDATE users SET {sql} WHERE id=?", (*fields.values(), uid))
         return self.get_settings(uid)
@@ -205,19 +213,34 @@ class Store:
         if project_id is not None:
             condition += " AND project_id=?"
             args += (project_id,)
-        rows = self.db.execute("""SELECT id,title,notes,due_at,status,created_at,updated_at,project_id,remind_at,source,
-            (SELECT state FROM scheduled_reports WHERE task_id=tasks.id) AS report_state
+        rows = self.db.execute(f"""SELECT id,title,notes,due_at,status,created_at,updated_at,project_id,remind_at,source,
+            {TASK_REPORT_FIELDS}
             FROM tasks WHERE user_id=?""" + condition + """
             ORDER BY status='done', due_at IS NULL, due_at, id DESC""", args)
         return [dict(row) for row in rows]
 
     def get_task(self, uid, task_id):
-        row = self.db.execute("""SELECT id,title,notes,due_at,status,created_at,updated_at,project_id,remind_at,source,
-            (SELECT state FROM scheduled_reports WHERE task_id=tasks.id) AS report_state
+        row = self.db.execute(f"""SELECT id,title,notes,due_at,status,created_at,updated_at,project_id,remind_at,source,
+            {TASK_REPORT_FIELDS}
             FROM tasks WHERE user_id=? AND id=?""", (uid, task_id)).fetchone()
         if row is None:
             raise KeyError("Задача не найдена.")
         return dict(row)
+
+    def save_task_timezone(self, uid, fields, save):
+        if "timezone" not in fields:
+            return save(fields)
+        fields = dict(fields)
+        zone = fields.pop("timezone")
+        self.db.execute("SAVEPOINT task_timezone")
+        try:
+            self.patch_settings(uid, {"timezone": zone})
+            return save(fields)
+        except BaseException:
+            self.db.execute("ROLLBACK TO task_timezone")
+            raise
+        finally:
+            self.db.execute("RELEASE task_timezone")
 
     def create_task(self, uid, title, due_at=None, notes="", request_key=None, *, project_id=0, remind_at=DEFAULT_REMINDER, source=""):
         projects.get(self, uid, project_id)
@@ -270,6 +293,11 @@ class Store:
                 raise ValueError("У поручения Алефу должно быть время запуска.")
             if fields.get("remind_at"):
                 raise ValueError("Для поручения Алефу укажи время запуска.")
+            if "due_at" in fields and fields["due_at"] != old["due_at"] and fields["due_at"] <= timestamp():
+                raise ValueError("Укажи будущее время запуска.")
+        report_changed = old["report_state"] in ("pending", "failed") and any(
+            key in fields and fields[key] != old[key] for key in ("status", "due_at", "title", "notes", "project_id")
+        )
         fields["updated_at"] = timestamp()
         sql = ",".join(key + "=?" for key in fields)
         self.db.execute("SAVEPOINT edit_task")
@@ -277,6 +305,9 @@ class Store:
             self.db.execute(f"UPDATE tasks SET {sql} WHERE id=? AND user_id=?", (*fields.values(), task_id, uid))
             if old["report_state"] == "failed" and fields.get("due_at", "") > timestamp():
                 self.db.execute("UPDATE scheduled_reports SET state='pending' WHERE task_id=?", (task_id,))
+            if report_changed:
+                self.db.execute("""UPDATE scheduled_reports SET started_at=NULL, revision=revision+1
+                    WHERE task_id=?""", (task_id,))
         except BaseException:
             self.db.execute("ROLLBACK TO edit_task")
             raise
