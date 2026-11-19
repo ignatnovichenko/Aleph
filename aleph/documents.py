@@ -153,14 +153,14 @@ def _calendar(events):
     if not isinstance(events, list) or not 1 <= len(events) <= 100:
         raise ValueError("В календарном файле должно быть от 1 до 100 событий.")
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Lab One//Aleph//EN", "CALSCALE:GREGORIAN"]
+    lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Aleph//Calendar//EN", "CALSCALE:GREGORIAN"]
     for i, event in enumerate(events):
         if not isinstance(event, dict):
             raise ValueError("Проверь поля события.")
         title = _limited_text(event.get("title"), 300)
         kind, start = _event_date(event.get("start"))
         uid = uuid.uuid5(uuid.NAMESPACE_URL, json.dumps([i, title, start]))
-        lines.extend(["BEGIN:VEVENT", f"UID:{uid}@aleph.labone", f"DTSTAMP:{stamp}", f"DTSTART{kind}{start}",
+        lines.extend(["BEGIN:VEVENT", f"UID:{uid}@aleph.invalid", f"DTSTAMP:{stamp}", f"DTSTART{kind}{start}",
                       "SUMMARY:" + ical_text(title)])
         if event.get("end"):
             end_kind, end = _event_date(event["end"])

@@ -113,7 +113,7 @@ export function demoState(ru: boolean): WorkspaceState {
       digest_time: "09:00",
     },
     active_project_id: 0,
-    projects: [{id:1,name:"Lab One",context:ru ? "Подготовить первый прототип и собрать отзывы команды." : "Prepare the first prototype and gather feedback from the team."}],
+    projects: [{id:1,name:ru ? "Пилот" : "Pilot",context:ru ? "Подготовить первый прототип и собрать отзывы команды." : "Prepare the first prototype and gather feedback from the team."}],
     tasks: texts.map((title, i) => ({
       id: i + 1,
       title,
@@ -210,7 +210,7 @@ export function demoCalendar(tasks: Task[]) {
       [
         "BEGIN:VCALENDAR",
         "VERSION:2.0",
-        "PRODID:-//Lab One//Aleph//EN",
+        "PRODID:-//Aleph//Calendar//EN",
         ...events,
         "END:VCALENDAR",
         "",

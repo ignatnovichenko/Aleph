@@ -12,7 +12,7 @@ class ProjectIsolation(unittest.IsolatedAsyncioTestCase):
         self.inbox = bot.Inbox(self.store)
         for uid in (10, 11):
             self.store.ensure_user(uid, "", "ru")
-        self.first = projects.create(self.store, 10, "Lab One", "Отвечай от лица редактора.")["id"]
+        self.first = projects.create(self.store, 10, "Пилот", "Отвечай от лица редактора.")["id"]
         self.second = projects.create(self.store, 10, "Дом")["id"]
 
     async def test_projects_scope_context_tools_and_history(self):

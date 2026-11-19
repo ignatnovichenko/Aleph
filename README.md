@@ -1,9 +1,9 @@
 # Aleph
 
-A personal Telegram agent by Lab One. The conversation lives in the bot. The Mini App is a separate plan and settings view, with Lab One’s Void and Paper themes, a glass tab bar and Russian and English interfaces. Hermes Agent runs the conversational tool loop.
+Aleph is a personal Telegram agent. The conversation lives in the bot. The Mini App is a separate plan and settings view, with Void and Paper themes, a glass tab bar and Russian and English interfaces. Hermes Agent runs the conversational tool loop.
 
 - Hermes can choose a Telegram HTML widget for a checklist, tabbed comparison or chart. Widgets render and respond to taps inside the message. Checklist marks are saved to the original widget. If Telegram rejects inline HTML, Aleph sends an interactive card with buttons in the chat and offers the same HTML widget through a signed Mini App view.
-- Create projects with their own instructions, reference text, conversation history, tasks, schedules and saved facts. The Mini App shows which project is active in chat. Use “создай проект Lab One”, “переключись на проект Lab One” or “выйди из проекта” in chat. You can paste notes or add a text file to the project context in the Mini App. Existing user history and tasks belong to the Personal workspace.
+- Create projects with their own instructions, reference text, conversation history, tasks, schedules and saved facts. The Mini App shows which project is active in chat. Use “создай проект Пилот”, “переключись на проект Пилот” or “выйди из проекта” in chat. You can paste notes or add a text file to the project context in the Mini App. Existing user history and tasks belong to the Personal workspace.
 - Send text, voice, a photo, a PDF or a text document. The model can act on tasks, follow up on a schedule, and send TXT, Markdown, CSV and calendar files back to the chat.
 - Ask it to remember a preference, recall it across conversations, or forget it. A recent conversation window and explicitly saved memories are stored separately.
 - Set a one-off reminder or a recurring routine in plain language. Weather, RSS and agenda routines fetch fresh data when they run. The morning brief appears when there is something to report. Disable proactive briefs or set quiet hours in the Mini App. Explicit one-off reminders follow their requested times.

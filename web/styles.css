@@ -36,7 +36,7 @@ h1, h2, h3, p { margin: 0; }
 }
 .page-head::before {
   content: ""; position: absolute; inset: 0 0 5px auto; width: min(61%, 275px); z-index: -1;
-  background: url("./labone-trace.webp") right center / contain no-repeat;
+  background: url("./header-trace.webp") right center / contain no-repeat;
   filter: invert(1); mix-blend-mode: multiply; opacity: .72; pointer-events: none;
   mask-image: radial-gradient(ellipse at 53% 53%, #000 20%, #000c 46%, transparent 72%);
 }

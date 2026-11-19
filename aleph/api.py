@@ -63,7 +63,7 @@ def fold_ical(line):
 
 
 def calendar_export(tasks, uid):
-    lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Lab One//Aleph//EN",
+    lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Aleph//Calendar//EN",
              "CALSCALE:GREGORIAN", "X-WR-CALNAME:Aleph"]
 
     def fmt(value):
@@ -73,7 +73,7 @@ def calendar_export(tasks, uid):
         if not task["due_at"] or task["status"] != "open":
             continue
         start = datetime.fromisoformat(task["due_at"])
-        lines.extend(["BEGIN:VEVENT", f"UID:{uid}-{task['id']}@aleph.labone",
+        lines.extend(["BEGIN:VEVENT", f"UID:{uid}-{task['id']}@aleph.invalid",
                       "DTSTAMP:" + fmt(datetime.fromisoformat(task["updated_at"])),
                       "DTSTART:" + fmt(start), "DURATION:PT15M",
                       "SUMMARY:" + ical_text(task["title"]), "DESCRIPTION:" + ical_text(task["notes"]),

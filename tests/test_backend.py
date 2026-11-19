@@ -70,7 +70,7 @@ class BackendAPI(unittest.IsolatedAsyncioTestCase):
     async def test_project_routes_and_ownership(self):
         owner, stranger = self.headers(1), self.headers(2)
         created = await self.client.post("/api/projects", headers=owner,
-                                         json={"name": "Lab One", "context": "Редактируем отчёт."})
+                                         json={"name": "Пилот", "context": "Редактируем отчёт."})
         self.assertEqual(created.status, 201)
         project_id = (await created.json())["id"]
         state = await (await self.client.get("/api/state", headers=owner)).json()
