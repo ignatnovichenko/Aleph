@@ -165,6 +165,33 @@ h1, h2, h3, p { margin: 0; }
 }
 .dock.is-tracking .dock-lens { scale: 1.035 1.055; }
 .dock.is-tracking .dock-lens::after { opacity: .6; transform: scale(1.02, 1.04); }
+
+:where([data-theme="dark"]) .dock-surface {
+  background-image: linear-gradient(165deg, #f5eee715, transparent 47%, #f5eee705);
+  box-shadow: inset 0 0 0 1px #eee8e42b, inset 0 -1px 2px #0009;
+}
+:where([data-theme="dark"]) .dock-surface::before {
+  background: linear-gradient(165deg, #fff8ed45, transparent 35% 67%, #eae3dc25);
+}
+:where([data-theme="dark"]) .dock-lens {
+  background:
+    radial-gradient(47% 89% at 13% 1%, #fffdf0bb, #fff9ee42 28%, transparent 84%),
+    radial-gradient(47% 89% at 87% 99%, #fffdf3c9, #fff9ef51 26%, transparent 84%),
+    linear-gradient(158deg, #f6f0ea13 0%, transparent 34% 48%, #f4eee91e),
+    #222122b8;
+  box-shadow: inset 0 0 0 1px #f2ebea23, inset 0 0 5px #07070855, 0 4px 10px -3px #000b;
+}
+:where([data-theme="dark"]) .dock-lens::before {
+  background:
+    radial-gradient(42% 115% at 15% 3%, #fff 0%, #fffdf1f0 22%, #f7f0e83b 54%, transparent 86%),
+    radial-gradient(42% 115% at 85% 97%, #fff 0%, #fffdf1f0 22%, #f7f0e83b 54%, transparent 86%);
+}
+:where([data-theme="dark"]) .dock-lens::after {
+  background:
+    radial-gradient(30% 57% at 14% 0%, #fff9ed91, transparent 80%),
+    radial-gradient(30% 57% at 86% 100%, #fff9edaa, transparent 80%);
+}
+
 .nav-item {
   position: relative; min-width: 0; min-height: 51px; border-radius: 27px;
   display: grid; place-items: center; align-content: center; gap: 3px; color: var(--dock-ink);

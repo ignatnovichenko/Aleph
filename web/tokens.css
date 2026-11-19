@@ -50,16 +50,10 @@
   --button: #f3eee6;
   --button-text: #161618;
   --critical: #ff907e;
-  --dock-bed: #24242194;
-  --dock-web: #252523e8;
+  --dock-bed: #151515c2;
+  --dock-web: #191818f2;
   --dock-ink: #b6b4ae;
-  --glass-bright: #f7f4e8a6;
-  --glass-highlight: #ebeee144;
   --glass-refract: #eff1de3b;
-  --glass-depth: #010103c4;
   --glass-drop: #000b;
-  --lens-body: #b1b7ad29;
-  --lens-highlight: #ecf0db57;
-  --lens-deep: #010200b0;
   --scrim: #0009;
 }
