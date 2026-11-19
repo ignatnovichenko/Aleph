@@ -37,11 +37,21 @@
   -webkit-font-smoothing: antialiased;
 }
 :root[data-white-theme] {
-  --bg: #ffffff;
-  --panel: #fafafa;
-  --paper: #fff;
-  --dock-bed: #ffffff9e;
-  --dock-web: #fffffff2;
+  --bg: #f6e7d5;
+  --panel: #fcf0e3;
+  --paper: #fff6eb;
+  --line: #59412d35;
+  --hair: #59412d23;
+  --wash: #6f4e3710;
+  --pressed: #8a5c3524;
+  --dock-bed: #f6e6d3b3;
+  --dock-web: #f2e0caed;
+  --glass-bright: #fff6e9ec;
+  --glass-highlight: #fff4e4b8;
+  --glass-refract: #fff1dc99;
+  --lens-body: #f9e8d150;
+  --lens-highlight: #fff1dfb0;
+  --lens-deep: #986d4b50;
 }
 :root[data-theme="dark"] {
   color-scheme: dark;

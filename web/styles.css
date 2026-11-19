@@ -149,7 +149,7 @@ h1, h2, h3, p { margin: 0; }
 }
 .dock-lens {
   top: var(--pad); bottom: var(--pad); left: var(--pad); width: calc((100% - 2 * var(--pad)) / 3);
-  border-radius: 27px; will-change: transform;
+  border-radius: 27px; will-change: transform; transition: scale 170ms var(--ease);
   background:
     radial-gradient(72% 90% at 1% -18%, var(--glass-bright), transparent 70%),
     radial-gradient(71% 96% at 97% 123%, var(--glass-bright), transparent 75%),
@@ -163,7 +163,8 @@ h1, h2, h3, p { margin: 0; }
     radial-gradient(87% 60% at 82% 105%, var(--lens-highlight), transparent 62%);
   opacity: .25; transition: opacity 160ms ease, transform 210ms var(--ease);
 }
-.dock.is-tracking .dock-lens::after { opacity: 1; transform: scale(1.05, 1.14); }
+.dock.is-tracking .dock-lens { scale: 1.035 1.055; }
+.dock.is-tracking .dock-lens::after { opacity: .6; transform: scale(1.02, 1.04); }
 .nav-item {
   position: relative; min-width: 0; min-height: 51px; border-radius: 27px;
   display: grid; place-items: center; align-content: center; gap: 3px; color: var(--dock-ink);

@@ -180,11 +180,11 @@ interface Swipe {
   index: number;
   startX: number;
   startY: number;
+  origin: {position: number; x: number} | undefined;
   x: number;
   time: number;
   velocity: number;
   frame: number;
-  locked: boolean;
 }
 
 let stage: HTMLElement | undefined;
@@ -193,7 +193,8 @@ let views: View[] = [];
 let sizeObserver: ResizeObserver | undefined;
 let trackWidth = 0, tabWidth = 0, suppressTap = false;
 let swipe: Swipe | undefined;
-let trackMotion: Animation | undefined, lensMotion: Animation | undefined;
+let navigationFrame = 0;
+let navigationPosition = 0;
 let closeTimer: number | undefined;
 let closeListener: ((event?: AnimationEvent) => void) | undefined;
 let focusTarget: string | null = null;
@@ -241,7 +242,7 @@ function mountShell() {
   });
   sizeObserver.observe(stage);
   sizeObserver.observe(dock);
-  showPage(activeView()?.index ?? 0, 0);
+  showPage(activeView()?.index ?? 0, false);
 }
 
 function render() {
@@ -263,33 +264,48 @@ function render() {
   syncBack();
 }
 
-const trackTransform = (position: number) => `translate3d(${-position * 100}%,0,0)`;
-const lensTransform = (position: number, speed = 0) =>
-  `translate3d(${position * 100}%,0,0) scale(${1 + speed * .1},${1 - speed * .1})`;
+function paintNavigation(position: number) {
+  navigationPosition = position;
+  const bounded = clamp(position, 0, views.length - 1);
+  track.style.transform = `translate3d(${-position * 100}%,0,0)`;
+  lens.style.transform = `translate3d(${(bounded + (position - bounded) * .35) * 100}%,0,0)`;
+}
 
-function showPage(index: number, duration: number) {
+function stopNavigation() {
+  cancelAnimationFrame(navigationFrame);
+  navigationFrame = 0;
+}
+
+function settleNavigation(index: number, velocity: number) {
+  const distance = navigationPosition - index;
+  const started = performance.now();
+  // A critically damped spring preserves release velocity and settles without oscillating.
+  const stiffness = 18;
+  const impulse = velocity + stiffness * distance;
+  const tick = (now: number) => {
+    const elapsed = (now - started) / 1000;
+    const decay = Math.exp(-stiffness * elapsed);
+    const offset = (distance + impulse * elapsed) * decay;
+    const speed = (velocity - stiffness * impulse * elapsed) * decay;
+    if (reducedMotion.matches || elapsed > .45 || (Math.abs(offset) < .002 && Math.abs(speed) < .04)) {
+      paintNavigation(index);
+      navigationFrame = 0;
+      return;
+    }
+    paintNavigation(clamp(index + offset, -.055, views.length - 1 + .055));
+    navigationFrame = requestAnimationFrame(tick);
+  };
+  navigationFrame = requestAnimationFrame(tick);
+}
+
+function showPage(index: number, animate = true, velocity = 0) {
   const previous = activeView();
   const current = views[index];
   if (!previous || !current) return;
-  const fromTrack = track.style.transform || trackTransform(previous.index);
-  const fromLens = lens.style.transform || lensTransform(previous.index);
-  trackMotion?.cancel();
-  lensMotion?.cancel();
+  stopNavigation();
   dock.classList.remove("is-tracking");
-  track.style.transform = trackTransform(index);
-  lens.style.transform = lensTransform(index);
-  if (duration && !reducedMotion.matches) {
-    if (fromTrack !== track.style.transform) {
-      trackMotion = track.animate([{transform: fromTrack}, {transform: track.style.transform}], {
-        duration, easing: "cubic-bezier(.2,.75,.25,1)",
-      });
-    }
-    if (fromLens !== lens.style.transform) {
-      lensMotion = lens.animate([{transform: fromLens}, {transform: lens.style.transform}], {
-        duration: Math.max(220, duration), easing: "cubic-bezier(.18,.8,.28,1.07)",
-      });
-    }
-  }
+  if (animate && !reducedMotion.matches && navigationPosition !== index) settleNavigation(index, velocity);
+  else paintNavigation(index);
   if (current !== previous) {
     const transferFocus = previous.panel.contains(document.activeElement);
     previous.panel.inert = true;
@@ -314,7 +330,7 @@ function navigate(id: string) {
     destination.panel.scrollTo({top: 0, behavior: reducedMotion.matches ? "auto" : "smooth"});
     return;
   }
-  showPage(destination.index, 240);
+  showPage(destination.index);
 }
 
 function resetSwipe() {
@@ -328,26 +344,26 @@ function resetSwipe() {
 
 function cancelSwipe() {
   if (!swipe) return;
-  const {index, locked} = swipe;
+  const {index, origin} = swipe;
   resetSwipe();
-  if (locked) showPage(index, 160);
+  if (origin) showPage(index);
 }
 
-// Let the browser own vertical gestures. A locked horizontal pan writes only
-// the two transform properties, with no layout reads or content rendering.
+function swipePosition(gesture: Swipe, x: number) {
+  const origin = gesture.origin;
+  if (!origin) return gesture.index;
+  return origin.position + (x - origin.x) / gesture.width * (gesture.onDock ? 1 : -1);
+}
+
 function drawSwipe() {
   const gesture = swipe;
   if (!gesture) return;
   gesture.frame = 0;
-  const {index, x, startX, onDock, width, velocity} = gesture;
-  const progress = index + (onDock ? x - startX : startX - x) / width;
-  const bounded = clamp(progress, 0, views.length - 1);
-  const overshoot = clamp((progress - bounded) * .16, -.055, .055);
-  if (!onDock && !reducedMotion.matches) track.style.transform = trackTransform(bounded + overshoot);
-  if (!reducedMotion.matches) {
-    const stretch = clamp(Math.abs(velocity) * .48 + Math.abs(overshoot) * 3 + .18, 0, 1);
-    lens.style.transform = lensTransform(bounded, stretch);
-  }
+  if (reducedMotion.matches) return;
+  const position = swipePosition(gesture, gesture.x);
+  const bounded = clamp(position, 0, views.length - 1);
+  const over = position - bounded;
+  paintNavigation(bounded + over * .11 / (1 + Math.abs(over) * 1.6));
 }
 
 function startSwipe(event: PointerEvent) {
@@ -365,7 +381,7 @@ function startSwipe(event: PointerEvent) {
   const current = activeView();
   if (!current) return;
   swipe = {pointerId: event.pointerId, onDock, width, index: current.index,
-    startX: event.clientX, startY: event.clientY, x: event.clientX, time: event.timeStamp, velocity: 0, frame: 0, locked: false};
+    startX: event.clientX, startY: event.clientY, x: event.clientX, time: event.timeStamp, velocity: 0, frame: 0, origin: undefined};
 }
 
 function claimHorizontalTouch(event: TouchEvent) {
@@ -375,22 +391,23 @@ function claimHorizontalTouch(event: TouchEvent) {
 function moveSwipe(event: PointerEvent) {
   const gesture = swipe;
   if (!gesture || gesture.pointerId !== event.pointerId) return;
-  if (!gesture.locked) {
-    const x = Math.abs(event.clientX - gesture.startX), y = Math.abs(event.clientY - gesture.startY);
+  if (!gesture.origin) {
+    const dx = event.clientX - gesture.startX;
+    const x = Math.abs(dx), y = Math.abs(event.clientY - gesture.startY);
     if (Math.max(x, y) < 9) return;
     if (y >= x || (y > 18 && x < 1.35 * y)) { resetSwipe(); return; }
     if (x < 1.35 * y) return;
-    gesture.locked = true;
+    gesture.origin = {position: navigationPosition, x: gesture.startX + Math.sign(dx) * 7};
     suppressTap = true;
-    trackMotion?.cancel();
-    lensMotion?.cancel();
-    dock.classList.add("is-tracking");
+    stopNavigation();
+    if (gesture.onDock) dock.classList.add("is-tracking");
     // WebViews can absorb the next tap after an uncancelled horizontal fling.
     app.addEventListener("touchmove", claimHorizontalTouch, {passive: false});
     try { app.setPointerCapture(event.pointerId); } catch {}
   }
-  const elapsed = Math.max(1, event.timeStamp - gesture.time);
-  gesture.velocity = (elapsed > 100 ? 0 : gesture.velocity * .30) + .70 * (event.clientX - gesture.x) / elapsed;
+  const elapsed = event.timeStamp - gesture.time;
+  const instantaneous = (event.clientX - gesture.x) / Math.max(8, elapsed);
+  gesture.velocity = elapsed > 100 ? 0 : gesture.velocity * .35 + instantaneous * .65;
   gesture.time = event.timeStamp;
   gesture.x = event.clientX;
   if (!gesture.frame) gesture.frame = requestAnimationFrame(drawSwipe);
@@ -399,23 +416,17 @@ function moveSwipe(event: PointerEvent) {
 function releaseSwipe(event: PointerEvent) {
   const gesture = swipe;
   if (!gesture || event.pointerId !== gesture.pointerId) return;
-  if (!gesture.locked) { resetSwipe(); return; }
-  const dx = event.clientX - gesture.startX;
-  const distance = gesture.onDock ? dx : -dx;
-  const velocity = event.timeStamp - gesture.time < 110 ? gesture.velocity : 0;
-  const flick = Math.abs(dx) >= 28 && Math.abs(velocity) > .48 && Math.sign(velocity) === Math.sign(dx);
-  const threshold = gesture.onDock ? gesture.width * .38 : Math.min(90, gesture.width * .28);
-  const offset = Math.abs(distance) < threshold && !flick ? 0 : Math.sign(distance) *
-    (gesture.onDock ? Math.max(1, Math.round(Math.abs(distance) / gesture.width)) : 1);
-  const index = clamp(gesture.index + offset, 0, views.length - 1);
-  if (gesture.frame) {
-    cancelAnimationFrame(gesture.frame);
-    gesture.x = event.clientX;
-    drawSwipe();
-  }
+  if (!gesture.origin) { resetSwipe(); return; }
+  const position = swipePosition(gesture, event.clientX);
+  const travel = Math.abs(event.clientX - gesture.startX);
+  const velocity = travel >= 18 && event.timeStamp - gesture.time < 90
+    ? clamp(gesture.velocity * 1000 / gesture.width * (gesture.onDock ? 1 : -1), -5.5, 5.5) : 0;
+  const projected = position + (gesture.onDock ? clamp(velocity * .07, -.22, .22) : velocity * .18);
+  const target = Math.round(projected + (gesture.onDock ? 0 : Math.sign(projected - gesture.index) * .11));
+  const index = gesture.onDock ? clamp(target, 0, views.length - 1)
+    : clamp(target, Math.max(0, gesture.index - 1), Math.min(views.length - 1, gesture.index + 1));
   resetSwipe();
-  const remaining = Math.abs(index - gesture.index - distance / gesture.width);
-  showPage(index, gesture.onDock ? 225 : clamp(150 + remaining * 90, 150, 245));
+  showPage(index, true, velocity);
 }
 
 app.addEventListener("pointerdown", startSwipe);
@@ -782,7 +793,7 @@ function replyStyleOptions(): [ReplyStyle, string][] {
   return [["short", t("Кратко", "Concise")], ["balanced", t("Стандартно", "Standard")], ["detailed", t("Подробно", "Detailed")]];
 }
 function themeOptions(): [ThemeMode, string][] {
-  return [["auto", t("Как в Telegram", "Match Telegram")], ["white", t("Белый", "White")], ["dark", t("Тёмный", "Dark")]];
+  return [["auto", t("Как в Telegram", "Match Telegram")], ["white", t("Светлый", "Light")], ["dark", t("Тёмный", "Dark")]];
 }
 function settingChoices<T extends string>(name: string, label: string, options: [T, string][], selected: T) {
   return `<fieldset class="setting-choices"><legend>${label}</legend>${options.map(([value, title]) =>
@@ -1499,14 +1510,14 @@ async function refresh() {
     !state ||
     sheet.open ||
     pending ||
-    loading || refreshRunning || swipe?.locked
+    loading || refreshRunning || swipe?.origin
   )
     return;
   const sequence = revision;
   refreshRunning = true;
   try {
     const fresh = await request("/api/state");
-    if (!pending && !sheet.open && !swipe?.locked && sequence === revision) {
+    if (!pending && !sheet.open && !swipe?.origin && sequence === revision) {
       const previouslyConnected = state.connections?.calendar;
       state = fresh;
       setTheme();
