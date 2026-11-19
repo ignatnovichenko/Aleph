@@ -78,7 +78,7 @@ def queue_messages(store, now):
             VALUES(?,?,'reminder',?,?,'',?) ON CONFLICT(key) DO UPDATE SET
             status='pending',available_at=excluded.available_at WHERE deliveries.status='cancelled'""", (key, task["user_id"], task["id"], task["due_at"], now_s))
 
-    users = db.execute("""SELECT * FROM users u WHERE proactive=1 AND COALESCE(blocked_until,'')<=?
+    users = db.execute("""SELECT * FROM users u WHERE proactive=1 AND daily_digest=1 AND COALESCE(blocked_until,'')<=?
             AND (EXISTS(SELECT 1 FROM tasks WHERE user_id=u.id AND status='open')
               OR EXISTS(SELECT 1 FROM feeds WHERE user_id=u.id))""", (now_s,)).fetchall()
     for user in users:
@@ -90,19 +90,21 @@ def queue_messages(store, now):
         if created.date() == local.date() and created.strftime("%H:%M") > user["digest_time"]:
             continue
         key = f"digest:{user['id']}:{local.date()}"
-        if db.execute("SELECT 1 FROM deliveries WHERE key=?", (key,)).fetchone():
+        if db.execute("SELECT 1 FROM deliveries WHERE key=? AND status<>'cancelled'", (key,)).fetchone():
             continue
         body = digest_body(store, user, local)
         if body:
-            db.execute("""INSERT OR IGNORE INTO deliveries(key,user_id,kind,body,available_at)
-                VALUES(?,?,'digest',?,?)""", (key, user["id"], body, now_s))
+            db.execute("""INSERT INTO deliveries(key,user_id,kind,body,available_at)
+                VALUES(?,?,'digest',?,?) ON CONFLICT(key) DO UPDATE SET
+                status='pending',body=excluded.body,available_at=excluded.available_at,attempts=0
+                WHERE deliveries.status='cancelled'""", (key, user["id"], body, now_s))
 
 
 def delivery_text(store, item, now):
     user = store.db.execute("SELECT * FROM users WHERE id=?", (item["user_id"],)).fetchone()
     if item["kind"] == "digest":
         local = now.astimezone(ZoneInfo(user["timezone"]))
-        if not user["proactive"] or not item["key"].endswith(":" + str(local.date())):
+        if not user["proactive"] or not user["daily_digest"] or not item["key"].endswith(":" + str(local.date())):
             return None
         clock = local.strftime("%H:%M")
         if clock < user["digest_time"] or quiet(clock, user["quiet_start"], user["quiet_end"]):

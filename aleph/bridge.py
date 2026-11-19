@@ -10,8 +10,10 @@ from . import projects
 
 def keyboard_markup(store, uid, base_url):
     who = store.get_user(uid)
+    settings = store.get_settings(uid)
+    settings.pop("assistant_instructions")
     state = {"user": {"first_name": who["first_name"], "language_code": who["language_code"]},
-             "settings": store.get_settings(uid), "feeds": store.list_feeds(uid),
+             "settings": settings, "feeds": store.list_feeds(uid),
              "feed_catalog": feed_catalog(), "integrations": {"rss": True, "calendar": True},
              "tasks": [], "feed_items": [], "routines": []}
     current = projects.active(store, uid)

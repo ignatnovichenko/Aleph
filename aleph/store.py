@@ -7,11 +7,14 @@ import sqlite3
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .feeds import CATALOG
-from . import capture, connections, projects, reports
+from . import capture, connections, memory, projects, reports
 from .routines import day_names
 
 UTC = timezone.utc
 DEFAULT_REMINDER = object()
+REPLY_STYLES = ("short", "balanced", "detailed")
+SETTING_FLAGS = ("proactive", "daily_digest", "personal_memory")
+INSTRUCTIONS_LIMIT = 600
 
 
 def timestamp(dt=None):
@@ -108,9 +111,18 @@ class Store:
         if "routine_id" not in {row["name"] for row in self.db.execute("PRAGMA table_info(deliveries)")}:
             self.db.execute("ALTER TABLE deliveries ADD COLUMN routine_id INTEGER REFERENCES routines(id)")
 
-        if "theme" not in {row["name"] for row in self.db.execute("PRAGMA table_info(users)")}:
-            self.db.execute("ALTER TABLE users ADD COLUMN theme TEXT NOT NULL DEFAULT 'auto' CHECK(theme IN ('auto','white','dark'))")
+        user_columns = {row["name"] for row in self.db.execute("PRAGMA table_info(users)")}
+        for name, definition in {
+            "theme": "TEXT NOT NULL DEFAULT 'auto' CHECK(theme IN ('auto','white','dark'))",
+            "reply_style": "TEXT NOT NULL DEFAULT 'balanced' CHECK(reply_style IN ('short','balanced','detailed'))",
+            "assistant_instructions": "TEXT NOT NULL DEFAULT ''",
+            "personal_memory": "INTEGER NOT NULL DEFAULT 1",
+            "daily_digest": "INTEGER NOT NULL DEFAULT 1",
+        }.items():
+            if name not in user_columns:
+                self.db.execute(f"ALTER TABLE users ADD COLUMN {name} {definition}")
 
+        memory.initialize(self.db)
         projects.initialize(self.db)
         connections.initialize(self.db)
         capture.initialize(self.db)
@@ -149,20 +161,28 @@ class Store:
         return dict(row)
 
     def get_settings(self, uid):
-        row = self.db.execute("""SELECT proactive,timezone,quiet_start,quiet_end,digest_time,theme
+        row = self.db.execute("""SELECT proactive,timezone,quiet_start,quiet_end,digest_time,theme,
+            reply_style,assistant_instructions,personal_memory,daily_digest
             FROM users WHERE id=?""", (uid,)).fetchone()
         if row is None:
             raise KeyError("Пользователь не найден.")
-        return {**dict(row), "proactive": bool(row["proactive"])}
+        return {**dict(row), **{name: bool(row[name]) for name in SETTING_FLAGS}}
 
     def patch_settings(self, uid, fields):
-        allowed = {"proactive", "quiet_start", "quiet_end", "digest_time", "timezone", "theme"}
+        allowed = {*SETTING_FLAGS, "quiet_start", "quiet_end", "digest_time", "timezone",
+                   "theme", "reply_style", "assistant_instructions"}
         if not fields or fields.keys() - allowed:
             raise ValueError("Неизвестная настройка.")
+        fields = dict(fields)
         for key, value in fields.items():
-            if key == "proactive":
+            if key in SETTING_FLAGS:
                 if type(value) is not bool:
-                    raise ValueError("proactive должен быть true или false.")
+                    raise ValueError("Для переключателя ожидается true или false.")
+            elif key == "reply_style":
+                if value not in REPLY_STYLES:
+                    raise ValueError("Выбери стиль ответов.")
+            elif key == "assistant_instructions":
+                fields[key] = bounded_text(value, INSTRUCTIONS_LIMIT)
             elif key == "theme":
                 if value not in ("auto", "white", "dark"):
                     raise ValueError("Выбери фон мини-приложения.")

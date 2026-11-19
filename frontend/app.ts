@@ -1,7 +1,7 @@
 import { icon } from "./icons.js";
 import type { IconName } from "./icons.js";
 import type { RequestOptions, WriteMethod, Writes } from "./store.js";
-import type { CalendarEvent, ChatGPTConnection, ChatGPTPairing, ProjectEntry, Service, ModelCatalog, ModelChoice, ModelProvider, Project, ProviderModel, Task, ThemeMode, WorkspaceState } from "./types.js";
+import type { CalendarEvent, ChatGPTConnection, ChatGPTPairing, ProjectEntry, ReplyStyle, SavedMemory, Service, ModelCatalog, ModelChoice, ModelProvider, Project, ProviderModel, Settings, Task, ThemeMode, WorkspaceState } from "./types.js";
 import {
   bridge,
   demo,
@@ -11,7 +11,6 @@ import {
   escapeHtml as e,
   localDateTime,
   zonedISO,
-  demoCalendar,
 } from "./store.js";
 
 type Page = "home" | "projects" | "settings";
@@ -25,9 +24,7 @@ function requiredElement<T extends HTMLElement>(scope: ParentNode, selector: str
 const app = requiredElement(document, "#app");
 const sheet = requiredElement<HTMLDialogElement>(document, "#sheet");
 const toastEl = requiredElement(document, "#toast");
-let calendarFile: File | undefined;
 let state: WorkspaceState;
-let previewTheme: ThemeMode | undefined;
 let page: Page = new URLSearchParams(location.search).get("view") === "settings" ? "settings" : "home";
 type PlanFilter = "today" | "upcoming" | "inbox" | "done";
 let filter: PlanFilter = "today";
@@ -81,7 +78,7 @@ function prefersDark() {
     ? tg.colorScheme === "dark"
     : matchMedia("(prefers-color-scheme: dark)").matches;
 }
-const themeMode = () => previewTheme ?? state?.settings.theme ?? "auto";
+const themeMode = () => state?.settings.theme ?? "auto";
 
 function setTheme() {
   const mode = themeMode();
@@ -478,14 +475,8 @@ function taskRow(task: Task, withProject = true) {
   return `<article class="task-row ${done ? "done" : ""}">${toggle}
   <button class="task-body" data-action="edit-task" data-id="${task.id}"><span class="task-title" dir="auto">${e(task.title)}</span><span class="task-meta">${withProject ? `<span class="task-project">${e(projectName(task.project_id))}</span>` : ""}${date}${reminder}${kind}</span></button><span class="arrow">${icon("arrow")}</span></article>`;
 }
-function switcher() {
-  return `<button class="switch" role="switch" aria-label="${t("Проактивность", "Proactive updates")}" aria-checked="${Boolean(state.settings.proactive)}" data-action="proactive"></button>`;
-}
 function glyph(symbol: IconName) {
   return `<span class="glyph">${icon(symbol)}</span>`;
-}
-function integrationRows() {
-  return `<button class="integration-row" data-action="calendar">${glyph("calendar")}<span><span class="integration-label">${t("Экспорт календаря", "Calendar export")}</span><small class="integration-info">${t("Поручения в формате .ics", "Tasks as an .ics file")}</small></span><span class="tail">${icon("download")}</span></button><button class="integration-row" data-action="feeds">${glyph("rss")}<span><span class="integration-label">RSS</span><small class="integration-info">${state.feeds.length ? t("Подключено", "Connected") + " · " + state.feeds.length : t("Добавить источник", "Add a source")}</small></span><span class="tail">${icon("arrow")}</span></button>`;
 }
 
 const services: Record<Service, {name:string; icon:IconName}> = {
@@ -499,11 +490,9 @@ function serviceRows() {
   if (!state.connections) return "";
   return (Object.keys(services) as Service[]).map(key => {
     const stateLabel = {connected:t("Подключён","Connected"), disconnected:t("Подключить","Connect"),
-      reconnect:t("Повторить вход","Reconnect"), unavailable:t("Требуется настройка сервера","Server setup required")};
+      reconnect:t("Повторить вход","Reconnect"), unavailable:t("Пока недоступен","Currently unavailable")};
     const info = services[key], status = state.connections?.[key] || "unavailable";
-    return `<button class="integration-row" data-action="service" data-id="${key}">${glyph(info.icon)}
-      <span><span class="integration-label">${info.name}</span><small class="integration-info">${stateLabel[status]}</small></span>
-      <span class="tail">${icon("arrow")}</span></button>`;
+    return settingRow(info.icon, info.name, stateLabel[status], "service", key);
   }).join("");
 }
 function serviceSheet(key: Service) {
@@ -544,7 +533,7 @@ function chatgptRow() {
     ? chatgpt.email || t("Аккаунт подключён", "Account connected")
     : chatgpt.needs_reauth ? t("Требуется повторный вход", "Sign in again")
       : t("Войти со своим аккаунтом", "Sign in with your account");
-  return `<button class="integration-row" data-action="chatgpt">${glyph("person")}<span><span class="integration-label">ChatGPT</span><small class="integration-info">${e(info)}</small></span><span class="tail">${icon("arrow")}</span></button>`;
+  return settingRow("person", t("Аккаунт ChatGPT", "ChatGPT account"), info, "chatgpt");
 }
 
 function chatgptSheet(pairing?: ChatGPTPairing) {
@@ -591,13 +580,13 @@ function modelSummary(choice: ModelChoice) {
   return `${providerName(choice.provider)} · ${choice.name} · ${reasoningName(choice.reasoning)}`;
 }
 
-function modelSettingsBlock() {
+function modelRow() {
   const active = state.model?.active;
   if (!active) return "";
-  return `<section class="settings-block"><h2 class="settings-title">${t("Ответы в чате", "Chat replies")}</h2>
-    <div class="panel"><button class="setting-row" data-action="model-settings"><span class="setting-copy">
-      <strong>${e(active.name)}</strong><span class="setting-detail">${e(providerName(active.provider) + " · " + reasoningName(active.reasoning))}</span></span>
-      <span class="tail">${icon("arrow")}</span></button></div></section>`;
+  const configurable = state.model_configurable ?? chatgpt?.available;
+  return settingRow("sparkle", t("Модель и рассуждения", "Model and reasoning"),
+    [active.name, providerName(active.provider), reasoningName(active.reasoning)].join(" · "),
+    configurable ? "model-settings" : undefined);
 }
 
 function reasoningFields(model: ProviderModel, selected = "") {
@@ -778,27 +767,96 @@ function routinesPanel() {
     .join("");
   return `<section class="settings-block routine-block"><h2 class="settings-title">${t("Регулярные поручения", "Recurring tasks")}</h2><div class="panel">${rows}<button class="add-line" data-action="chat">${icon("plane")}${t("Изменить в чате", "Manage in chat")}</button></div></section>`;
 }
-function themeSettings() {
-  const current = themeMode();
-  const options: [ThemeMode, string][] = [
-    ["auto", t("Как в Telegram", "Match Telegram")],
-    ["white", t("Белый", "White")],
-    ["dark", t("Тёмный", "Dark")],
-  ];
-  return `<section class="settings-block">
-    <h2 class="settings-title">${t("Оформление", "Appearance")}</h2>
-    <div class="plan-tabs theme-options" role="group" aria-label="${t("Фон", "Background")}">${
-      options.map(([mode,label]) => `<button type="button" data-action="theme" data-id="${mode}" aria-pressed="${mode === current}">${label}</button>`).join("")
-    }</div></section>`;
+function settingRow(symbol: IconName, label: string, detail?: string, action?: string, id?: string) {
+  const contents = `${glyph(symbol)}<span class="setting-copy"><strong>${e(label)}</strong>${
+    detail ? `<span class="setting-detail" dir="auto">${e(detail)}</span>` : ""
+  }</span>`;
+  return action
+    ? `<button class="setting-row" data-action="${action}"${id ? ` data-id="${e(id)}"` : ""}>${contents}<span class="tail">${icon("arrow")}</span></button>`
+    : `<div class="setting-row">${contents}</div>`;
+}
+function settingsGroup(title: string, rows: string) {
+  return `<section class="settings-block"><h2 class="settings-title">${title}</h2><div class="panel">${rows}</div></section>`;
+}
+function replyStyleOptions(): [ReplyStyle, string][] {
+  return [["short", t("Кратко", "Concise")], ["balanced", t("Стандартно", "Standard")], ["detailed", t("Подробно", "Detailed")]];
+}
+function themeOptions(): [ThemeMode, string][] {
+  return [["auto", t("Как в Telegram", "Match Telegram")], ["white", t("Белый", "White")], ["dark", t("Тёмный", "Dark")]];
+}
+function settingChoices<T extends string>(name: string, label: string, options: [T, string][], selected: T) {
+  return `<fieldset class="setting-choices"><legend>${label}</legend>${options.map(([value, title]) =>
+    `<label class="setting-choice"><input type="radio" name="${name}" value="${value}" ${value === selected ? "checked" : ""}>${title}</label>`).join("")}</fieldset>`;
+}
+function enabledLabel(on: boolean) {
+  return on ? t("Включено", "On") : t("Выключено", "Off");
 }
 function settingsPage() {
   const s = state.settings;
-  const detected = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  const row = (label: string, detail: string, val: string) =>
-    `<button class="setting-row" data-action="schedule"><span class="setting-copy"><strong>${label}</strong><span class="setting-detail">${detail}</span></span><span class="setting-value">${e(val)}${icon("arrow")}</span></button>`;
-  return `<div class="settings-grid">${modelSettingsBlock()}${themeSettings()}<section class="settings-block"><h2 class="settings-title">${t("Ритм дня", "Daily rhythm")}</h2><div class="panel"><div class="setting-row"><span><strong>${t("Проактивность", "Proactive updates")}</strong><span class="setting-detail">${t("Обзоры и инициативы в чате", "Briefings and check-ins in chat")}</span></span>${switcher()}</div>
-  ${row(t("Утренний обзор", "Morning brief"), t("Когда присылать план на день", "When to send your daily plan"), timeLabel(s.digest_time))}${row(t("Тихие часы", "Quiet hours"), t("Время для отдыха", "Your time to disconnect"), timeLabel(s.quiet_start) + " – " + timeLabel(s.quiet_end))}${row(t("Часовой пояс", "Time zone"), t("Для поручений и обзоров", "For tasks and briefings"), zone())}</div>${zone() === "UTC" && detected && detected !== "UTC" ? `<button class="small-action tz-suggest" data-action="detected-zone">${icon("globe")}${t("Использовать часовой пояс устройства", "Use device time zone")} · ${e(detected)}</button>` : ""}</section>
-  <section class="settings-block"><h2 class="settings-title">${t("Подключения", "Connections")}</h2><div class="panel">${serviceRows()}${integrationRows()}${chatgptRow()}</div><a class="privacy-link" href="./privacy.html" target="_blank" rel="noopener noreferrer">${t("Конфиденциальность", "Privacy")}</a></section></div>`;
+  const responseLabel = replyStyleOptions().find(([key]) => key === (s.reply_style ?? "balanced"))?.[1];
+  const themeLabel = themeOptions().find(([key]) => key === themeMode())?.[1];
+  const connections = serviceRows() + chatgptRow();
+  return `<div class="settings-grid">
+    ${settingsGroup(t("Ассистент", "Assistant"), modelRow() +
+      settingRow("edit", t("Персонализация ответов", "Personalize replies"), responseLabel, "reply-preferences") +
+      settingRow("bookmark", t("Личная память", "Personal memory"), enabledLabel(s.personal_memory !== false), "memory"))}
+    ${settingsGroup(t("Приложение", "App"), settingRow("sun", t("Оформление", "Appearance"), themeLabel, "appearance") +
+      settingRow("globe", t("Часовой пояс", "Time zone"), zone().replaceAll("_", " "), "timezone"))}
+    ${settingsGroup(t("Уведомления", "Notifications"),
+      settingRow("bell", t("Расписание уведомлений", "Notification schedule"),
+        s.proactive ? (s.daily_digest !== false ? t("Утренний обзор в", "Morning brief at") + " " + timeLabel(s.digest_time)
+          : t("Регулярные уведомления", "Recurring updates")) : t("Автоматические уведомления на паузе", "Automatic updates paused"), "notifications") +
+      settingRow("rss", t("Источники новостей", "News sources"),
+        state.feeds.length ? t("Подключено", "Connected") + " · " + state.feeds.length : t("Для утреннего обзора", "For your morning brief"), "feeds"))}
+    ${connections ? settingsGroup(t("Подключения", "Connections"), connections) : ""}
+    ${settingsGroup(t("Конфиденциальность", "Privacy"), settingRow("shield", t("Управление данными", "Manage data"),
+      t("Что хранится и как это удалить", "What is stored and how to delete it"), "privacy"))}
+  </div>`;
+}
+function appearanceSheet() {
+  openSheet(t("Оформление", "Appearance"), `<form id="appearance-form">
+    ${settingChoices("theme", t("Фон мини-приложения", "Mini App background"), themeOptions(), themeMode())}${submit()}</form>`);
+}
+function replyPreferencesSheet() {
+  openSheet(t("Персонализация ответов", "Personalize replies"), `<form id="reply-form">
+    ${settingChoices("reply_style", t("Длина ответа по умолчанию", "Default reply length"), replyStyleOptions(), state.settings.reply_style ?? "balanced")}
+    ${bridge() ? "" : `<label class="field">${t("Личные инструкции", "Custom instructions")}
+      <textarea name="assistant_instructions" dir="auto" rows="3" maxlength="600"
+        placeholder="${t("Например: обращайся на «ты» и приводи примеры.", "For example: keep it casual and give examples.")}">${e(state.settings.assistant_instructions)}</textarea></label>`}
+    ${submit()}</form>`);
+}
+function memoryList(items: SavedMemory[]) {
+  if (!items.length) return `<p class="sheet-desc">${t("Сохранённых фактов пока нет.", "No saved facts yet.")}</p>`;
+  return `<ul class="panel settings-memory-list">${items.map(item =>
+    `<li class="setting-row"><span dir="auto">${e(item.text)}</span><button class="icon-button" data-action="forget-memory" data-id="${item.id}"
+      aria-label="${e(t("Удалить факт", "Delete fact") + " «" + item.text + "»")}">${icon("trash")}</button></li>`).join("")}</ul>`;
+}
+async function memorySheet() {
+  const enabled = state.settings.personal_memory !== false;
+  openSheet(t("Личная память", "Personal memory"), `<div class="panel"><div class="setting-row">
+    <span class="setting-copy"><strong id="memory-switch-label">${t("Использовать личную память", "Use personal memory")}</strong>
+      <span class="setting-detail" id="memory-switch-detail">${t("Учитывать сохранённые факты и запоминать новые по твоей просьбе.", "Use saved facts and remember new ones when you ask.")}</span></span>
+    <button class="switch" role="switch" aria-labelledby="memory-switch-label" aria-describedby="memory-switch-detail" aria-checked="${enabled}" data-action="toggle-memory"></button></div></div>
+    ${bridge() ? ""
+      : `<div class="memory-records"><h3>${t("Сохранённые факты", "Saved facts")}</h3>
+        <div data-memory-list aria-live="polite"><p class="sheet-desc">${t("Загружаю…", "Loading…")}</p></div></div>`}`);
+  const list = sheet.querySelector("[data-memory-list]");
+  if (!list) return;
+  try {
+    const items = demo ? [] : await request("/api/memory");
+    if (list.isConnected) list.innerHTML = memoryList(items);
+  } catch (error) {
+    if (list.isConnected) list.innerHTML = `<p class="sheet-desc">${e(errorMessage(error))}</p>
+      <button class="button" data-action="memory">${t("Повторить", "Try again")}</button>`;
+  }
+}
+function privacySheet() {
+  openSheet(t("Управление данными", "Manage data"),
+    `<p class="sheet-desc">${t("Настройки, проекты и задачи привязаны к твоему аккаунту Telegram.", "Settings, projects and tasks are linked to your Telegram account.")}</p>
+    <p class="sheet-desc">${t("Чтобы удалить данные Алефа, напиши в личном чате «удали мои данные» и подтверди удаление.",
+      "To delete your Aleph data, send “delete my data” in your private chat and confirm.")}</p>
+    <div class="submit-row"><a class="button" href="./privacy.html" target="_blank" rel="noopener noreferrer">${t("Политика конфиденциальности", "Privacy policy")}</a>
+      <button class="button primary" data-action="chat">${t("Открыть чат", "Open chat")}</button></div>`);
 }
 function openSheet(title: string, html: string) {
   if (!sheet.open) {
@@ -899,49 +957,40 @@ function entrySheet() {
     <label class="field">${t("Тип","Type")}<select name="kind"><option value="decision">${t("Решение","Decision")}</option><option value="question">${t("Открытый вопрос","Open question")}</option><option value="material">${t("Материал","Material")}</option></select></label>
     <label class="field">${t("Текст или ссылка","Text or link")}<textarea name="text" maxlength="2000" required rows="4" dir="auto"></textarea></label>${submit()}</form>`);
 }
-function schedule() {
-  const s = state.settings,
-    current = zone(),
-    guessed = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  const zones = [
-    ...new Set(
-      [
-        current,
-        guessed,
-        "UTC",
-        ...(Intl.supportedValuesOf
-          ? Intl.supportedValuesOf("timeZone")
-          : [
-              "Europe/Moscow",
-              "Europe/London",
-              "Europe/Berlin",
-              "Asia/Yerevan",
-              "America/New_York",
-              "Asia/Tokyo",
-            ]),
-      ].filter(Boolean),
-    ),
-  ];
-  openSheet(
-    t("Расписание", "Schedule"),
-    `<form id="schedule-form">${([
-      ["digest_time", t("Утренний обзор", "Morning brief")],
-      ["quiet_start", t("Начало тихих часов", "Quiet hours start")],
-      ["quiet_end", t("Конец тихих часов", "Quiet hours end")],
-    ] as const).map(
-        ([k, l]) =>
-          `<label class="field">${l}<input type="time" required name="${k}" value="${e(timeLabel(s[k]))}"></label>`,
-      )
-      .join(
-        "",
-      )}<label class="field">${t("Часовой пояс", "Time zone")}<select name="timezone">${zones.map((z) => `<option value="${e(z)}" ${z === current ? "selected" : ""}>${e(z.replaceAll("_", " "))}</option>`).join("")}</select></label>${submit()}</form>`,
-  );
+function timezoneSheet() {
+  const current = zone();
+  const guessed = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const zones = [...new Set([current, "UTC", ...(guessed ? [guessed] : []),
+    ...(Intl.supportedValuesOf?.("timeZone") ?? ["Europe/Moscow", "Europe/London", "Europe/Berlin", "Asia/Yerevan", "America/New_York", "Asia/Tokyo"])])];
+  openSheet(t("Часовой пояс", "Time zone"), `<form id="timezone-form">
+    <p class="sheet-desc">${t("По этому времени Алеф присылает напоминания и выполняет запланированные задачи.", "Aleph uses this time zone for reminders and scheduled tasks.")}</p>
+    <label class="field">${t("Часовой пояс", "Time zone")}<select name="timezone">${zones.map(z =>
+      `<option value="${e(z)}" ${z === current ? "selected" : ""}>${e(z.replaceAll("_", " "))}${z === guessed ? " · " + t("На устройстве", "Device") : ""}</option>`).join("")}</select></label>${submit()}</form>`);
+}
+function notificationsSheet() {
+  const s = state.settings;
+  openSheet(t("Расписание уведомлений", "Notification schedule"), `<form id="notifications-form">
+    <div class="panel">
+      <label class="setting-row notification-option"><span class="setting-copy"><strong id="automatic-label">${t("Автоматические уведомления", "Automatic updates")}</strong>
+        <span class="setting-detail" id="automatic-detail">${t("Утренний обзор и регулярные сообщения в чате.", "Morning brief and recurring messages in chat.")}</span></span>
+        <input type="checkbox" name="proactive" aria-labelledby="automatic-label" aria-describedby="automatic-detail" ${s.proactive ? "checked" : ""}></label>
+      <label class="setting-row notification-option"><span class="setting-copy"><strong id="digest-label">${t("Утренний обзор", "Morning brief")}</strong>
+        <span class="setting-detail" id="digest-detail">${t("Открытые задачи и новости из выбранных источников.", "Open tasks and news from your chosen sources.")}</span></span>
+        <input type="checkbox" name="daily_digest" aria-labelledby="digest-label" aria-describedby="digest-detail" ${s.daily_digest !== false ? "checked" : ""}></label>
+    </div>
+    <label class="field">${t("Время утреннего обзора", "Morning brief time")}<input type="time" required name="digest_time" value="${e(timeLabel(s.digest_time))}"></label>
+    <fieldset class="setting-choices"><legend>${t("Тихие часы", "Quiet hours")}</legend><div class="quiet-hours">
+      <label class="field">${t("С", "From")}<input type="time" required name="quiet_start" value="${e(timeLabel(s.quiet_start))}"></label>
+      <label class="field">${t("До", "Until")}<input type="time" required name="quiet_end" value="${e(timeLabel(s.quiet_end))}"></label>
+    </div></fieldset>
+    <p class="sheet-desc">${t("Уведомления по расписанию учитывают тихие часы. Разовые напоминания приходят в указанное время.", "Automatic updates respect quiet hours. One-time reminders arrive at the time you set.")}</p>
+    ${submit()}</form>`);
 }
 function feedsSheet() {
   const catalog = state.feed_catalog || [],
     choices = catalog.filter((x) => !state.feeds.some((f) => f.url === x.url));
   openSheet(
-    t("Источники RSS", "RSS sources"),
+    t("Источники новостей", "News sources"),
     `<p class="sheet-desc">${t("Выбери источники для новостей в утреннем обзоре.", "Choose news sources for your morning brief.")}</p>${state.feeds.length ? `<div class="feed-items">${state.feeds.map((f) => `<div class="feed-item"><span>${e(f.title || f.url)}</span><button class="feed-remove" aria-label="${e(t("Отключить", "Disconnect") + " " + (f.title || f.url))}" data-action="remove-feed" data-id="${e(f.id)}">${icon("trash")}</button></div>`).join("")}</div>` : ""}${choices.length ? `<form id="feed-form"><label class="field">${t("Источник", "Source")}<select name="url">${choices.map((c) => `<option value="${e(c.url)}">${e(c.title)}</option>`).join("")}</select></label>${submit(bridge() ? t("Подключить и вернуться в чат", "Connect and return to chat") : t("Подключить", "Connect"))}</form>` : `<p class="settings-note">${t("Все доступные источники подключены.", "All available sources are connected.")}</p>`}`,
   );
 }
@@ -1037,42 +1086,10 @@ async function write<Path extends keyof Writes>(
       .forEach((x) => (x.disabled = false));
   }
 }
-async function exportCalendar() {
-  if (pending) return;
-  pending = true;
-  try {
-    const blob = demo
-      ? demoCalendar(state.tasks)
-      : await request("/api/calendar.ics");
-    if (bridge() && !(blob instanceof Blob)) return;
-    calendarFile = new File([blob], "aleph-calendar.ics", {
-      type: "text/calendar",
-    });
-    if (navigator.canShare?.({ files: [calendarFile] })) {
-      openSheet(
-        t("Календарь готов", "Calendar ready"),
-        `<p class="sheet-desc">${t("Открой файл в приложении календаря или сохрани копию.", "Open the file in your calendar or save a copy.")}</p><div class="submit-row"><button class="button" data-action="download-calendar">${t("Скачать", "Download")}</button><button class="button primary" data-action="share-calendar">${t("Поделиться", "Share")}</button></div>`,
-      );
-    } else downloadCalendar();
-  } catch (error) {
-    message(errorMessage(error));
-  } finally {
-    pending = false;
-  }
-}
-function downloadCalendar() {
-  if (!calendarFile) return;
-  const url = URL.createObjectURL(calendarFile),
-    link = document.createElement("a");
-  link.href = url;
-  link.download = "aleph-calendar.ics";
-  link.hidden = true;
-  document.body.append(link);
-  link.click();
-  link.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 60000);
-  if (sheet.open) closeSheet();
-  message(t("Календарь подготовлен", "Calendar prepared"));
+function saveSettings(fields: Partial<Settings>, success = t("Настройки сохранены", "Settings saved")) {
+  return write("/api/settings", "PATCH", fields, result => {
+    Object.assign(state.settings, result ?? fields);
+  }, success);
 }
 async function act(action: string, id?: string) {
   if (pending) return;
@@ -1148,35 +1165,37 @@ async function act(action: string, id?: string) {
     case "edit-task":
       if (byId(id)) taskSheet(byId(id));
       break;
-    case "theme": {
-      if ((id !== "auto" && id !== "white" && id !== "dark") || id === themeMode()) break;
-      previewTheme = id;
-      setTheme();
-      render();
-      const saved = await write("/api/settings", "PATCH", {theme: id}, settings => {
-        state.settings.theme = settings?.theme ?? id;
-      }, "");
-      if (saved && bridge()) state.settings.theme = id;
-      previewTheme = undefined;
-      setTheme();
-      render();
+    case "appearance":
+      appearanceSheet();
+      break;
+    case "reply-preferences":
+      replyPreferencesSheet();
+      break;
+    case "memory":
+      await memorySheet();
+      break;
+    case "toggle-memory": {
+      const personal_memory = state.settings.personal_memory === false;
+      if (await saveSettings({personal_memory}, "")) {
+        sheet.querySelector('[data-action="toggle-memory"]')?.setAttribute("aria-checked", String(personal_memory));
+      }
       break;
     }
-    case "schedule":
-      schedule();
-      break;
-    case "detected-zone": {
-      const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-      if (timezone)
-        await write(
-          "/api/settings",
-          "PATCH",
-          { timezone },
-          settings => Object.assign(state.settings,settings || {timezone}),
-          t("Часовой пояс обновлён", "Time zone updated"),
-        );
+    case "forget-memory": {
+      const memoryId = Number(id);
+      if (!Number.isSafeInteger(memoryId) || memoryId <= 0 || !window.confirm(t("Удалить этот факт из памяти?", "Remove this saved fact?"))) break;
+      if (await write(`/api/memory/${memoryId}`, "DELETE", undefined, () => {}, t("Факт удалён", "Fact deleted"))) await memorySheet();
       break;
     }
+    case "timezone":
+      timezoneSheet();
+      break;
+    case "notifications":
+      notificationsSheet();
+      break;
+    case "privacy":
+      privacySheet();
+      break;
     case "feeds":
       feedsSheet();
       break;
@@ -1217,22 +1236,6 @@ async function act(action: string, id?: string) {
           : t("ChatGPT отключён в Алефе", "ChatGPT disconnected from Aleph"));
       }, "");
       break;
-    case "calendar":
-      await exportCalendar();
-      break;
-    case "share-calendar":
-      if (!calendarFile) break;
-      try {
-        await navigator.share({ files: [calendarFile], title: "Aleph" });
-        closeSheet();
-      } catch (error) {
-        if (!(error instanceof Error && error.name === "AbortError"))
-          message(t("Используй кнопку «Скачать»", "Use the Download button"));
-      }
-      break;
-    case "download-calendar":
-      downloadCalendar();
-      break;
     case "toggle-task":
     case "undo-task": {
       const item = byId(action === "undo-task" ? String(undoTask) : id);
@@ -1259,22 +1262,6 @@ async function act(action: string, id?: string) {
         button.dataset.action = "undo-task";
         toastEl.append(button);
       } else undoTask = undefined;
-      break;
-    }
-    case "proactive": {
-      const proactive = !state.settings.proactive;
-      const control=app.querySelector('[data-action="proactive"]');
-      control?.setAttribute("aria-checked",String(proactive));
-      const saved=await write(
-        "/api/settings",
-        "PATCH",
-        { proactive },
-        settings => Object.assign(state.settings,settings || {proactive}),
-        proactive
-          ? t("Проактивность включена", "Proactive updates on")
-          : t("Проактивность на паузе", "Proactive updates paused"),
-      );
-      if(!saved)control?.setAttribute("aria-checked",String(state.settings.proactive));
       break;
     }
     case "remove-feed": {
@@ -1412,20 +1399,24 @@ sheet.addEventListener("submit", async (event) => {
       }, (result) => {
         if (result) state.model = result;
       }, t("Настройки модели сохранены", "Model settings saved"));
-    } else if (form.id === "schedule-form") {
-      const schedule = {
+    } else if (form.id === "appearance-form") {
+      const theme = field("theme") as ThemeMode;
+      ok = await saveSettings({theme});
+      if (ok) setTheme();
+    } else if (form.id === "reply-form") {
+      const fields: Partial<Settings> = {reply_style: field("reply_style") as ReplyStyle};
+      if (data.has("assistant_instructions")) fields.assistant_instructions = field("assistant_instructions");
+      ok = await saveSettings(fields);
+    } else if (form.id === "timezone-form") {
+      ok = await saveSettings({timezone: field("timezone")});
+    } else if (form.id === "notifications-form") {
+      ok = await saveSettings({
+        proactive: data.has("proactive"),
+        daily_digest: data.has("daily_digest"),
         digest_time: field("digest_time"),
         quiet_start: field("quiet_start"),
         quiet_end: field("quiet_end"),
-        timezone: field("timezone"),
-      };
-      ok = await write(
-        "/api/settings",
-        "PATCH",
-        schedule,
-        settings => Object.assign(state.settings, settings ?? schedule),
-        t("Расписание обновлено", "Schedule updated"),
-      );
+      });
     } else if (form.id === "feed-form") {
       const url = field("url");
       const catalogEntry = state.feed_catalog.find((source) => source.url === url);

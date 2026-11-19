@@ -1,5 +1,5 @@
 import { bridge, bridgeRequest } from "./bridge.js";
-import type { CalendarEvent, ChatGPTConnection, ChatGPTPairing, Connections, Service, ProjectEntry, Feed, ModelCatalog, ModelSummary, Project, Settings, Task, WidgetState, WorkspaceState } from "./types.js";
+import type { CalendarEvent, ChatGPTConnection, ChatGPTPairing, Connections, Service, ProjectEntry, Feed, ModelCatalog, ModelSummary, Project, SavedMemory, Settings, Task, WidgetState, WorkspaceState } from "./types.js";
 
 export { bridge };
 
@@ -8,6 +8,7 @@ type Reads = {
   "/api/calendar.ics": Blob;
   "/api/chatgpt": ChatGPTConnection;
   "/api/models": ModelCatalog;
+  "/api/memory": SavedMemory[];
   [path: `/api/connections/calendar/events?${string}`]: {events: CalendarEvent[]; more: boolean};
   [path: `/api/projects/${number}/entries`]: ProjectEntry[];
   [path: `/api/widgets/${string}`]: WidgetState & { html: string };
@@ -28,6 +29,7 @@ export type Writes = {
   [path: `/api/projects/${number}/entries`]: ProjectEntry;
   [path: `/api/projects/${number}/entries/${number}`]: null;
   [path: `/api/feeds/${string}`]: null;
+  [path: `/api/memory/${number}`]: null;
   [path: `/api/widgets/${string}`]: WidgetState;
 } & { [path in `/api/connections/${Service}/start`]: {url: string} }
   & { [path in `/api/connections/${Service}`]: Connections };

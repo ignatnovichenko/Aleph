@@ -69,14 +69,24 @@ export interface ProjectEntry {
 }
 
 export type ThemeMode = "auto" | "white" | "dark";
+export type ReplyStyle = "short" | "balanced" | "detailed";
 
 export interface Settings {
   theme?: ThemeMode;
+  reply_style?: ReplyStyle;
+  assistant_instructions?: string;
+  personal_memory?: boolean;
+  daily_digest?: boolean;
   proactive: boolean;
   timezone: string;
   quiet_start: string;
   quiet_end: string;
   digest_time?: string;
+}
+
+export interface SavedMemory {
+  id: number;
+  text: string;
 }
 
 export interface FeedSource {
@@ -107,6 +117,7 @@ export interface WorkspaceState {
   snapshot_total?: number;
   integrations?: { rss: boolean; calendar: boolean };
   model?: ModelSummary;
+  model_configurable?: boolean;
   connections?: Connections;
 }
 

@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, patch
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from aleph import chatgpt, chatgpt_auth
+from aleph import chatgpt, chatgpt_auth, memory, projects
 from aleph.api import install_api, signed_user
 from aleph.chatgpt_pair import encrypt_for_vm
 from aleph.feeds import CATALOG, parse_feed
@@ -56,6 +56,39 @@ class BackendAPI(unittest.IsolatedAsyncioTestCase):
         fresh = await (await self.client.get("/api/state", headers=self.headers(2))).json()
         self.assertEqual(fresh["settings"]["theme"], "auto")
         self.assertEqual(self.store.get_settings(1)["theme"], "dark")
+
+    async def test_personalization_controls_the_next_model_turn_and_memory_is_private(self):
+        from aleph.llm import Aleph
+
+        owner = self.headers()
+        await self.client.get("/api/state", headers=owner)
+        saved = memory.remember(self.store.db, 1, "Uses purple labels")
+        project = projects.create(self.store, 1, "Work")
+        projects.remember(self.store, 1, project["id"], "Project launch on Friday")
+        patch = {"reply_style": "short", "assistant_instructions": "Address me as Captain.", "personal_memory": False}
+        self.assertEqual((await self.client.patch("/api/settings", headers=owner, json=patch)).status, 200)
+        invalid = await self.client.patch("/api/settings", headers=owner, json={"personal_memory": "true", "reply_style": "detailed"})
+        self.assertEqual(invalid.status, 400)
+        agent = Aleph(None, "")
+        messages, _ = agent.turn_context(self.store, 1, "Hello", None, 0)
+        self.assertIn("Keep replies short", messages[0]["content"])
+        self.assertIn("Address me as Captain.", messages[0]["content"])
+        self.assertNotIn("Uses purple labels", str(messages))
+        with self.assertRaises(ValueError):
+            await agent.use_tool(self.store, 1, "remember_fact", {"text": "New fact"}, "test")
+        project_messages, _ = agent.turn_context(self.store, 1, "Hello", None, project["id"])
+        self.assertIn("Project launch on Friday", str(project_messages))
+        self.assertNotIn("Uses purple labels", str(project_messages))
+
+        self.assertEqual((await self.client.get("/api/memory")).status, 401)
+        own_facts = await (await self.client.get("/api/memory", headers=owner)).json()
+        self.assertEqual(own_facts, [saved])
+        other_facts = await (await self.client.get("/api/memory", headers=self.headers(2))).json()
+        self.assertEqual(other_facts, [])
+        path = f"/api/memory/{saved['id']}"
+        self.assertEqual((await self.client.delete(path, headers=self.headers(2))).status, 404)
+        self.assertEqual((await self.client.delete(path, headers=owner)).status, 204)
+        self.assertEqual(memory.list_memories(self.store.db, 1), [])
 
     async def test_signed_scope_mutations_export(self):
         self.assertEqual((await self.client.get("/api/state")).status, 401)
@@ -248,6 +281,24 @@ class Routines(unittest.IsolatedAsyncioTestCase):
         self.store.ensure_user(302, "Bob", "en")
         self.store.patch_settings(301, {"timezone":"Europe/Moscow"})
         self.addCleanup(lambda: self.store.close())
+
+    async def test_morning_brief_can_be_paused_after_queueing_without_pausing_other_deliveries(self):
+        store = self.store
+        morning = datetime(2030, 1, 7, 6, 0, tzinfo=UTC)
+        store.create_task(301, "Morning call", due_at=timestamp(morning))
+        store.create_routine(301, "Stretch break", "reminder", "09:00")
+        queue_messages(store, morning)
+        store.patch_settings(301, {"daily_digest": False})
+        output = OkSession()
+        for _ in range(3):
+            await deliver(store, output, TEST_TOKEN, now=morning)
+        self.assertEqual(len(output.messages), 2)
+        self.assertFalse(any("Вот твой обзор" in msg["text"] for msg in output.messages))
+        store.patch_settings(301, {"daily_digest": True})
+        queue_messages(store, morning + timedelta(minutes=1))
+        await deliver(store, output, TEST_TOKEN, now=morning + timedelta(minutes=1))
+        self.assertEqual(len(output.messages), 3)
+        self.assertIn("Вот твой обзор", output.messages[-1]["text"])
 
     async def test_weather_weekday_local_time_fresh_and_restart(self):
         s = self.store

@@ -15,7 +15,7 @@ from .hermes import create_agent
 from .links import settings_url
 from . import models, projects
 from .llm import ChatGPTUnavailable, ModelRejectsPhoto, ModelUnavailable, RegionUnavailable
-from . import articles, capture, integrations, media, memory, documents, reminders, reports, widgets
+from . import articles, capture, integrations, media, documents, reminders, reports, widgets
 
 log = logging.getLogger(__name__)
 PLAN_ALIASES = {"/plan", "/tasks", "открой задачи", "открыть задачи", "open tasks", "открой план", "открыть план", "открой мини-апп", "open plan", "open mini app"}
@@ -90,7 +90,6 @@ class Inbox:
     def __init__(self, store):
         self.store = store
         self.db = store.db
-        memory.initialize(self.db)
         self.db.executescript("""
             CREATE TABLE IF NOT EXISTS bot_inbox (
               id INTEGER PRIMARY KEY, uid INTEGER NOT NULL, message TEXT NOT NULL, reply TEXT,

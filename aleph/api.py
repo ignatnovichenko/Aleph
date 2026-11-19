@@ -17,7 +17,7 @@ from .chatgpt_auth import ChatGPTError
 from .chatgpt_pair import IMPORT_PATH, MAX_PACKET, owner as chatgpt_owner
 from .feeds import feed_catalog
 from .links import mini_app_url
-from . import connections, drive_picker, integrations, models, projects, widgets
+from . import connections, drive_picker, integrations, memory, models, projects, widgets
 from .store import UTC
 
 
@@ -133,8 +133,8 @@ def install_api(app, store, token, model_key=None):
                                   "routines": store.list_routines(uid), "settings": store.get_settings(uid), "integrations": {"rss": True, "calendar": True},
                                   "feeds": store.list_feeds(uid), "feed_catalog": feed_catalog(),
                                   "feed_items": store.feed_items(uid), "connections": connections.statuses(store, uid)}
-        if chatgpt_owner(uid):
-            result["model"] = models.describe(store, uid, catalogs.opencode_model)
+        result["model"] = models.describe(store, uid, catalogs.opencode_model)
+        result["model_configurable"] = chatgpt_owner(uid)
         return web.json_response(result)
 
     async def connection(request, user):
@@ -221,6 +221,13 @@ def install_api(app, store, token, model_key=None):
 
     async def settings(request, user):
         return web.json_response(store.patch_settings(user["id"], await body(request)))
+
+    async def memories(request, user):
+        return web.json_response(memory.list_memories(store.db, user["id"]))
+
+    async def forget_memory(request, user):
+        memory.forget(store.db, user["id"], int(request.match_info["id"]))
+        return web.Response(status=204)
 
     async def calendar(request, user):
         data = calendar_export(store.list_tasks(user["id"], include_done=False), user["id"])
@@ -334,6 +341,7 @@ def install_api(app, store, token, model_key=None):
 
     routes = [("GET", "/api/state", state), ("POST", "/api/tasks", create),
               ("PATCH", r"/api/tasks/{id:\d{1,18}}", update), ("PATCH", "/api/settings", settings),
+              ("GET", "/api/memory", memories), ("DELETE", r"/api/memory/{id:\d{1,18}}", forget_memory),
               ("POST", "/api/projects", create_project), ("PATCH", "/api/projects/active", choose_project),
               ("PATCH", r"/api/projects/{id:\d{1,18}}", update_project),
               ("GET", "/api/calendar.ics", calendar), ("GET", "/api/feeds", list_feeds),
