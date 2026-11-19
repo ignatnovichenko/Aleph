@@ -1,30 +1,30 @@
 /* Paper and Void, with glass reserved for navigation. */
 :root {
   color-scheme: light;
-  --bg: #f5f2eb;
-  --panel: #fbf9f4;
-  --paper: #fffdf8;
+  --bg: #f6e7d5;
+  --panel: #fcf0e3;
+  --paper: #fff6eb;
   --text: #292520;
   --hint: #696259;
-  --line: #1919192a;
-  --hair: #19191915;
-  --wash: #19191906;
-  --pressed: #19191913;
+  --line: #59412d35;
+  --hair: #59412d23;
+  --wash: #6f4e3710;
+  --pressed: #8a5c3524;
   --button: #161618;
   --button-text: #f3eee6;
   --signal: #a24231;
   --critical: #9d3021;
-  --dock-bed: #f7f2e781;
-  --dock-web: #efefe8e8;
+  --dock-bed: #f6e6d3b3;
+  --dock-web: #f2e0caed;
   --dock-ink: #51514c;
-  --glass-bright: #ffffffec;
-  --glass-highlight: #ffffffa8;
-  --glass-refract: #fcfff494;
+  --glass-bright: #fff6e9ec;
+  --glass-highlight: #fff4e4b8;
+  --glass-refract: #fff1dc99;
   --glass-depth: #77664c38;
   --glass-drop: #3a32263a;
-  --lens-body: #f7faeb30;
-  --lens-highlight: #fff9;
-  --lens-deep: #62685b63;
+  --lens-body: #f9e8d150;
+  --lens-highlight: #fff1dfb0;
+  --lens-deep: #986d4b50;
   --scrim: #10110e6b;
   --ease: cubic-bezier(.16,1,.3,1);
   --safe-bottom: max(env(safe-area-inset-bottom), var(--tg-content-safe-area-inset-bottom, 0px), var(--tg-safe-area-inset-bottom, 0px));
@@ -35,23 +35,6 @@
   font-family: var(--voice);
   font-weight: 350;
   -webkit-font-smoothing: antialiased;
-}
-:root[data-white-theme] {
-  --bg: #f6e7d5;
-  --panel: #fcf0e3;
-  --paper: #fff6eb;
-  --line: #59412d35;
-  --hair: #59412d23;
-  --wash: #6f4e3710;
-  --pressed: #8a5c3524;
-  --dock-bed: #f6e6d3b3;
-  --dock-web: #f2e0caed;
-  --glass-bright: #fff6e9ec;
-  --glass-highlight: #fff4e4b8;
-  --glass-refract: #fff1dc99;
-  --lens-body: #f9e8d150;
-  --lens-highlight: #fff1dfb0;
-  --lens-deep: #986d4b50;
 }
 :root[data-theme="dark"] {
   color-scheme: dark;

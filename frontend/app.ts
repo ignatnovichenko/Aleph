@@ -86,7 +86,6 @@ function setTheme() {
   const root = document.documentElement;
   const tg = webapp();
   root.dataset.theme = dark ? "dark" : "light";
-  root.toggleAttribute("data-white-theme", mode === "white");
   const bg = getComputedStyle(root).getPropertyValue("--bg").trim();
   const meta = document.querySelector<HTMLMetaElement>("meta[name=theme-color]");
   if (meta) meta.content = bg;
