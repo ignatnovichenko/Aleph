@@ -1,5 +1,6 @@
 """Project context lives with Aleph's user-scoped data, outside Hermes."""
 import re
+import time
 import unicodedata
 
 
@@ -30,6 +31,13 @@ def initialize(db):
           UNIQUE(user_id,request_key)
         );
         CREATE INDEX IF NOT EXISTS project_entries_scope ON project_entries(user_id,project_id,id);
+        CREATE TABLE IF NOT EXISTS workspace_notices (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+          project_id INTEGER NOT NULL,
+          available REAL NOT NULL,
+          expires REAL NOT NULL
+        );
     """)
     for table, column in (("users", "active_project_id"), ("tasks", "project_id"),
                           ("history", "project_id"), ("routines", "project_id")):
@@ -62,6 +70,46 @@ def choose(store, uid, project_id):
     chosen = get(store, uid, project_id)
     store.db.execute("UPDATE users SET active_project_id=? WHERE id=?", (project_id, uid))
     return chosen
+
+
+def enter(store, uid, project_id):
+    """Switch the chat from the Mini App and queue the confirmation together."""
+    chosen = get(store, uid, project_id)
+    db = store.db
+    db.execute("SAVEPOINT enter_workspace")
+    try:
+        changed = db.execute("UPDATE users SET active_project_id=? WHERE id=? AND active_project_id<>?",
+                             (project_id, uid, project_id)).rowcount
+        if changed:
+            now = time.time()
+            db.execute("""INSERT OR REPLACE INTO workspace_notices(user_id,project_id,available,expires)
+                VALUES(?,?,?,?)""", (uid, project_id, now, now + 120))
+    except BaseException:
+        db.execute("ROLLBACK TO enter_workspace")
+        raise
+    finally:
+        db.execute("RELEASE enter_workspace")
+    return chosen
+
+
+def pending_notices(store):
+    now = time.time()
+    store.db.execute("DELETE FROM workspace_notices WHERE expires<=?", (now,))
+    return store.db.execute("SELECT * FROM workspace_notices WHERE available<=? ORDER BY id LIMIT 24", (now,)).fetchall()
+
+
+def current_notice(store, notice_id):
+    return store.db.execute("""SELECT n.user_id,u.language_code,p.name
+        FROM workspace_notices n JOIN users u ON u.id=n.user_id AND u.active_project_id=n.project_id
+        LEFT JOIN projects p ON p.id=n.project_id AND p.user_id=u.id
+        WHERE n.id=? AND (n.project_id=0 OR p.id IS NOT NULL)""", (notice_id,)).fetchone()
+
+
+def finish_notice(store, notice_id, *, retry_after=0):
+    if retry_after:
+        store.db.execute("UPDATE workspace_notices SET available=? WHERE id=?", (time.time() + retry_after, notice_id))
+    else:
+        store.db.execute("DELETE FROM workspace_notices WHERE id=?", (notice_id,))
 
 
 def list_projects(store, uid):

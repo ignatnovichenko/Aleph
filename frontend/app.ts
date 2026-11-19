@@ -1553,7 +1553,7 @@ async function act(action: string, id?: string) {
       break;
     case "continue-project": {
       const project_id = Number(id);
-      if (project_id === activeId() || await write("/api/projects/active","PATCH",{project_id},
+      if (await write("/api/projects/active","PATCH",{project_id},
         () => { state.active_project_id = project_id; }, "")) openChat();
       break;
     }

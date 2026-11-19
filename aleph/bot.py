@@ -2,6 +2,7 @@
 import asyncio
 from contextlib import suppress
 from datetime import datetime
+from html import escape
 import json
 import logging
 import os
@@ -17,10 +18,13 @@ from .hermes import create_agent
 from .links import settings_url, task_button, view_url
 from . import models, projects
 from .llm import ChatGPTUnavailable, ModelRejectsPhoto, ModelUnavailable, RegionUnavailable
-from . import articles, capture, integrations, media, documents, reminders, reports, widgets
+from . import articles, capture, integrations, media, documents, progress, reminders, reports, widgets
 
 log = logging.getLogger(__name__)
 PLAN_ALIASES = {"/plan", "/tasks", "открой задачи", "открыть задачи", "open tasks", "открой план", "открыть план", "открой мини-апп", "open plan", "open mini app"}
+PROGRESS_DELAY = 7
+NOTICE_TIMEOUT = 3
+CYRILLIC = re.compile(r"[\u0400-\u052f]")
 MODEL_QUESTION_RU = re.compile(
     r"(?:(?:привет|здравствуй|слушай)[,.!]?\s+)?"
     r"(?:какая (?:ты модель|у тебя модель|модель у тебя|модель (?:сейчас )?работает|сейчас (?:у тебя )?модель)"
@@ -130,6 +134,8 @@ class Inbox:
             self.db.execute("ALTER TABLE bot_inbox ADD COLUMN source TEXT NOT NULL DEFAULT ''")
         if "model_choice" not in columns:
             self.db.execute("ALTER TABLE bot_inbox ADD COLUMN model_choice TEXT")
+        if "progress_attempted" not in columns:
+            self.db.execute("ALTER TABLE bot_inbox ADD COLUMN progress_attempted INTEGER NOT NULL DEFAULT 0")
 
     def bind_project(self, update_id, uid):
         self.db.execute("UPDATE bot_inbox SET project_id=? WHERE id=? AND uid=? AND project_id IS NULL",
@@ -212,6 +218,10 @@ class Inbox:
     def save_tool(self, key, update_id, result):
         self.db.execute("INSERT INTO bot_tool_results VALUES (?,?,?)", (key, update_id, json.dumps(result)))
 
+    def claim_progress(self, update_id):
+        return self.db.execute("""UPDATE bot_inbox SET progress_attempted=1
+            WHERE id=? AND progress_attempted=0 AND reply IS NULL""", (update_id,)).rowcount
+
     def save_reply(self, row, query, reply):
         self.db.execute("BEGIN")
         try:
@@ -281,7 +291,55 @@ async def _typing(telegram, uid):
         await asyncio.sleep(4)
 
 def _uses_russian(msg):
-    return (msg.get("from", {}).get("language_code") or "ru").lower().startswith(("ru", "uk", "be", "kk"))
+    return _russian(msg.get("from", {}).get("language_code"))
+
+
+def _russian(language):
+    return (language or "ru").lower().startswith(("ru", "uk", "be", "kk"))
+
+
+async def _workspace_notice(store, tg, notice_id):
+    notice = projects.current_notice(store, notice_id)
+    if notice is None:
+        projects.finish_notice(store, notice_id)
+        return
+    ru = _russian(notice["language_code"])
+    name = notice["name"] or ("Личное" if ru else "Personal")
+    detail = "Контекст чата переключён." if ru else "Switched to this workspace."
+    try:
+        async with asyncio.timeout(NOTICE_TIMEOUT):
+            await tg.call("sendMessage", chat_id=notice["user_id"], text=f"📁 <b>{escape(name)}</b>\n{detail}",
+                          parse_mode="HTML", disable_notification=True, link_preview_options={"is_disabled": True})
+    except TimeoutError:
+        projects.finish_notice(store, notice_id)
+    except TelegramError as error:
+        delay = max(2, error.retry_after) if error.code == 429 or error.code >= 500 else 0
+        projects.finish_notice(store, notice_id, retry_after=delay)
+    else:
+        projects.finish_notice(store, notice_id)
+
+
+async def _announce_progress(inbox, tg, update_id, uid, message_id, text, ru, finished):
+    first = progress.immediate_ack(text, ru)
+    if not first:
+        try:
+            await asyncio.wait_for(finished.wait(), PROGRESS_DELAY)
+            return
+        except TimeoutError:
+            first = ("Разбираю запрос. Пришлю результат сюда." if ru
+                     else "I’m working through your request. I’ll share the result here.")
+    if finished.is_set() or not inbox.claim_progress(update_id):
+        return
+    # Claim before sending so provider retries and ambiguous Telegram timeouts
+    # cannot produce another progress bubble for the same message.
+    reply = {"reply_parameters": {"message_id": message_id, "allow_sending_without_reply": True}} if message_id else {}
+    try:
+        async with asyncio.timeout(NOTICE_TIMEOUT):
+            await tg.call("sendMessage", chat_id=uid, text=first, link_preview_options={"is_disabled": True},
+                          disable_notification=True, **reply)
+    except (TelegramError, TimeoutError):
+        # Optional delivery must never interrupt the user's main request.
+        return
 
 async def _message_text(tg, msg):
     ru = _uses_russian(msg)
@@ -364,6 +422,7 @@ async def _compose(row, store, inbox, tg, agent):
             reply += ("\n\nСвою подписку ChatGPT можно подключить в настройках Алефа." if ru else
                       "\n\nYou can connect your ChatGPT plan in Aleph settings.")
         return None, reply
+    inbox.bind_project(row["id"], uid)
     query, photo = await _message_text(tg, msg)
     if "voice" in msg:
         try:
@@ -378,7 +437,19 @@ async def _compose(row, store, inbox, tg, agent):
             return query, models.identity_reply(store, uid, agent.model, russian=bool(russian_question))
     source = query.split("\n\n[Attached document content]", 1)[0][:900]
     store.db.execute("UPDATE bot_inbox SET source=? WHERE id=?", (source, row["id"]))
-    answer = await agent.respond(store, uid, query, photo, inbox, row["id"])
+    text = progress.request_text(query)
+    if row["progress_attempted"] or progress.skip_ack(text):
+        answer = await agent.respond(store, uid, query, photo, inbox, row["id"])
+    else:
+        finished = asyncio.Event()
+        ru = bool(CYRILLIC.search(text)) if any(ch.isalpha() for ch in text) else _uses_russian(msg)
+        announcement = asyncio.create_task(_announce_progress(inbox, tg, row["id"], uid,
+                                                              msg.get("message_id"), text, ru, finished))
+        try:
+            answer = await agent.respond(store, uid, query, photo, inbox, row["id"])
+        finally:
+            finished.set()
+            await announcement
     historical = ("[Фото] " if photo else "") + query
     return historical, answer
 
@@ -649,27 +720,36 @@ async def _handle(row, store, inbox, tg, agent):
             inbox.retry(row, 60)
 
 async def _work(store, inbox, tg, agent, changed):
-    interactive, scheduled = {}, {}
+    interactive, scheduled, notices = {}, {}, {}
     try:
         while True:
             changed.clear()
             reports.enqueue(inbox.db)
-            for is_scheduled, active, limit in ((False, interactive, 8), (True, scheduled, 2)):
+            for active in (interactive, scheduled, notices):
                 for uid, task in list(active.items()):
                     if task.done():
                         await task
                         del active[uid]
+            for notice in projects.pending_notices(store):
+                if len(notices) >= 8:
+                    break
+                uid = notice["user_id"]
+                if uid not in notices:
+                    task = asyncio.create_task(_workspace_notice(store, tg, notice["id"]))
+                    task.add_done_callback(lambda _: changed.set())
+                    notices[uid] = task
+            for is_scheduled, active, limit in ((False, interactive, 8), (True, scheduled, 2)):
                 for row in inbox.pending(scheduled=is_scheduled):
                     if len(active) >= limit:
                         break
-                    if row["uid"] not in active:
+                    if row["uid"] not in active and (is_scheduled or row["uid"] not in notices):
                         task = asyncio.create_task(_handle(row, store, inbox, tg, agent))
                         task.add_done_callback(lambda _: changed.set())
                         active[row["uid"]] = task
             with suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(changed.wait(), 1)
     finally:
-        tasks = [*interactive.values(), *scheduled.values()]
+        tasks = [*interactive.values(), *scheduled.values(), *notices.values()]
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)

@@ -284,7 +284,7 @@ def install_api(app, store, token, model_key=None):
         fields = await body(request)
         if set(fields) != {"project_id"}:
             raise ValueError("Выбери проект.")
-        return web.json_response(projects.choose(store, user["id"], fields["project_id"]))
+        return web.json_response(projects.enter(store, user["id"], fields["project_id"]))
 
     async def skill_library(request, user):
         uid = user["id"]
