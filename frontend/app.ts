@@ -221,7 +221,8 @@ function mountShell() {
         </div>
       </section>`).join("")}</div></main>
     <nav aria-label="${t("Навигация", "Navigation")}" class="dock">
-      <span aria-hidden="true" class="dock-surface"></span><span aria-hidden="true" class="dock-lens"></span>${nav()}
+      <span aria-hidden="true" class="dock-surface"></span>
+      <span aria-hidden="true" class="dock-lens"><span class="dock-lens-glass"></span></span>${nav()}
     </nav>`;
   stage = requiredElement(app, ".page-stage");
   track = requiredElement(stage, ".page-track");
