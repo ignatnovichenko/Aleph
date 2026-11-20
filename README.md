@@ -79,6 +79,15 @@ Once connected, the server refreshes the ChatGPT session as needed. Updates and 
 
 In **Settings → Chat replies**, the owner can choose ChatGPT or OpenCode, then select a model and a reasoning level from that provider's catalog. Aleph remembers the last selection for each provider in SQLite and shows the model used for its most recent model reply. Preferences apply to requests that start after saving.
 
+## Run a project on your computer
+
+1. Install [uv](https://docs.astral.sh/uv/getting-started/installation/) on your computer. Use macOS, Linux or a Linux terminal in Windows Subsystem for Linux.
+2. Open a terminal on that computer, clone `https://github.com/ignatnovichenko/Aleph.git` with `git clone` and run `cd Aleph`. Pull the latest version if you already have the repository.
+3. In the Telegram Mini App, open **Settings → Computers → Connect a computer** and name the computer. Copy the command shown there and run it in the Aleph folder. The setup script installs the pinned Hermes runtime on first use. Paste the one-time code when the terminal asks for it.
+4. In a project, open **Runs on** and select that computer. Keep the runner open while Aleph works. On the same computer, start it again with `sh deploy/computer.sh run`.
+
+The runner connects over HTTPS without an incoming port. Hermes runs on the selected computer and receives that project's turn context. Your selected model, Telegram delivery and integrations are brokered by the Aleph server. Connected computers do not receive provider credentials or expose their files or terminal to the model. When a computer is offline, scheduled work waits for it to reconnect. To switch back, select **Aleph server** for the project. Disconnecting a computer in Settings revokes its credentials and moves its projects back to the server.
+
 ## Checks
 
     npm ci

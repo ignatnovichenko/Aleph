@@ -56,7 +56,12 @@ def get(store, uid, project_id):
         raise ValueError("Некорректный проект.")
     if not project_id:
         return {"id": 0, "name": "", "context": ""}
-    row = store.db.execute("SELECT id,name,context FROM projects WHERE user_id=? AND id=?", (uid, project_id)).fetchone()
+    row = store.db.execute("""
+        SELECT p.id,p.name,p.context,c.id AS computer_id,c.name AS computer_name
+        FROM projects p LEFT JOIN project_computers pc ON pc.project_id=p.id
+        LEFT JOIN computers c ON c.id=pc.computer_id AND c.user_id=p.user_id
+        WHERE p.user_id=? AND p.id=?
+    """, (uid, project_id)).fetchone()
     if not row:
         raise KeyError("Проект не найден.")
     return dict(row)
@@ -114,9 +119,11 @@ def finish_notice(store, notice_id, *, retry_after=0):
 
 def list_projects(store, uid):
     return [dict(row) for row in store.db.execute("""
-        SELECT p.id,p.name,p.context,
+        SELECT p.id,p.name,p.context,c.id AS computer_id,c.name AS computer_name,
           (SELECT count(*) FROM tasks t WHERE t.user_id=p.user_id AND t.project_id=p.id AND t.status='open') AS open_tasks
-        FROM projects p WHERE p.user_id=? ORDER BY p.id DESC
+        FROM projects p LEFT JOIN project_computers pc ON pc.project_id=p.id
+        LEFT JOIN computers c ON c.id=pc.computer_id AND c.user_id=p.user_id
+        WHERE p.user_id=? ORDER BY p.id DESC
     """, (uid,))]
 
 

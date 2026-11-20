@@ -54,6 +54,20 @@ export interface Project {
   id: number;
   name: string;
   context: string;
+  computer_id?: number | null;
+  computer_name?: string | null;
+}
+
+export interface Computer {
+  id: number;
+  name: string;
+  online: boolean;
+}
+
+export interface ComputerPairing {
+  code: string;
+  name: string;
+  expires_in: number;
 }
 
 export interface SkillSummary {

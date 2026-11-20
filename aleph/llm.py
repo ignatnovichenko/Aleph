@@ -13,6 +13,7 @@ import aiohttp
 
 from .feeds import feed_catalog
 from . import article_images, capture, connections, integrations, memory, models, project_sources, projects, reports, skills, widgets
+from .computers import ComputerUnavailable
 from .documents import DOCUMENT_TOOL, render_document
 
 BASE_URL = "https://opencode.ai/zen/go/v1"
@@ -488,6 +489,9 @@ class Aleph:
 
     async def respond(self, store, uid, text, photo, ledger, update_id, *, scheduled=False):
         project_id = ledger.bind_project(update_id, uid)
+        project = projects.get(store, uid, project_id)
+        if project.get("computer_id"):
+            raise ComputerUnavailable(project["computer_name"])
         messages, model = self.turn_context(store, uid, text, photo, project_id, scheduled=scheduled)
         for step in range(6):
             reply = ledger.get_step(update_id, step)

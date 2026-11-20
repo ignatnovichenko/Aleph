@@ -1,6 +1,7 @@
 import { bridge, bridgeRequest } from "./bridge.js";
 import { apiRequest, statePath } from "./transport.js";
 import type { RequestOptions, WriteMethod } from "./transport.js";
+import type { Computer, ComputerPairing } from "./types.js";
 import type { CalendarEvent, ChatGPTConnection, ChatGPTPairing, Connections, Service, ProjectEntry, ProjectResult, ProjectResultDetail, ProjectSource, SourcePreview, Feed, ModelCatalog, ModelSummary, Project, ProjectSkills, SavedMemory, Settings, Skill, SkillDraft, SkillSummary, Task, WidgetState, WorkspaceState } from "./types.js";
 
 export { bridge };
@@ -11,6 +12,7 @@ type Reads = {
   [statePath]: WorkspaceState;
   "/api/calendar.ics": Blob;
   "/api/chatgpt": ChatGPTConnection;
+  "/api/computers": Computer[];
   "/api/models": ModelCatalog;
   "/api/memory": SavedMemory[];
   [path: `/api/tasks/${number}/result`]: {html: string | null; delivered_at: string | null};
@@ -30,6 +32,9 @@ export type Writes = {
   "/api/projects": Project;
   "/api/projects/active": Project;
   [path: `/api/projects/${number}`]: Project;
+  [path: `/api/projects/${number}/computer`]: Project;
+  "/api/computers/pair": ComputerPairing;
+  [path: `/api/computers/${number}`]: null;
   "/api/tasks": Task;
   [path: `/api/tasks/${string}`]: Task;
   "/api/settings": Settings;

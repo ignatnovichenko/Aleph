@@ -98,6 +98,10 @@ def start(db, task_id):
                (timestamp(), task_id))
 
 
+def wait_for_computer(db, task_id):
+    db.execute("UPDATE scheduled_reports SET started_at=NULL WHERE task_id=? AND state='pending'", (task_id,))
+
+
 def fail(db, uid, update_id):
     db.execute("""UPDATE scheduled_reports SET state='failed', started_at=NULL WHERE task_id=? AND state='pending'
         AND EXISTS (SELECT 1 FROM tasks WHERE id=task_id AND user_id=?)

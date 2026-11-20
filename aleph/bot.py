@@ -14,6 +14,7 @@ import aiohttp
 
 from .chatgpt import plan as chatgpt
 from .chatgpt_pair import owner as chatgpt_owner
+from .computers import ComputerUnavailable
 from .hermes import create_agent
 from .links import settings_url, task_button, view_url
 from . import models, projects
@@ -603,6 +604,14 @@ async def _handle(row, store, inbox, tg, agent):
                 if error.code != 400:
                     raise
                 reply = "Telegram не смог открыть это вложение. Пришли файл ещё раз." if ru else "Telegram couldn’t retrieve this file. Please send it again."
+            except ComputerUnavailable as error:
+                if report:
+                    if reports.current(store, row):
+                        reports.wait_for_computer(store.db, report["id"])
+                        inbox.db.execute("UPDATE bot_inbox SET available=? WHERE id=?", (time.time() + 30, update_id))
+                    return
+                reply = (f"Компьютер «{error.name}» сейчас не на связи. Запусти на нём Алефа или выбери сервер в настройках проекта."
+                         if ru else f'“{error.name}” is offline. Start Aleph on that computer or select the server in project settings.')
             except ModelUnavailable as error:
                 using_chatgpt = isinstance(error, ChatGPTUnavailable)
                 log.warning("%s unavailable status=%d", "ChatGPT" if using_chatgpt else "OpenCode", error.status)

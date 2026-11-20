@@ -6,7 +6,7 @@ import { ApiMessage } from "./transport.js";
 import type { IconName } from "./icons.js";
 import type { RequestOptions, WriteMethod, Writes } from "./store.js";
 import type { CalendarEvent, ChatGPTConnection, ChatGPTPairing, ProjectEntry, ReplyStyle, SavedMemory, Service, ModelCatalog, ModelChoice, ModelProvider, Project, ProviderModel, Settings, Task, ThemeMode, WorkspaceState } from "./types.js";
-import type { ProjectSkills, ProjectSource, SkillDraft, SkillSummary, SourcePreview } from "./types.js";
+import type { Computer, ComputerPairing, ProjectSkills, ProjectSource, SkillDraft, SkillSummary, SourcePreview } from "./types.js";
 import {
   bridge,
   demo,
@@ -56,6 +56,8 @@ let agenda: CalendarEvent[] | undefined;
 let agendaError = false;
 let chatgpt: ChatGPTConnection | undefined;
 let modelCatalog: ModelCatalog | undefined;
+let computers: Computer[] = [];
+let checkComputerPair: ((notify?: boolean) => Promise<boolean>) | undefined;
 let ru = true, pending = false, revision = 0, sdkBound = false;
 let toastTimer: number | undefined;
 let returnFocus: HTMLElement | null = null;
@@ -942,6 +944,8 @@ function projectPage(project?: Project) {
       </span><span class="tail">${icon("arrow")}</span>
       </button>
       ${settingRow("skills", t("Скиллы", "Skills"), undefined, "project-skills", String(id))}
+      ${settingRow("computer", t("Где выполняется проект", "Runs on"),
+        project.computer_name || serverName(), "project-computer", String(id))}
       ${savedRow}
     </div>
     <div class="project-panes" role="group" aria-label="${t("Разделы проекта","Project sections")}">
@@ -1364,9 +1368,125 @@ function settingsPage() {
       settingRow("rss", t("Источники новостей", "News sources"),
         state.feeds.length ? t("Подключено", "Connected") + " · " + state.feeds.length : t("Для утреннего обзора", "For your morning brief"), "feeds"))}
     ${connections ? settingsGroup(t("Подключения", "Connections"), connections) : ""}
+    ${bridge() ? "" : settingsGroup(t("Выполнение", "Execution"), settingRow("computer", t("Компьютеры", "Computers"),
+      t("Подключение и доступность устройств", "Pair and manage devices"), "computers"))}
     ${settingsGroup(t("Конфиденциальность", "Privacy"), settingRow("shield", t("Управление данными", "Manage data"),
       t("Что хранится и как это удалить", "What is stored and how to delete it"), "privacy"))}
   </div>`;
+}
+
+const serverName = () => t("Сервер Алефа", "Aleph server");
+
+function computerStatus(computer: Computer) {
+  return `<span class="computer-status${computer.online ? " online" : ""}">${computer.online
+    ? t("На связи", "Online") : t("Не на связи", "Offline")}</span>`;
+}
+
+function computerList(items: Computer[]) {
+  return items.length ? `<div class="panel computer-list">${items.map(item => `<div class="setting-row">
+    ${glyph("computer")}<span class="setting-copy"><strong dir="auto">${e(item.name)}</strong>${computerStatus(item)}</span>
+    <button class="icon-button" data-action="remove-computer" data-id="${item.id}" aria-label="${e(t("Отключить ", "Disconnect ") + item.name)}">${icon("trash")}</button>
+  </div>`).join("")}</div>` : `<p class="sheet-desc">${t("Подключи компьютер, чтобы выбирать его для своих проектов.",
+    "Connect a computer to run selected projects on it.")}</p>`;
+}
+
+async function computersSheet() {
+  if (demo) {
+    openSheet(t("Компьютеры", "Computers"), `<p class="sheet-desc">${t("Открой мини-приложение из Telegram, чтобы подключить компьютер.",
+      "Open the Mini App from Telegram to connect a computer.")}</p>`);
+    return;
+  }
+  openSheet(t("Компьютеры", "Computers"), `<div data-computer-list aria-live="polite"><p class="sheet-desc">${t("Загружаю…", "Loading…")}</p></div>`);
+  const slot = requiredElement(sheet, "[data-computer-list]");
+  try {
+    computers = await request("/api/computers");
+    if (slot.isConnected) slot.innerHTML = `${computerList(computers)}<div class="submit-row computer-actions">
+      <button class="button primary" data-action="add-computer">${icon("plus")}${t("Подключить компьютер", "Connect a computer")}</button>
+      ${computers.length ? `<button class="button" data-action="computers">${t("Обновить", "Refresh")}</button>` : ""}</div>`;
+  } catch (error) {
+    if (slot.isConnected) slot.innerHTML = `<p class="sheet-desc">${e(errorMessage(error))}</p>
+      <button class="button" data-action="computers">${t("Повторить", "Try again")}</button>`;
+  }
+}
+
+function addComputerSheet() {
+  openSheet(t("Подключить компьютер", "Connect a computer"), `<form id="computer-pair-form">
+    <label class="field">${t("Имя компьютера", "Computer name")}<input name="name" required maxlength="48" dir="auto"
+      placeholder="${t("Например, домашний Mac", "For example, Home Mac")}"></label>
+    <p class="sheet-desc">${t("Поддерживаются macOS, Linux и Windows через WSL. На компьютере понадобятся репозиторий Алефа и uv.",
+      "Supports macOS, Linux, and Windows via WSL. You'll need the Aleph repository and uv on the computer.")}</p>
+    <a class="small-action" href="https://github.com/ignatnovichenko/Aleph#run-a-project-on-your-computer" target="_blank" rel="noopener noreferrer">
+      ${t("Инструкция по установке", "Installation instructions")}${icon("up")}</a>
+    ${submit(t("Получить код", "Get code"))}</form>`);
+}
+
+function computerPairSheet(pair: ComputerPairing, known: ReadonlySet<number>) {
+  openSheet(pair.name, `<div class="computer-pair" data-computer-pair>
+    <p class="sheet-desc">${t("В папке Алефа на компьютере выполни команду и вставь одноразовый код, когда программа попросит.",
+      "Run this command in the Aleph folder on the computer and paste the one-time code when prompted.")}</p>
+    <label class="field">${t("Команда", "Command")}<input id="computer-command" dir="ltr" readonly value="${e(`sh deploy/computer.sh connect --server ${location.origin}`)}"></label>
+    <button class="small-action" data-action="copy-computer-field" data-id="computer-command">${t("Скопировать команду", "Copy command")}</button>
+    <label class="field">${t("Одноразовый код", "One-time code")}<input id="computer-code" dir="ltr" readonly value="${e(pair.code)}"></label>
+    <button class="small-action" data-action="copy-computer-field" data-id="computer-code">${t("Скопировать код", "Copy code")}</button>
+    <p class="sheet-desc" data-computer-pair-status aria-live="polite">${t("Код действует 10 минут.", "The code expires in 10 minutes.")}</p>
+    <div class="submit-row computer-actions"><button class="button primary" data-action="check-computer-pair">${t("Проверить подключение", "Check connection")}</button>
+      <button class="button" data-action="add-computer">${t("Новый код", "New code")}</button></div></div>`);
+  const panel = requiredElement(sheet, "[data-computer-pair]");
+  const status = requiredElement(panel, "[data-computer-pair-status]");
+  const expires = Date.now() + pair.expires_in * 1000;
+  let checking = false;
+  checkComputerPair = async (notify = false) => {
+    if (!panel.isConnected || !sheet.open || sheet.classList.contains("closing")) return false;
+    if (checking) return true;
+    checking = true;
+    try {
+      const items = await request("/api/computers");
+      if (!panel.isConnected || !sheet.open) return false;
+      if (items.some(item => !known.has(item.id) && item.name === pair.name && item.online)) {
+        await computersSheet();
+        message(t("Компьютер подключён", "Computer connected"));
+        return false;
+      }
+      if (notify) status.textContent = t("Жду запуска на компьютере…", "Waiting for the runner to start…");
+    } catch (error) {
+      if (notify && panel.isConnected) status.textContent = errorMessage(error);
+    } finally {
+      checking = false;
+    }
+    if (Date.now() < expires) return true;
+    status.textContent = t("Срок кода истёк. Получи новый код.", "The code expired. Get a new code.");
+    return false;
+  };
+  const check = checkComputerPair;
+  const poll = async () => { if (await check()) window.setTimeout(poll, 4000); };
+  window.setTimeout(poll, 4000);
+}
+
+async function projectComputerSheet(project: Project) {
+  if (demo) {
+    openSheet(t("Где выполняется проект", "Runs on"), `<p class="sheet-desc">${t("Подключи компьютер в настройках Алефа в Telegram.",
+      "Connect a computer in Aleph’s Telegram settings.")}</p>`);
+    return;
+  }
+  openSheet(t("Где выполняется проект", "Runs on"), `<div data-project-computers><p class="sheet-desc">${t("Загружаю…", "Loading…")}</p></div>`);
+  const slot = requiredElement(sheet, "[data-project-computers]");
+  try {
+    computers = await request("/api/computers");
+    if (!slot.isConnected) return;
+    const assigned = computers.find(item => item.id === project.computer_id)?.id ?? null;
+    const row = (id: number | null, name: string, detail: string, symbol: IconName) =>
+      `<label class="setting-row computer-option">${glyph(symbol)}<span class="setting-copy"><strong dir="auto">${e(name)}</strong>${detail}</span>
+        <input type="radio" name="computer" value="${id ?? "server"}" ${id === assigned ? "checked" : ""}></label>`;
+    slot.innerHTML = `<form id="project-computer-form" data-project="${project.id}">
+      <p class="sheet-desc">${t("Выбери, где Алеф будет отвечать в этом проекте и выполнять его запланированные поручения.",
+      "Choose where Aleph handles project chats and scheduled work.")}</p>
+      <div class="panel computer-list">${row(null, serverName(), "", "cloud")}${computers.map(item => row(item.id, item.name, computerStatus(item), "computer")).join("")}</div>
+      ${computers.length ? "" : `<button type="button" class="small-action" data-action="computers">${t("Подключить компьютер", "Connect a computer")}${icon("arrow")}</button>`}
+      ${submit()}</form>`;
+  } catch (error) {
+    if (slot.isConnected) slot.innerHTML = `<p class="sheet-desc">${e(errorMessage(error))}</p>
+      <button class="button" data-action="project-computer" data-id="${project.id}">${t("Повторить", "Try again")}</button>`;
+  }
 }
 function skillScope(id?: string) {
   return id === undefined ? undefined : Number(id);
@@ -1815,6 +1935,44 @@ async function act(action: string, id?: string) {
     case "chat":
       openChat();
       break;
+    case "computers":
+      await computersSheet();
+      break;
+    case "add-computer":
+      addComputerSheet();
+      break;
+    case "copy-computer-field": {
+      if (id !== "computer-command" && id !== "computer-code") break;
+      const field = sheet.querySelector<HTMLInputElement>(`#${id}`);
+      if (!field) break;
+      try {
+        await navigator.clipboard.writeText(field.value);
+        message(t("Скопировано", "Copied"));
+      } catch {
+        field.focus();
+        field.select();
+      }
+      break;
+    }
+    case "check-computer-pair":
+      await checkComputerPair?.(true);
+      break;
+    case "remove-computer": {
+      const computer = computers.find(item => item.id === Number(id));
+      if (!computer || !window.confirm(t(`Отключить «${computer.name}»? Его проекты перейдут на сервер Алефа.`,
+        `Disconnect “${computer.name}”? Its projects will switch to the Aleph server.`))) break;
+      if (await write(`/api/computers/${computer.id}`, "DELETE", undefined, () => {
+        for (const project of state.projects ?? []) {
+          if (project.computer_id === computer.id) Object.assign(project, {computer_id: null, computer_name: null});
+        }
+      }, t("Компьютер отключён", "Computer disconnected"))) await computersSheet();
+      break;
+    }
+    case "project-computer": {
+      const project = selectedProject();
+      if (project?.id && project.id === Number(id)) await projectComputerSheet(project);
+      break;
+    }
     case "task-folder":
     case "task-archive":
       toggleTaskBranch(Number(id), action === "task-archive");
@@ -2246,6 +2404,19 @@ sheet.addEventListener("submit", async (event) => {
       }
       ok = await write(`/api/projects/${scope}/skills`, "PATCH", {skill_ids}, () => {},
         t("Скиллы проекта сохранены","Project skills saved"), {showApiMessage: ru});
+    } else if (form.id === "computer-pair-form") {
+      const known = new Set(computers.map(item => item.id));
+      let pairing: ComputerPairing | null = null;
+      if (await write("/api/computers/pair", "POST", {name: field("name").trim()}, result => { pairing = result; }, "",
+        {showApiMessage: ru}) && pairing && form.isConnected) computerPairSheet(pairing, known);
+      return;
+    } else if (form.id === "project-computer-form") {
+      const projectId = Number(form.dataset.project);
+      const computer = field("computer");
+      const computer_id = computer === "server" ? null : Number(computer);
+      ok = await write(`/api/projects/${projectId}/computer`, "PATCH", {computer_id}, result => {
+        if (state.projects && result) mergeRecord(state.projects, result);
+      }, t("Сохранено", "Saved"), {showApiMessage: ru});
     } else if (form.id === "project-form") {
       const name = field("name").trim();
       if (!name) {

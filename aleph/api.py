@@ -17,7 +17,7 @@ from .chatgpt_auth import ChatGPTError
 from .chatgpt_pair import IMPORT_PATH, MAX_PACKET, owner as chatgpt_owner
 from .feeds import feed_catalog
 from .links import mini_app_url
-from . import articles, connections, drive_picker, integrations, memory, models, project_sources, projects, public_fetch, reports, saved_results, skills, source_text, widgets
+from . import articles, computers, connections, drive_picker, integrations, memory, models, project_sources, projects, public_fetch, reports, saved_results, skills, source_text, widgets
 from .store import UTC
 
 
@@ -287,6 +287,67 @@ def install_api(app, store, token, model_key=None):
     async def update_project(request, user):
         return web.json_response(projects.edit(store, user["id"], int(request.match_info["id"]), await body(request)))
 
+    async def computer_list(request, user):
+        return web.json_response(computers.list_owned(store, user["id"]))
+
+    async def computer_pairing(request, user):
+        fields = await body(request)
+        if set(fields) != {"name"}:
+            raise ValueError("Укажи имя компьютера.")
+        return web.json_response(computers.prepare(store, user["id"], fields["name"]))
+
+    async def remove_computer(request, user):
+        computers.remove(store, user["id"], int(request.match_info["id"]))
+        return web.Response(status=204)
+
+    async def project_computer(request, user):
+        fields = await body(request)
+        if set(fields) != {"computer_id"}:
+            raise ValueError("Выбери компьютер или сервер Алефа.")
+        return web.json_response(computers.assign(store, user["id"], int(request.match_info["id"]), fields["computer_id"]))
+
+    async def register_runner(request):
+        try:
+            fields = await body(request, limit=1024)
+            return web.json_response(computers.pair(store, fields.get("code")), headers={"Cache-Control": "no-store"})
+        except ValueError:
+            raise web.HTTPUnauthorized() from None
+
+    async def runner(request):
+        auth = request.headers.get("Authorization", "")
+        runner_session = request.headers.get("X-Aleph-Runner", "")
+        try:
+            computers.validate_session(runner_session)
+            computer_id = computers.authenticate(store, auth[7:] if auth.startswith("Bearer ") else "")
+        except ValueError:
+            raise web.HTTPUnauthorized() from None
+        hub = store.computer_hub
+        hub.touch(computer_id)
+        command = request.match_info.get("command")
+        if command is None:
+            return web.json_response(await hub.claim(computer_id, runner_session), headers={"Cache-Control": "no-store"})
+        job = hub.job(computer_id, runner_session, request.match_info["job"])
+        if not job:
+            raise web.HTTPNotFound()
+        if command == "alive":
+            return web.Response(status=204)
+        try:
+            fields = await body(request, limit=computers.JOB_REQUEST_LIMIT if command == "complete" else 262144)
+        except ValueError:
+            raise web.HTTPBadRequest() from None
+        if hub.job(computer_id, runner_session, request.match_info["job"]) is not job:
+            raise web.HTTPNotFound()
+        if command == "complete":
+            return await job.broker.complete_payload(fields)
+        if command == "tool":
+            return await job.broker.tool_payload(fields)
+        answer = fields.get("answer")
+        if isinstance(answer, str) and 0 < len(answer.strip()) <= 14000:
+            job.result.set_result({"answer": answer.strip()})
+        else:
+            job.result.set_result({"error_type": "remote_turn_failed"})
+        return web.Response(status=204)
+
     async def choose_project(request, user):
         fields = await body(request)
         if set(fields) != {"project_id"}:
@@ -473,6 +534,9 @@ def install_api(app, store, token, model_key=None):
               ("GET", "/api/memory", memories), ("DELETE", r"/api/memory/{id:\d{1,18}}", forget_memory),
               ("POST", "/api/projects", create_project), ("PATCH", "/api/projects/active", choose_project),
               ("PATCH", r"/api/projects/{id:\d{1,18}}", update_project),
+              ("GET", "/api/computers", computer_list), ("POST", "/api/computers/pair", computer_pairing),
+              ("DELETE", r"/api/computers/{id:\d{1,18}}", remove_computer),
+              ("PATCH", r"/api/projects/{id:\d{1,18}}/computer", project_computer),
               ("GET", "/api/calendar.ics", calendar), ("GET", "/api/feeds", list_feeds),
               ("POST", "/api/feeds", add_feed), ("DELETE", r"/api/feeds/{id:\d{1,18}}", remove_feed)]
     routes += [("GET", r"/api/widgets/{id:\d{1,18}}", widget_view),
@@ -507,3 +571,6 @@ def install_api(app, store, token, model_key=None):
     for method, path, handler in routes:
         app.router.add_route(method, path, scoped(handler))
     app.router.add_post(IMPORT_PATH, chatgpt_import)
+    app.router.add_post(computers.RUNNER_PATH + "/pair", register_runner)
+    app.router.add_post(computers.RUNNER_PATH + "/claim", runner)
+    app.router.add_post(computers.RUNNER_PATH + r"/{job:[A-Za-z0-9_-]{32}}/{command:complete|tool|result|alive}", runner)

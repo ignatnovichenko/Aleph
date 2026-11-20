@@ -4,28 +4,18 @@ import hmac
 import json
 import logging
 import os
-from pathlib import Path
 import secrets
-import tempfile
 import time
 
 from aiohttp import web
 
+from . import projects
+from .hermes_process import TURN_TIMEOUT, hermes_python, run_worker
 from .llm import Aleph, ModelUnavailable, REPORT_TOOLS, TOOLS
 
 log = logging.getLogger(__name__)
 MAX_STEPS = 12
 MAX_PARALLEL_CALLS = 12
-TURN_TIMEOUT = 265
-WORKER = Path(__file__).with_name("hermes_worker.py")
-
-
-def hermes_python():
-    path = Path(os.environ.get("ALEPH_HERMES_PYTHON") or
-                Path.home() / ".local/share/aleph/hermes/.venv/bin/python")
-    if not path.is_absolute() or not os.access(path, os.X_OK):
-        raise RuntimeError("Hermes Python runtime missing. Run deploy/install-hermes.sh or set ALEPH_HERMES_PYTHON.")
-    return path
 
 
 def create_agent(session, model_key):
@@ -60,7 +50,9 @@ class TurnBroker:
 
     async def complete(self, request):
         self.check(request)
-        data = await request.json()
+        return await self.complete_payload(await request.json())
+
+    async def complete_payload(self, data):
         if data.get("model") != self.model or data.get("stream") or not isinstance(data.get("messages"), list):
             raise web.HTTPBadRequest()
         async with self.model_lock:
@@ -95,7 +87,9 @@ class TurnBroker:
 
     async def tool(self, request):
         self.check(request)
-        payload = await request.json()
+        return await self.tool_payload(await request.json())
+
+    async def tool_payload(self, payload):
         name, args = payload.get("name"), payload.get("arguments")
         match = self.calls.get(payload.get("id"))
         if not match or name not in self.tool_names:
@@ -119,11 +113,19 @@ class HermesAleph(Aleph):
 
     async def respond(self, store, uid, text, photo, ledger, update_id, *, scheduled=False):
         project_id = ledger.bind_project(update_id, uid)
+        project = projects.get(store, uid, project_id)
         messages, opencode_model = self.turn_context(store, uid, text, photo, project_id, scheduled=scheduled)
         choice, _ = self.bind_turn_model(uid, ledger, update_id, opencode_model)
         model = choice["model"] or choice["provider"]
         toolset = REPORT_TOOLS if scheduled else TOOLS
         broker = TurnBroker(self, store, uid, ledger, update_id, model, opencode_model, project_id, toolset=toolset)
+        turn = {"model": model, "messages": messages, "tools": toolset, "max_steps": MAX_STEPS - 1}
+        if computer_id := project.get("computer_id"):
+            try:
+                packet = await store.computer_hub.run(computer_id, project["computer_name"], turn, broker, TURN_TIMEOUT)
+            except TimeoutError:
+                raise ModelUnavailable() from None
+            return self.worker_answer(packet, broker)
         app = web.Application(client_max_size=24 * 1024 * 1024)
         app.router.add_post("/v1/chat/completions", broker.complete)
         app.router.add_post("/tool", broker.tool)
@@ -133,41 +135,24 @@ class HermesAleph(Aleph):
             site = web.TCPSite(runner, "127.0.0.1", 0)
             await site.start()
             port = runner.addresses[0][1]
-            turn = {"endpoint": f"http://127.0.0.1:{port}", "key": broker.token,
-                    "model": model, "messages": messages, "tools": toolset, "max_steps": MAX_STEPS - 1}
+            turn.update(endpoint=f"http://127.0.0.1:{port}", key=broker.token)
             answer = await self.run_hermes(turn, broker)
             return answer[:14000]
         finally:
             await runner.cleanup()
 
     async def run_hermes(self, turn, broker):
-        # A new Hermes home for every turn keeps files, plugins, log output and
-        # cached state outside both other users' turns and the server credential store.
-        with tempfile.TemporaryDirectory(prefix="aleph-hermes-") as home:
-            env = {"PATH": os.defpath, "LANG": "C.UTF-8", "HERMES_HOME": home,
-                   "NO_PROXY": "127.0.0.1,localhost", "PYTHONUNBUFFERED": "1"}
-            process = await asyncio.create_subprocess_exec(
-                str(self.python), str(WORKER), cwd=home, env=env,
-                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-            )
-            try:
-                output, _ = await asyncio.wait_for(
-                    process.communicate(json.dumps(turn, ensure_ascii=False).encode()), TURN_TIMEOUT,
-                )
-            except TimeoutError:
-                raise ModelUnavailable() from None
-            finally:
-                if process.returncode is None:
-                    process.kill()
-                    await process.wait()
-            if broker.failure:
-                raise broker.failure
-            try:
-                packet = json.loads(output)
-            except (ValueError, UnicodeError):
-                packet = {}
-            answer = packet.get("answer")
-            if process.returncode or not isinstance(answer, str) or not answer.strip():
-                log.warning("Hermes did not finish the turn (%s)", packet.get("error_type", "worker_failure"))
-                raise ModelUnavailable()
-            return answer.strip()
+        try:
+            packet = await run_worker(self.python, turn)
+        except TimeoutError:
+            raise ModelUnavailable() from None
+        return self.worker_answer(packet, broker)
+
+    @staticmethod
+    def worker_answer(packet, broker):
+        if broker.failure:
+            raise broker.failure
+        if "answer" not in packet:
+            log.warning("Hermes did not finish the turn (%s)", packet.get("error_type", "worker_failure"))
+            raise ModelUnavailable()
+        return packet["answer"]
