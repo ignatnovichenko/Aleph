@@ -18,12 +18,16 @@ from .hermes import create_agent
 from .links import settings_url, task_button, view_url
 from . import models, projects
 from .llm import ChatGPTUnavailable, ModelRejectsPhoto, ModelUnavailable, RegionUnavailable
-from . import articles, capture, integrations, media, documents, progress, reminders, reports, saved_results, widgets
+from . import article_images, articles, capture, integrations, media, documents, progress, reminders, reports, saved_results, widgets
 
 log = logging.getLogger(__name__)
 PLAN_ALIASES = {"/plan", "/tasks", "открой задачи", "открыть задачи", "open tasks", "открой план", "открыть план", "открой мини-апп", "open plan", "open mini app"}
 PROGRESS_DELAY = 7
 NOTICE_TIMEOUT = 3
+RICH_REJECTIONS = {400, 404, 405, 413}
+# Persist the format to use on a retry, independently of the text and tool results.
+ARTICLE_PLAIN = 1
+ARTICLE_TEXT_ONLY = 2
 CYRILLIC = re.compile(r"[\u0400-\u052f]")
 MODEL_QUESTION_RU = re.compile(
     r"(?:(?:привет|здравствуй|слушай)[,.!]?\s+)?"
@@ -217,6 +221,15 @@ class Inbox:
 
     def save_tool(self, key, update_id, result):
         self.db.execute("INSERT INTO bot_tool_results VALUES (?,?,?)", (key, update_id, json.dumps(result)))
+
+    def tool_results(self, update_id, name):
+        rows = self.db.execute("SELECT step,message FROM bot_steps WHERE update_id=? ORDER BY step", (update_id,))
+        for row in rows:
+            for index, call in enumerate(json.loads(row["message"]).get("tool_calls") or []):
+                if call.get("function", {}).get("name") == name:
+                    result = self.get_tool(f"tg:{update_id}:{row['step']}:{index}")
+                    if result is not None:
+                        yield result
 
     def claim_progress(self, update_id):
         return self.db.execute("""UPDATE bot_inbox SET progress_attempted=1
@@ -525,6 +538,34 @@ def _report_failure(report, russian):
             if russian else f"I couldn’t finish “{report['title']}”. You can set a new time in Tasks.")
 
 
+async def _send_article(tg, uid, rich, photos, markup, *, embed):
+    if embed:
+        try:
+            async with asyncio.timeout(8):
+                message = await tg.call("sendRichMessage", chat_id=uid, rich_message=articles.illustrated(rich, photos), **markup)
+            return message, []
+        except TimeoutError:
+            raise TelegramError() from None
+        except TelegramError as error:
+            if error.code not in RICH_REJECTIONS:
+                raise
+            log.info("Telegram rejected illustrated article status=%s", error.code)
+    return await tg.call("sendRichMessage", chat_id=uid, rich_message=rich, **markup), photos
+
+
+async def _reply_with_photos(tg, uid, message, photos):
+    if not photos or not isinstance(message, dict) or not message.get("message_id"):
+        return
+    with suppress(TimeoutError):
+        async with asyncio.timeout(5):
+            for photo in photos:
+                with suppress(TelegramError):
+                    await tg.call("sendPhoto", chat_id=uid, photo=photo["url"], parse_mode="HTML",
+                                  caption=f'{escape(photo["title"])}\n{article_images.caption_html(photo)}',
+                                  reply_parameters={"message_id": message["message_id"], "allow_sending_without_reply": True},
+                                  disable_notification=True)
+
+
 async def _handle(row, store, inbox, tg, agent):
     uid, update_id = row["uid"], row["id"]
     original = json.loads(row["message"])
@@ -679,25 +720,32 @@ async def _handle(row, store, inbox, tg, agent):
             inbox.done(update_id)
             return
         reply = await _send_widget(store, tg, uid, update_id, reply, show_plan, russian=ru)
-        if (not show_plan and not row["sent_chunks"] and not row["article_fallback"]
-                and not widgets.for_update(store, update_id)):
-            rich = articles.rich_content(reply)
-            if rich:
-                rich_keyboard = keyboard + ([save_button] if save_button else [])
-                markup = {"reply_markup": {"inline_keyboard": rich_keyboard}} if rich_keyboard else {}
-                try:
-                    message = await tg.call("sendRichMessage", chat_id=uid, rich_message=rich, **markup)
-                except TelegramError as error:
-                    if error.code not in (400, 404, 405, 413):
-                        raise
-                    log.info("Telegram rejected rich formatting status=%s", error.code)
-                    inbox.db.execute("UPDATE bot_inbox SET article_fallback=1 WHERE id=?", (update_id,))
-                else:
-                    if answer_id:
-                        saved_results.remember_message(store, uid, answer_id, message)
-                    inbox.done(update_id, delivered=True)
-                    return
+        rich = articles.rich_content(reply) if not show_plan and not widgets.for_update(store, update_id) else None
+        photos = []
+        if rich:
+            photos = list({photo["source"]: photo for photo in inbox.tool_results(update_id, article_images.TOOL_NAME)
+                           if isinstance(photo, dict) and photo.get("found") is True}.values())
+        if rich and not row["sent_chunks"] and row["article_fallback"] != ARTICLE_PLAIN:
+            rich_keyboard = keyboard + ([save_button] if save_button else [])
+            markup = {"reply_markup": {"inline_keyboard": rich_keyboard}} if rich_keyboard else {}
+            embed = bool(photos) and not row["article_fallback"]
+            if embed:
+                inbox.db.execute("UPDATE bot_inbox SET article_fallback=? WHERE id=?", (ARTICLE_TEXT_ONLY, update_id))
+            try:
+                message, photos = await _send_article(tg, uid, rich, photos, markup, embed=embed)
+            except TelegramError as error:
+                if error.code not in RICH_REJECTIONS:
+                    raise
+                log.info("Telegram rejected rich formatting status=%s", error.code)
+                inbox.db.execute("UPDATE bot_inbox SET article_fallback=? WHERE id=?", (ARTICLE_PLAIN, update_id))
+            else:
+                if answer_id:
+                    saved_results.remember_message(store, uid, answer_id, message)
+                inbox.done(update_id, delivered=True)
+                await _reply_with_photos(tg, uid, message, photos)
+                return
         parts = list(chunks(reply))
+        message = None
         for n, chunk in enumerate(parts):
             if n < row["sent_chunks"]:
                 continue
@@ -730,6 +778,7 @@ async def _handle(row, store, inbox, tg, agent):
                 saved_results.remember_message(store, uid, answer_id, message)
             inbox.db.execute("UPDATE bot_inbox SET sent_chunks=? WHERE id=?", (n+1, update_id))
         inbox.done(update_id, delivered=True)
+        await _reply_with_photos(tg, uid, message, photos)
     except TelegramError as error:
         if error.code in (400, 403):
             log.info("Telegram rejected conversation delivery status=%s", error.code)

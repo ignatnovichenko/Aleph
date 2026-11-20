@@ -1,7 +1,10 @@
 """Article formatting for Telegram's native Rich Messages."""
+from html import escape
 import re
 
 from markdown_it import MarkdownIt
+
+from .article_images import caption_html
 
 MARKDOWN = MarkdownIt("commonmark", {"html": False, "maxNesting": 12}).enable("table").disable("image")
 MARKDOWN.validateLink = lambda url: url.lower().startswith(("https://", "http://", "#"))
@@ -18,6 +21,21 @@ def rich_content(reply):
     return {"html": rendered}
 
 
+def illustrated(rich, photos):
+    def figure(photo):
+        return (f'<figure><img src="{escape(photo["url"])}"/>'
+                f'<figcaption>{escape(photo["title"])}<cite>{caption_html(photo)}</cite></figcaption></figure>\n')
+
+    html = rich["html"]
+    lead = re.match(r"(?:<h[1-6]>.*?</h[1-6]>\n)?(?:<p>.*?</p>\n)?", html, re.DOTALL).end()
+    body = html[lead:]
+    if len(photos) > 1:
+        headings = list(re.finditer(r"^<h[1-6]>", body, re.MULTILINE))
+        offset = headings[len(headings) // 2].start() if len(headings) > 1 else len(body)
+        body = body[:offset] + figure(photos[1]) + body[offset:]
+    return {"html": html[:lead] + figure(photos[0]) + body}
+
+
 # Keep short Markdown and article fallbacks readable in Telegram's regular messages.
 _BASIC_MARKUP = re.compile(r"\*\*|__|\x60|^#{1,6}\s|\]\(https?://", re.MULTILINE)
 
@@ -29,7 +47,6 @@ def basic_content(chunk):
 
 
 def _regular_html(markup):
-    from html import escape
     from html.parser import HTMLParser
 
     class TelegramText(HTMLParser):
