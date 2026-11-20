@@ -1,7 +1,7 @@
 import { bridge, bridgeRequest } from "./bridge.js";
 import { apiRequest, statePath } from "./transport.js";
 import type { RequestOptions, WriteMethod } from "./transport.js";
-import type { CalendarEvent, ChatGPTConnection, ChatGPTPairing, Connections, Service, ProjectEntry, ProjectSource, SourcePreview, Feed, ModelCatalog, ModelSummary, Project, ProjectSkills, SavedMemory, Settings, Skill, SkillDraft, SkillSummary, Task, WidgetState, WorkspaceState } from "./types.js";
+import type { CalendarEvent, ChatGPTConnection, ChatGPTPairing, Connections, Service, ProjectEntry, ProjectResult, ProjectResultDetail, ProjectSource, SourcePreview, Feed, ModelCatalog, ModelSummary, Project, ProjectSkills, SavedMemory, Settings, Skill, SkillDraft, SkillSummary, Task, WidgetState, WorkspaceState } from "./types.js";
 
 export { bridge };
 export type { RequestOptions, WriteMethod };
@@ -16,6 +16,8 @@ type Reads = {
   [path: `/api/tasks/${number}/result`]: {html: string | null; delivered_at: string | null};
   [path: `/api/connections/calendar/events?${string}`]: {events: CalendarEvent[]; more: boolean};
   [path: `/api/projects/${number}/entries`]: ProjectEntry[];
+  [path: `/api/projects/${number}/results`]: ProjectResult[];
+  [path: `/api/projects/${number}/results/${number}`]: ProjectResultDetail;
   [path: `/api/projects/${number}/sources`]: ProjectSource[];
   [path: `/api/projects/${number}/sources/${number}`]: SourcePreview;
   [path: `/api/projects/${number}/skills`]: ProjectSkills;
@@ -38,6 +40,7 @@ export type Writes = {
   "/api/connections/drive/picker": {url: string};
   [path: `/api/projects/${number}/entries`]: ProjectEntry;
   [path: `/api/projects/${number}/entries/${number}`]: null;
+  [path: `/api/projects/${number}/results/${number}`]: null;
   [path: `/api/projects/${number}/sources`]: ProjectSource;
   [path: `/api/projects/${number}/sources/file`]: ProjectSource;
   [path: `/api/projects/${number}/sources/${number}/transcript`]: ProjectSource;

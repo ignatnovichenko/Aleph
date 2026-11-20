@@ -14,6 +14,7 @@ interface TelegramWebApp {
   close(): void;
   sendData(data: string): void;
   openLink?(url: string): void;
+  openTelegramLink?(url: string): void;
   isVersionAtLeast?(version: string): boolean;
   isVerticalSwipesEnabled?: boolean;
   disableVerticalSwipes?(): void;
@@ -87,6 +88,13 @@ export interface ProjectEntry {
   source: string;
   created_at: string;
 }
+
+export interface ProjectResult {
+  id: number;
+  title: string;
+  saved_at: string;
+}
+export type ProjectResultDetail = ProjectResult & {html: string; chat_url: string};
 
 export interface ProjectSource {
   id: number;

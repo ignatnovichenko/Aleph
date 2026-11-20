@@ -1,6 +1,7 @@
 const paths = {
   home: '<rect x="4.5" y="5" width="15" height="16" rx="3"/><path d="M8 3v4m8-4v4M4.5 10h15m-12 5 2.5 2.5 4.5-4.5"/>',
   projects: '<path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/><path d="M3 10h18"/>',
+  folderOpen: '<path d="M3 18V7a2 2 0 0 1 2-2h5l2 2h5a2 2 0 0 1 2 2v2"/><path d="M4 15.5 6 12a2 2 0 0 1 1.7-1h12a2 2 0 0 1 1.8 2.8l-2.2 5a2 2 0 0 1-1.8 1.2H5a2 2 0 0 1-1.8-2.9z"/>',
   settings: '<circle cx="12" cy="12" r="2.7"/><path d="M10 3.7h4l.6 2.2 1.5.9 2.2-.6 2 3.4-1.6 1.5v1.8l1.6 1.5-2 3.4-2.2-.6-1.5.9-.6 2.2h-4l-.6-2.2-1.5-.9-2.2.6-2-3.4 1.6-1.5v-1.8L3.7 9.6l2-3.4 2.2.6 1.5-.9z"/>',
   person: '<circle cx="12" cy="8" r="3.3"/><path d="M5.5 20v-1.5a5 5 0 0 1 5-5h3a5 5 0 0 1 5 5V20"/>',
   edit: '<path d="m14.5 6 3.5 3.5M5 19l3.6-.7L19 8A2.5 2.5 0 1 0 15.5 4.5L5.8 14.8z"/>',
@@ -21,7 +22,6 @@ const paths = {
   sparkle:
     '<path d="m12 2 2.6 7.4L22 12l-7.4 2.6L12 22l-2.6-7.4L2 12l7.4-2.6L12 2Z"/>',
   skills: '<path d="m12 3 8.5 4.5L12 12 3.5 7.5 12 3Zm-8.5 9 8.5 4.5 8.5-4.5m-17 4.5 8.5 4.5 8.5-4.5"/>',
-  taskList: '<rect x="6.5" y="5.5" width="14" height="15" rx="3"/><path d="M4 16.5V6a3 3 0 0 1 3-3h9.5M10.5 10h6m-6 3.5h6m-6 3.5H15"/>',
   rss: '<path d="M5 5c7.5 0 14 6.5 14 14M5 11c4.2 0 8 3.8 8 8"/><circle cx="5.5" cy="18.5" r="1.4" fill="currentColor" stroke="none"/>',
   calendar:
     '<rect x="3.5" y="5" width="17" height="16" rx="3"/><path d="M7.5 3v4m9-4v4m-13 3h17m-13 4h3m3 0h3"/>',

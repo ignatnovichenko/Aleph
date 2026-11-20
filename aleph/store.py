@@ -7,7 +7,7 @@ import sqlite3
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .feeds import CATALOG
-from . import capture, connections, memory, project_sources, projects, reports, skills
+from . import capture, connections, memory, project_sources, projects, reports, saved_results, skills
 from .routines import day_names
 
 UTC = timezone.utc
@@ -134,6 +134,7 @@ class Store:
         connections.initialize(self.db)
         capture.initialize(self.db)
         reports.initialize(self.db)
+        saved_results.initialize(self.db)
         task_columns = {row["name"] for row in self.db.execute("PRAGMA table_info(tasks)")}
         if "remind_at" not in task_columns:
             self.db.executescript("""

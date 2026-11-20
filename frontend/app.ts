@@ -1,6 +1,7 @@
 import { icon } from "./icons.js";
 import { revealMiniApp } from "./telegram.js";
 import { bindSheetMotion } from "./sheet-motion.js";
+import { moveTaskBranch } from "./task-tree-motion.js";
 import { ApiMessage } from "./transport.js";
 import type { IconName } from "./icons.js";
 import type { RequestOptions, WriteMethod, Writes } from "./store.js";
@@ -37,9 +38,9 @@ const initialView = new URLSearchParams(location.search);
 let initialTaskOpened = false;
 let page: Page = initialView.get("view") === "settings" ? "settings" : "home";
 type TaskSection = "today" | "upcoming" | "inbox" | "done";
-type PlanFilter = "all" | TaskSection;
-let filter: PlanFilter = "all";
-let taskScope: number | null = null;
+const taskFolders = new Set<number>();
+const taskArchive = new Set<number>();
+let taskTreeReady = false;
 let projectDetail: number | null = null;
 let projectPane: "tasks" | "notes" | "sources" = "tasks";
 let projectDoneOpen = false;
@@ -580,7 +581,8 @@ function taskRow(task: Task, withProject = true) {
   const status = report ? reportStatus(task) : urgent ? t("Просрочено","Overdue") :
     task.remind_at && !task.due_at ? t("Напоминание","Reminder") : "";
   const due = task.due_at ? `${report ? t("Запуск","Run") : t("Срок","Due")} ${taskDate(task.due_at)}` : "";
-  const reminder = task.remind_at && !done ? t("Напомню в","Reminder at") + " " + taskDate(task.remind_at) : "";
+  const reminder = task.remind_at && !done ? (task.remind_at === task.due_at
+    ? t("С напоминанием", "With reminder") : t("Напомню в","Reminder at") + " " + taskDate(task.remind_at)) : "";
   const toggle = report ? glyph("sparkle") :
     `<button class="task-toggle" data-action="toggle-task" data-id="${task.id}" aria-label="${e((done ? t("Вернуть в работу","Reopen") : t("Отметить готовой","Mark complete")) + " · " + task.title)}" aria-pressed="${done}">
       <span class="ring">${done ? icon("check") : ""}</span></button>`;
@@ -755,133 +757,120 @@ async function openModelSettings() {
 function sectionHead(title: string) {
   return `<h2 class="section-title">${title}</h2>`;
 }
-function taskLabels(): Record<PlanFilter, string> {
-  return {all: t("Все", "All"), today: t("Сегодня", "Today"), upcoming: t("Скоро", "Upcoming"),
-    inbox: t("Без даты", "No date"), done: t("Готово", "Done")};
-}
-
-function taskScopeName(scope: number | null) {
-  return scope === null ? t("Все проекты", "All projects") : projectName(scope);
-}
-
-function taskScopeIcon(scope: number | null): IconName {
-  return scope === null ? "taskList" : scope === 0 ? "person" : "projects";
-}
-
-function taskScopeSheet() {
-  const counts = new Map<number, number>();
-  let total = 0;
+function taskTreeData() {
+  const folders = new Map<number, Task[]>();
   for (const task of state.tasks) {
-    if (taskDone(task)) continue;
     const id = task.project_id || 0;
-    counts.set(id, (counts.get(id) || 0) + 1);
-    total++;
+    const folder = folders.get(id);
+    if (folder) folder.push(task);
+    else folders.set(id, [task]);
   }
-  const choice = (scope: number | null) => {
-    const selected = taskScope === scope;
-    const count = scope === null ? total : counts.get(scope) || 0;
-    return `<button class="task-scope-option setting-row" data-action="select-task-scope" data-id="${scope ?? "all"}" aria-pressed="${selected}">
-      ${glyph(taskScopeIcon(scope))}<strong dir="auto">${e(taskScopeName(scope))}</strong>
-      <span class="task-scope-option-count" aria-label="${t("В работе", "Open")} ${count}">${count || ""}</span>
-      <span class="task-scope-check" aria-hidden="true">${selected ? icon("check") : ""}</span>
-      </button>`;
-  };
-  openSheet(t("Задачи по проектам", "Tasks by project"), `
-    <div class="task-scope-choices" role="group" aria-label="${t("Проект для списка задач", "Project for the task list")}">
-      <div class="panel task-scope-all">${choice(null)}</div>
-      <div class="panel">${[0, ...(state.projects || []).map(project => project.id)].map(choice).join("")}</div>
-    </div>`);
+  return folders;
 }
 
-function selectTaskScope(value?: string) {
-  const next = value === "all" ? null : Number(value);
-  if (next !== null && next !== 0 && !state.projects?.some(project => project.id === next)) return;
-  if (next === taskScope) {
-    closeSheet();
-    return;
+function initTaskTree(folders: Map<number, Task[]>) {
+  if (taskTreeReady) return;
+  taskTreeReady = true;
+  const active = activeId();
+  if (folders.get(active)?.length) taskFolders.add(active);
+  if (folders.get(0)?.length) taskFolders.add(0);
+  if (!taskFolders.size) {
+    const first = state.projects?.find(project => folders.get(project.id)?.length);
+    taskFolders.add(first?.id ?? active);
   }
-  taskScope = next;
-  selectionFeedback();
-  render();
-  closeSheet();
-  if (reducedMotion.matches) return;
-  const view = activeView();
-  view?.content.querySelector(".task-scope-copy")?.animate(
-    [{opacity: .3, transform: "translateY(5px)"}, {opacity: 1, transform: "translateY(0)"}],
-    {delay: 45, duration: 290, fill: "backwards", easing: "cubic-bezier(.16,1,.3,1)"});
-  view?.content.querySelector(".task-results")?.animate(
-    [{opacity: .25, transform: "translateY(10px)"}, {opacity: 1, transform: "translateY(0)"}],
-    {delay: 70, duration: 345, fill: "backwards", easing: "cubic-bezier(.16,1,.3,1)"});
 }
 
-function taskSection(title: string, items: Task[], withProject: boolean, attention = false) {
-  if (!items.length) return "";
-  return `<section class="task-section${attention ? " attention-block" : ""}">
-    <h2 class="section-title">${title}<small>${items.length}</small></h2>
-    <div class="agenda panel">${items.map(task => taskRow(task, withProject)).join("")}</div>
-  </section>`;
+function taskTreeRows(items: Task[]) {
+  return items.map(task => taskRow(task, false)).join("");
 }
 
-function groupedTasks(tasks: Task[]) {
+function taskFolderBody(id: number, items: Task[]) {
   const groups: Record<TaskSection, Task[]> = {today: [], upcoming: [], inbox: [], done: []};
   const attention: Task[] = [];
   const today = localDateTime(Date.now(), zone()).slice(0, 10);
-  for (const task of tasks) {
+  for (const task of sorted(items)) {
     const group = taskFilter(task, today);
     if (group === "today" && needsAttention(task)) attention.push(task);
     else groups[group].push(task);
   }
-  return {groups, attention};
-}
-
-function taskEmpty(first: boolean, next?: Task) {
-  const title = {
-    all: t("Задач пока нет", "No tasks yet"), today: t("На сегодня всё спокойно", "You’re clear for today"),
-    upcoming: t("Впереди пока ничего", "Nothing scheduled yet"), inbox: t("Задач без даты нет", "No undated tasks"),
-    done: t("Здесь будут выполненные задачи", "Completed tasks will appear here"),
-  }[filter];
-  return `<div class="empty surface">
-    <strong>${first ? t("С чего начнём?", "What shall we start with?") : title}</strong>
-    ${first ? `<p>${t("Попробуй: «Завтра в 18:00 пришли разбор SpaceX».", "Try: “Send me a SpaceX analysis tomorrow at 6 PM.”")}</p>
-      <button class="button primary" data-action="chat">${t("Поручить в чате","Ask in chat")}</button>
-      <button class="small-action" data-action="new-task">${t("Добавить задачу вручную","Add a task manually")}</button>`
-      : next ? `<p>${t("Ближайшее","Up next")} · ${e(taskDate(next.due_at || next.remind_at || ""))}</p>
-        <button class="small-action" data-action="edit-task" data-id="${next.id}">${e(next.title)} ${icon("arrow")}</button>` : ""}
+  const dated = (label: string, tasks: Task[], alert = false) => tasks.length
+    ? `<section class="task-tree-group${alert ? " attention-block" : ""}">
+        <h3>${label}</h3>${taskTreeRows(tasks)}</section>` : "";
+  const archived = taskArchive.has(id);
+  return `<div class="task-branch-inner">
+    ${dated(t("Требует внимания", "Needs attention"), attention, true)}
+    ${dated(t("Сегодня", "Today"), groups.today)}
+    ${dated(t("Скоро", "Upcoming"), groups.upcoming)}
+    ${dated(t("Без даты", "No date"), groups.inbox)}
+    ${groups.done.length ? `<div class="task-tree-archive">
+      <button class="task-archive-toggle" data-action="task-archive" data-id="${id}" aria-expanded="${archived}" aria-controls="task-archive-${id}">
+        <span class="task-tree-chevron">${icon("arrow")}</span>${icon("check")}
+        <span>${t("Готово", "Completed")}</span><small>${groups.done.length}</small></button>
+      <div id="task-archive-${id}" class="task-archive-body"${archived ? "" : " hidden inert"}>
+        ${archived ? `<div class="task-archive-inner">${taskTreeRows(groups.done)}</div>` : ""}</div>
+    </div>` : ""}
+    ${items.length ? "" : `<p class="task-folder-empty">${t("В этой папке пока пусто", "This folder is empty")}</p>`}
   </div>`;
 }
 
-function overview() {
-  const allProjects = taskScope === null;
-  const tasks = sorted(allProjects ? state.tasks : state.tasks.filter(task => (task.project_id || 0) === taskScope));
-  const {groups, attention} = groupedTasks(tasks);
-  const labels = taskLabels();
-  const first = allProjects && !state.tasks.length && (filter === "all" || filter === "today");
-  const open = tasks.length - groups.done.length;
-  const scope = taskScopeName(taskScope);
-  const attentionSection = filter === "all" || filter === "today"
-    ? taskSection(t("Требует внимания", "Needs attention"), attention, allProjects, true) : "";
-  const results = filter === "all"
-    ? (Object.keys(groups) as TaskSection[]).map(key => taskSection(labels[key], groups[key], allProjects)).join("")
-    : groups[filter].length ? `<div class="agenda panel">${groups[filter].map(task => taskRow(task, allProjects)).join("")}</div>` : "";
-  return `<div class="tasks-toolbar">
-    <button class="task-scope" data-action="task-scope" aria-haspopup="dialog" aria-controls="sheet"
-      aria-label="${e(t("Задачи по проектам", "Tasks by project") + " · " + scope)}">
-      ${glyph(taskScopeIcon(taskScope))}
-      <span class="task-scope-copy"><strong dir="auto">${e(scope)}</strong>
-        <small>${open ? t("В работе", "Open") + " · " + open : t("Задач в работе нет", "No open tasks")}</small></span>
-      <span class="task-scope-arrow">${icon("arrow")}</span>
-    </button>
-    ${first ? "" : `<button class="action-plus" data-action="new-task"${taskScope === null ? "" : ` data-id="${taskScope}"`}
-      aria-label="${t("Добавить задачу","Add task")}">${icon("plus")}</button>`}
+function taskFolder(id: number, items: Task[]) {
+  const open = taskFolders.has(id);
+  const name = projectName(id);
+  return `<section class="task-folder${open ? " expanded" : ""}">
+    <div class="task-folder-head">
+      <button class="task-folder-toggle" data-action="task-folder" data-id="${id}"
+        aria-expanded="${open}" aria-controls="task-folder-${id}">
+        <span class="task-tree-chevron">${icon("arrow")}</span>
+        <span class="task-folder-icon">${icon(id ? "projects" : "person")}${id ? icon("folderOpen") : ""}</span>
+        <strong dir="auto">${e(name)}</strong><small>${items.length || ""}</small>
+      </button>
+      <button class="task-folder-add" data-action="new-task" data-id="${id}"
+        aria-label="${e(t("Добавить задачу в папку «", "Add a task to “") + name + t("»", "”"))}">${icon("plus")}</button>
     </div>
+    <div class="task-branch" id="task-folder-${id}"${open ? "" : " hidden inert"}>
+      ${open ? taskFolderBody(id, items) : ""}</div>
+  </section>`;
+}
+
+function toggleTaskBranch(id: number, archive: boolean) {
+  const button = activeView()?.content.querySelector<HTMLButtonElement>(
+    `[data-action="${archive ? "task-archive" : "task-folder"}"][data-id="${id}"]`);
+  const panelId = button?.getAttribute("aria-controls");
+  const panel = panelId && document.getElementById(panelId);
+  if (!button || !panel) return;
+  const branches = archive ? taskArchive : taskFolders;
+  const open = !branches.has(id);
+  if (open) branches.add(id);
+  else branches.delete(id);
+  button.setAttribute("aria-expanded", String(open));
+  if (!archive) button.closest(".task-folder")?.classList.toggle("expanded", open);
+  selectionFeedback();
+  moveTaskBranch(panel, open, reducedMotion.matches, () => {
+    const items = state.tasks.filter(task => (task.project_id || 0) === id);
+    return archive
+      ? `<div class="task-archive-inner">${taskTreeRows(sorted(items.filter(taskDone)))}</div>`
+      : taskFolderBody(id, items);
+  });
+}
+
+function overview() {
+  const folders = taskTreeData();
+  initTaskTree(folders);
+  const ids = [...new Set([0, activeId(), ...(state.projects || []).map(project => project.id), ...folders.keys()])];
+  const first = !state.tasks.length && ids.length === 1;
+  return `<div class="task-tree-toolbar">
     <button class="active-context" data-action="view-project" data-id="${activeId()}">${icon(activeId() ? "projects" : "person")}
       <span>${t("В чате", "In chat")} · <strong dir="auto">${e(projectName(activeId()))}</strong></span>${icon("arrow")}</button>
-    <div class="plan-tabs" role="group" aria-label="${t("Разделы задач", "Task views")}">${Object.entries(labels).map(([key,label]) =>
-      `<button data-filter="${key}" aria-pressed="${key === filter}">${label}</button>`).join("")}</div>
-    <div class="task-results" role="region" aria-label="${e(scope)}">
-      ${attentionSection + results || taskEmpty(first, filter === "today" ? groups.upcoming[0] : undefined)}
-      ${allProjects && (filter === "all" || filter === "today") ? calendarSection() + routinesPanel() : ""}
-    </div>`;
+    <button class="action-plus" data-action="new-task" aria-label="${t("Добавить задачу","Add task")}">${icon("plus")}</button>
+    </div>
+    <div class="task-tree panel" role="region" aria-label="${t("Папки задач", "Task folders")}">
+      ${ids.map(id => taskFolder(id, folders.get(id) || [])).join("")}
+    </div>
+    ${first ? `<div class="empty surface task-tree-first"><strong>${t("С чего начнём?", "What shall we start with?")}</strong>
+      <p>${t("Попробуй: «Завтра в 18:00 пришли разбор SpaceX».", "Try: “Send me a SpaceX analysis tomorrow at 6 PM.”")}</p>
+      <button class="button primary" data-action="chat">${t("Поручить в чате","Ask in chat")}</button>
+      <button class="small-action" data-action="new-task">${t("Добавить задачу вручную","Add a task manually")}</button></div>` : ""}
+    ${calendarSection() + routinesPanel()}`;
 }
 function calendarSection() {
   if (state.connections?.calendar !== "connected") return "";
@@ -939,9 +928,10 @@ function projectPage(project?: Project) {
   const tasks = sorted(state.tasks.filter(task => (task.project_id || 0) === id));
   const done = tasks.filter(taskDone);
   const open = tasks.filter(task => !taskDone(task));
-  const skillRow = `<div class="panel project-skill-link">${settingRow("skills", t("Скиллы", "Skills"),
-    t("Выбрать для этого проекта", "Choose for this workspace"), "project-skills", String(id))}</div>`;
-  if (!project) return skillRow + projectTasks(id, open, done);
+  const savedRow = settingRow("bookmark", t("Результаты", "Results"),
+    t("Сохранённые ответы", "Saved answers"), "project-results", String(id));
+  if (!project) return `<div class="panel project-skill-link">${settingRow("skills", t("Скиллы", "Skills"),
+    t("Выбрать для этого проекта", "Choose for this workspace"), "project-skills", String(id))}${savedRow}</div>` + projectTasks(id, open, done);
 
   const hasContext = !!project.context.trim();
   return `<div class="panel project-configuration">
@@ -952,6 +942,7 @@ function projectPage(project?: Project) {
       </span><span class="tail">${icon("arrow")}</span>
       </button>
       ${settingRow("skills", t("Скиллы", "Skills"), undefined, "project-skills", String(id))}
+      ${savedRow}
     </div>
     <div class="project-panes" role="group" aria-label="${t("Разделы проекта","Project sections")}">
       ${([["tasks", t("Задачи","Tasks"), open.length], ["notes", t("Записи","Notes"), entries?.length],
@@ -978,6 +969,56 @@ function projectTasks(id: number, open: Task[], done: Task[], decision?: Project
       <span class="setting-detail" dir="auto">${e(decision.text)}</span></span><span class="tail">${icon("arrow")}</span>
     </button>` : ""}
   </section>`;
+}
+
+async function projectResultsSheet(projectId: number) {
+  openSheet(t("Результаты", "Results"), `<div data-saved-results aria-live="polite"><p class="sheet-desc">${t("Загружаю…","Loading…")}</p></div>`);
+  const node = requiredElement(sheet, "[data-saved-results]");
+  try {
+    const items = demo ? [] : await request(`/api/projects/${projectId}/results`);
+    if (!node.isConnected || !sheet.open) return;
+    node.innerHTML = items.length ? `<div class="panel">${items.map(item =>
+      settingRow("document", item.title, formatDate("day", item.saved_at),
+        "saved-result", String(item.id))).join("")}</div>`
+      : `<div class="empty surface"><strong>${t("Пока нет сохранённых ответов", "No saved answers yet")}</strong>
+        <p>${t("Нажми «Сохранить в проект» под разбором или отчётом в чате с Алефом.",
+                 "Tap Save to project under a detailed answer or report in your chat with Aleph.")}</p></div>`;
+  } catch (error) {
+    if (node.isConnected) node.textContent = errorMessage(error);
+  }
+}
+
+function prepareResultLinks(node: Element) {
+  node.querySelectorAll<HTMLAnchorElement>("a[href^='http']").forEach(link => {
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    if (!link.hasAttribute("data-telegram-link")) link.dataset.externalLink = "";
+  });
+}
+
+async function savedResultSheet(projectId: number, answerId: number) {
+  openSheet(t("Сохранённый ответ", "Saved answer"), `<p class="sheet-desc" data-await-answer role="status">${t("Загружаю…","Loading…")}</p>`);
+  const marker = requiredElement(sheet, "[data-await-answer]");
+  try {
+    const result = await request(`/api/projects/${projectId}/results/${answerId}`);
+    if (!marker.isConnected || !sheet.open || sheet.classList.contains("closing")) return;
+    openSheet(result.title, `
+      <div class="saved-result-meta">
+        <button class="small-action back-project" data-action="project-results" data-id="${projectId}">
+          ${icon("arrow")}${t("Результаты", "Results")}</button>
+        <span>${e(formatDate("day", result.saved_at))}</span>
+      </div>
+      <article class="task-result saved-result-content">${result.html}</article>
+      <div class="saved-result-actions">
+        ${result.chat_url ? `<a class="button" href="${e(result.chat_url)}" target="_blank" rel="noopener noreferrer" data-telegram-link>
+          ${icon("plane")}${t("Найти в чате", "Find in chat")}</a>` : ""}
+        <button class="small-action project-entry-remove" data-action="remove-saved-result" data-id="${answerId}">
+          ${icon("trash")}${t("Убрать из проекта", "Remove from project")}</button>
+      </div><p class="form-error" role="alert"></p>`);
+    prepareResultLinks(sheet);
+  } catch (error) {
+    if (marker.isConnected) marker.textContent = errorMessage(error);
+  }
 }
 
 function entryKindLabel(kind: ProjectEntry["kind"]) {
@@ -1569,11 +1610,7 @@ async function resultSheet(task: Task) {
     node.innerHTML = result.html ? `<article class="task-result">${result.html}</article>` :
       `<p class="sheet-desc">${t("Результат в переписке с Алефом.","Find the result in your chat with Aleph.")}</p>
        <button class="button primary" data-action="chat">${t("Открыть чат","Open chat")}</button>`;
-    node.querySelectorAll<HTMLAnchorElement>("a[href^='http']").forEach(link => {
-      link.target = "_blank";
-      link.rel = "noopener noreferrer";
-      link.dataset.externalLink = "";
-    });
+    prepareResultLinks(node);
   } catch (error) {
     if (node.isConnected) node.innerHTML = `<p class="sheet-desc">${e(errorMessage(error))}</p>
       <button class="button" data-action="open-result" data-id="${task.id}">${t("Повторить","Try again")}</button>`;
@@ -1687,7 +1724,8 @@ async function load() {
     const target = task && /^\d{1,18}$/.test(task) ? byId(task) : undefined;
     if (target) {
       page = "home";
-      filter = taskFilter(target);
+      taskFolders.add(target.project_id || 0);
+      if (taskDone(target)) taskArchive.add(target.project_id || 0);
       setTheme();
       render();
       if (initialView.get("result") === "1" && target.report_state === "sent") void resultSheet(target);
@@ -1777,12 +1815,23 @@ async function act(action: string, id?: string) {
     case "chat":
       openChat();
       break;
-    case "task-scope":
-      taskScopeSheet();
+    case "task-folder":
+    case "task-archive":
+      toggleTaskBranch(Number(id), action === "task-archive");
       break;
-    case "select-task-scope":
-      selectTaskScope(id);
+    case "project-results":
+      if (projectDetail !== null && projectDetail === Number(id)) await projectResultsSheet(projectDetail);
       break;
+    case "saved-result":
+      if (projectDetail !== null) await savedResultSheet(projectDetail, Number(id));
+      break;
+    case "remove-saved-result": {
+      const project = projectDetail;
+      if (project === null || !window.confirm(t("Убрать ответ из проекта?", "Remove this answer from the project?"))) break;
+      if (await write(`/api/projects/${project}/results/${Number(id)}`, "DELETE", undefined, () => {},
+        t("Ответ убран из проекта", "Answer removed from the project"))) await projectResultsSheet(project);
+      break;
+    }
     case "skill-library":
     case "project-skills":
     case "skill-list":
@@ -2085,6 +2134,12 @@ async function act(action: string, id?: string) {
 }
 document.addEventListener("click", (event) => {
   const target = event.target instanceof Element ? event.target : null;
+  const telegramLink = target?.closest<HTMLAnchorElement>("[data-telegram-link]");
+  if (telegramLink && webapp()?.openTelegramLink) {
+    event.preventDefault();
+    webapp()?.openTelegramLink?.(telegramLink.href);
+    return;
+  }
   const link = target?.closest<HTMLAnchorElement>("[data-external-link]");
   if (link && webapp()?.openLink) {
     event.preventDefault();
@@ -2095,12 +2150,7 @@ document.addEventListener("click", (event) => {
   const el = target?.closest("button");
   if (!el || el.disabled || sheet.classList.contains("closing")) return;
   if (el.dataset.page) navigate(el.dataset.page);
-  else if (el.dataset.filter && Object.hasOwn(taskLabels(), el.dataset.filter)) {
-    if(filter===el.dataset.filter)return;
-    selectionFeedback();
-    filter = el.dataset.filter as PlanFilter;
-    render();
-  } else if (el.dataset.action) void act(el.dataset.action, el.dataset.id);
+  else if (el.dataset.action) void act(el.dataset.action, el.dataset.id);
 });
 app.addEventListener("toggle", event => {
   const target = event.target;
@@ -2259,7 +2309,7 @@ sheet.addEventListener("submit", async (event) => {
           });
           mergeRecord(state.tasks, record);
           if (confirmedZone) Object.assign(state.settings, {timezone: confirmedZone, timezone_confirmed: true});
-          if (page === "home" && filter !== "all") filter = taskFilter(record);
+          if (page === "home") taskFolders.add(record.project_id || 0);
         },
         t("Поручение сохранено","Task saved"),
         {requestKey: id ? null : form.dataset.requestKey}

@@ -17,7 +17,7 @@ from .chatgpt_auth import ChatGPTError
 from .chatgpt_pair import IMPORT_PATH, MAX_PACKET, owner as chatgpt_owner
 from .feeds import feed_catalog
 from .links import mini_app_url
-from . import articles, connections, drive_picker, integrations, memory, models, project_sources, projects, public_fetch, reports, skills, source_text, widgets
+from . import articles, connections, drive_picker, integrations, memory, models, project_sources, projects, public_fetch, reports, saved_results, skills, source_text, widgets
 from .store import UTC
 
 
@@ -330,6 +330,19 @@ def install_api(app, store, token, model_key=None):
         selected = [skill["id"] for skill in skills.for_project(store, uid, project_id)]
         return web.json_response({"skills": skills.library(store, uid), "selected": selected, "limit": skills.MAX_ENABLED})
 
+    async def project_results(request, user):
+        return web.json_response(saved_results.library(store, user["id"], int(request.match_info["id"])))
+
+    async def project_result(request, user):
+        uid, project_id, answer_id = user["id"], int(request.match_info["id"]), int(request.match_info["answer"])
+        if request.method == "DELETE":
+            saved_results.remove(store, uid, project_id, answer_id)
+            return web.Response(status=204)
+        row = saved_results.saved(store, uid, answer_id, project_id)
+        return web.json_response({"id": row["id"], "title": row["title"], "saved_at": row["saved_at"],
+                                  "html": articles.MARKDOWN.render(row["body"]),
+                                  "chat_url": saved_results.chat_url(answer_id)})
+
     async def sources(request, user):
         uid, project_id = user["id"], int(request.match_info["id"])
         if request.method == "GET":
@@ -471,6 +484,9 @@ def install_api(app, store, token, model_key=None):
                ("POST", "/api/skills/preview", skill_preview)]
     routes += [(method, r"/api/skills/{id:\d{1,18}}", skill_item) for method in ("GET", "PATCH", "DELETE")]
     routes += [(method, r"/api/projects/{id:\d{1,18}}/skills", project_skills) for method in ("GET", "PATCH")]
+    result_path = r"/api/projects/{id:\d{1,18}}/results"
+    routes.append(("GET", result_path, project_results))
+    routes += [(method, result_path + r"/{answer:\d{1,18}}", project_result) for method in ("GET", "DELETE")]
     source_path = r"/api/projects/{id:\d{1,18}}/sources"
     routes += [(method, source_path, sources) for method in ("GET", "POST")]
     routes += [(method, source_path + r"/{source:\d{1,18}}", source_item) for method in ("GET", "DELETE", "POST")]

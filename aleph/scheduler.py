@@ -9,7 +9,7 @@ import aiohttp
 
 from .feeds import fetch_feed
 from .routines import SourceUnavailable, eligible, format_routine, queue_routines
-from . import reminders
+from . import reminders, saved_results
 from .store import UTC, timestamp
 
 log = logging.getLogger(__name__)
@@ -214,6 +214,7 @@ async def run_scheduler(store, session, token, *, weather=None):
         try:
             now = datetime.now(UTC)
             if now >= next_feeds:
+                saved_results.prune(store, now)
                 await refresh_feeds(store, session, now)
                 next_feeds = now + timedelta(minutes=5)
             queue_messages(store, now)

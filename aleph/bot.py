@@ -18,7 +18,7 @@ from .hermes import create_agent
 from .links import settings_url, task_button, view_url
 from . import models, projects
 from .llm import ChatGPTUnavailable, ModelRejectsPhoto, ModelUnavailable, RegionUnavailable
-from . import articles, capture, integrations, media, documents, progress, reminders, reports, widgets
+from . import articles, capture, integrations, media, documents, progress, reminders, reports, saved_results, widgets
 
 log = logging.getLogger(__name__)
 PLAN_ALIASES = {"/plan", "/tasks", "открой задачи", "открыть задачи", "open tasks", "открой план", "открыть план", "открой мини-апп", "open plan", "open mini app"}
@@ -222,7 +222,7 @@ class Inbox:
         return self.db.execute("""UPDATE bot_inbox SET progress_attempted=1
             WHERE id=? AND progress_attempted=0 AND reply IS NULL""", (update_id,)).rowcount
 
-    def save_reply(self, row, query, reply):
+    def save_reply(self, row, query, reply, *, report_title=""):
         self.db.execute("BEGIN")
         try:
             self.db.execute("UPDATE bot_inbox SET reply=?,retries=0 WHERE id=?", (reply, row["id"]))
@@ -239,6 +239,10 @@ class Inbox:
                 if widget:
                     context_reply += "\n\n[Виджет в сообщении]\n" + widgets.fallback_text(json.loads(widget["spec"]))
                 self.store.add_history(row["uid"], "assistant", context_reply, project_id=scope)
+                if not widget:
+                    saved_results.prepare(self.store, row["uid"], row["id"], scope, reply, progress.request_text(query))
+            elif report_title:
+                saved_results.prepare(self.store, row["uid"], row["id"], row["project_id"] or 0, reply, report_title=report_title)
             self.db.execute("COMMIT")
         except BaseException:
             self.db.execute("ROLLBACK")
@@ -415,6 +419,15 @@ async def _compose(row, store, inbox, tg, agent):
             return None, ("Tap Open tasks below the chat." if bridge_url else "Open Tasks from the Aleph menu.")
         return None, ("Нажми «Открыть задачи» внизу чата." if bridge_url else "Открой «Задачи» кнопкой Aleph внизу чата.")
     command = (msg.get("text") or "").partition(" ")[0].partition("@")[0]
+    result_link = saved_results.OPEN.fullmatch((msg.get("text") or "").strip())
+    if result_link:
+        ru = _uses_russian(msg)
+        try:
+            result = saved_results.saved(store, uid, int(result_link[1]))
+        except KeyError:
+            return None, "Сохранённый ответ недоступен." if ru else "This saved answer is unavailable."
+        title = result["title"]
+        return None, (f"Сохранённый ответ · {title}" if ru else f"Saved answer · {title}")
     if command in ("/start", "/help"):
         ru = _uses_russian(msg)
         reply = HELLO_RU if ru else HELLO_EN
@@ -526,12 +539,14 @@ async def _handle(row, store, inbox, tg, agent):
         if reply is None:
             typing = asyncio.create_task(_typing(tg, uid))
             query = None
+            report_title = ""
             try:
                 if report and report["report_state"] == "failed":
                     reply = _report_failure(report, ru)
                 elif report:
                     reports.start(store.db, report["id"])
                     reply = await agent.respond(store, uid, report["notes"], None, inbox, update_id, scheduled=True)
+                    report_title = report["title"]
                 else:
                     query, reply = await _compose(row, store, inbox, tg, agent)
             except media.MediaError as error:
@@ -594,7 +609,7 @@ async def _handle(row, store, inbox, tg, agent):
                 tasks = inbox.created_tasks(uid, update_id)
                 if tasks:
                     reply += "\n\n" + "\n\n".join(_task_receipt(store, uid, task, ru) for task in tasks)
-            inbox.save_reply(row, query, reply)
+            inbox.save_reply(row, query, reply, report_title=report_title)
         for artifact in inbox.db.execute("SELECT * FROM bot_documents WHERE update_id=? AND sent=0 ORDER BY rowid", (update_id,)).fetchall():
             try:
                 await documents.send_document(tg.session, tg.token, uid, artifact["filename"], artifact["mime"], artifact["data"])
@@ -608,8 +623,9 @@ async def _handle(row, store, inbox, tg, agent):
             inbox.db.execute("UPDATE bot_documents SET sent=1 WHERE key=?", (artifact["key"],))
 
         command = (original.get("text") or "").strip().lower().split("@",1)[0].rstrip(".!")
-        show_plan = (command.split(" ", 1)[0] in ("/start", "/help", "/plan", "/tasks") or command in PLAN_ALIASES
-                     or bool(original.get("web_app_data")) or inbox.opened_plan(update_id))
+        result_link = saved_results.OPEN.fullmatch((original.get("text") or "").strip())
+        show_plan = not result_link and (command.split(" ", 1)[0] in ("/start", "/help", "/plan", "/tasks") or command in PLAN_ALIASES
+                                        or bool(original.get("web_app_data")) or inbox.opened_plan(update_id))
         approvals = json.loads(row["approval_outbox"]) if row["approval_outbox"] else []
         if not approvals:
             pending = []
@@ -649,11 +665,16 @@ async def _handle(row, store, inbox, tg, agent):
                 url = view_url()
                 if url:
                     keyboard.append([{"text": "Открыть задачи" if ru else "Open tasks", "web_app": {"url": url}}])
-            if command.split(" ", 1)[0] == "/start" and chatgpt_owner(uid):
+            if not result_link and command.split(" ", 1)[0] == "/start" and chatgpt_owner(uid):
                 url = settings_url()
                 if url:
                     keyboard.append([{"text": "Настройки" if ru else "Settings", "web_app": {"url": url}}])
-        markup = {"reply_markup": {"inline_keyboard": keyboard}} if keyboard else {}
+        answer_id = saved_results.for_update(store, uid, update_id, reply) if not show_plan and not widgets.for_update(store, update_id) else None
+        save_button = [{"text": "Сохранить в проект" if ru else "Save to project", "callback_data": f"save:{answer_id}"}] if answer_id else []
+        original_message = None
+        if result_link:
+            with suppress(KeyError):
+                original_message = saved_results.saved(store, uid, int(result_link[1]))["origin_message"]
         if scheduled and not reports.current(store, row, allow_failed=True):
             inbox.done(update_id)
             return
@@ -662,17 +683,22 @@ async def _handle(row, store, inbox, tg, agent):
                 and not widgets.for_update(store, update_id)):
             rich = articles.rich_content(reply)
             if rich:
+                rich_keyboard = keyboard + ([save_button] if save_button else [])
+                markup = {"reply_markup": {"inline_keyboard": rich_keyboard}} if rich_keyboard else {}
                 try:
-                    await tg.call("sendRichMessage", chat_id=uid, rich_message=rich, **markup)
+                    message = await tg.call("sendRichMessage", chat_id=uid, rich_message=rich, **markup)
                 except TelegramError as error:
                     if error.code not in (400, 404, 405, 413):
                         raise
                     log.info("Telegram rejected rich formatting status=%s", error.code)
                     inbox.db.execute("UPDATE bot_inbox SET article_fallback=1 WHERE id=?", (update_id,))
                 else:
+                    if answer_id:
+                        saved_results.remember_message(store, uid, answer_id, message)
                     inbox.done(update_id, delivered=True)
                     return
-        for n, chunk in enumerate(chunks(reply)):
+        parts = list(chunks(reply))
+        for n, chunk in enumerate(parts):
             if n < row["sent_chunks"]:
                 continue
             if scheduled and not reports.current(store, row, allow_failed=True):
@@ -683,18 +709,25 @@ async def _handle(row, store, inbox, tg, agent):
             if n == 0 and bridge_url and show_plan:
                 from .bridge import keyboard_markup
                 params["reply_markup"] = keyboard_markup(store, uid, bridge_url)
-            if n == 0:
-                params.update(markup)
+            rows = list(keyboard) if n == 0 else []
+            if n == len(parts) - 1 and save_button:
+                rows.append(save_button)
+            if rows:
+                params["reply_markup"] = {"inline_keyboard": rows}
+            if n == 0 and original_message:
+                params["reply_parameters"] = {"message_id": original_message, "allow_sending_without_reply": True}
             formatted = articles.basic_content(chunk)
             if formatted:
                 try:
-                    await tg.call("sendMessage", **{**params, "text":formatted, "parse_mode":"HTML"})
+                    message = await tg.call("sendMessage", **{**params, "text":formatted, "parse_mode":"HTML"})
                 except TelegramError as error:
                     if error.code != 400:
                         raise
-                    await tg.call("sendMessage", **params)
+                    message = await tg.call("sendMessage", **params)
             else:
-                await tg.call("sendMessage", **params)
+                message = await tg.call("sendMessage", **params)
+            if answer_id:
+                saved_results.remember_message(store, uid, answer_id, message)
             inbox.db.execute("UPDATE bot_inbox SET sent_chunks=? WHERE id=?", (n+1, update_id))
         inbox.done(update_id, delivered=True)
     except TelegramError as error:
@@ -782,6 +815,8 @@ async def _widget_updates(store, telegram, updates, queue_external=None):
                             await integrations.handle(store, telegram, query)
                     elif str(query.get("data", "")).startswith("rem:"):
                         await reminders.handle(store, telegram, query)
+                    elif str(query.get("data", "")).startswith("save:"):
+                        await saved_results.handle(store, telegram, query)
                     else:
                         await widgets.handle_fallback_query(store, telegram, query)
                 except TelegramError as error:
