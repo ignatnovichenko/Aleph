@@ -68,6 +68,7 @@ class Runner:
             command = "complete" if request.path == "/v1/chat/completions" else "tool"
             async with self.session.post(f"{self.server}/{job_id}/{command}", data=await request.read(),
                                          headers={**self.headers, "Content-Type": "application/json"},
+                                         timeout=aiohttp.ClientTimeout(total=108 if command == "tool" else 35),
                                          allow_redirects=False) as response:
                 return web.Response(body=await response.read(), status=response.status, content_type="application/json")
 

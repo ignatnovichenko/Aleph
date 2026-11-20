@@ -35,7 +35,7 @@ DETAIL = re.compile(r"\b(?:подробн\w*|глубок\w*|детальн\w*|�
 
 def request_text(query):
     """Use the user's words, excluding text extracted or quoted from attachments."""
-    original = re.split(r"\n\n\[(?:Attached document content|Цитата из сообщения, на которое дан ответ)\]", query, maxsplit=1)[0]
+    original = re.split(r"\n\n\[(?:Attached document content|Files for this request|Цитата из сообщения, на которое дан ответ)\]", query, maxsplit=1)[0]
     return " ".join(original.split())
 
 

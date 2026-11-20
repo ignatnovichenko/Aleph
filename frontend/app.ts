@@ -1061,7 +1061,7 @@ const sourceIcons: Record<ProjectSource["kind"], IconName> = {
   web: "link", youtube: "video", notion: "document", drive: "table", file: "document",
 };
 const importOptions = {showApiMessage: true, timeoutMs: 35000};
-const sourceFormats = ".pdf,.docx,.xlsx,.pptx,.csv,.tsv,.txt,.md,.json,.html,.htm,.srt,.vtt";
+const sourceFormats = ".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.odt,.ods,.odp,.rtf,.csv,.tsv,.txt,.md,.json,.html,.htm,.srt,.vtt";
 
 function sourceLabel(kind: ProjectSource["kind"]) {
   return {

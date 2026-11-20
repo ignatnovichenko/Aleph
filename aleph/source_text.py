@@ -14,7 +14,8 @@ import openpyxl
 
 MAX_FILE = 4 * 1024 * 1024
 MAX_TEXT = 120000
-FILE_TYPES = {".pdf", ".docx", ".xlsx", ".pptx", ".csv", ".tsv", ".txt", ".md", ".json", ".html", ".htm", ".srt", ".vtt"}
+WORKER_TYPES = {".pdf", ".doc", ".xls", ".ppt", ".odt", ".ods", ".odp", ".rtf"}
+FILE_TYPES = WORKER_TYPES | {".docx", ".xlsx", ".pptx", ".csv", ".tsv", ".txt", ".md", ".json", ".html", ".htm", ".srt", ".vtt"}
 CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\ud800-\udfff]")
 
 
@@ -148,14 +149,11 @@ async def read_file(name, raw):
         raise ValueError("Выбери файл до 4 МБ.")
     ext = PurePosixPath(name).suffix.lower()
     if ext not in FILE_TYPES:
-        raise ValueError("Загрузи PDF, DOCX, XLSX, PPTX, CSV, TSV, TXT, Markdown, JSON, HTML, SRT или VTT.")
-    if ext == ".pdf":
-        from .documents import _pdf_text
-        from .media import MediaError
-        try:
-            result = prepared(name, await _pdf_text(raw))
-        except MediaError as error:
-            raise ValueError(str(error)) from None
+        raise ValueError("Загрузи PDF, Word, Excel, PowerPoint, OpenDocument, RTF, CSV, TSV, TXT, Markdown, JSON, HTML, SRT или VTT.")
+    if ext in WORKER_TYPES:
+        from .documents import run_office
+        packet, _ = await run_office("source", {}, {1: (ext[1:], raw)})
+        result = prepared(name, packet["text"], "truncated" if packet["truncated"] else "")
     else:
         result = await asyncio.to_thread(_regular_file, name, raw, ext)
     if not result.text:

@@ -19,7 +19,7 @@ from .hermes import create_agent
 from .links import settings_url, task_button, view_url
 from . import models, projects
 from .llm import ChatGPTUnavailable, ModelRejectsPhoto, ModelUnavailable, RegionUnavailable
-from . import article_images, articles, capture, integrations, media, documents, progress, reminders, reports, saved_results, widgets
+from . import article_images, articles, capture, document_chat, documents, integrations, media, progress, reminders, reports, saved_results, widgets
 
 log = logging.getLogger(__name__)
 PLAN_ALIASES = {"/plan", "/tasks", "открой задачи", "открыть задачи", "open tasks", "открой план", "открыть план", "открой мини-апп", "open plan", "open mini app"}
@@ -100,6 +100,7 @@ class Inbox:
     def __init__(self, store):
         self.store = store
         self.db = store.db
+        self.file_download = None
         self.db.executescript("""
             CREATE TABLE IF NOT EXISTS bot_inbox (
               id INTEGER PRIMARY KEY, uid INTEGER NOT NULL, message TEXT NOT NULL, reply TEXT,
@@ -125,6 +126,7 @@ class Inbox:
         """)
 
         widgets.initialize(self.db)
+        document_chat.initialize(self.db)
 
         columns = {r["name"] for r in self.db.execute("PRAGMA table_info(bot_inbox)")}
         if "project_id" not in columns:
@@ -141,6 +143,18 @@ class Inbox:
             self.db.execute("ALTER TABLE bot_inbox ADD COLUMN model_choice TEXT")
         if "progress_attempted" not in columns:
             self.db.execute("ALTER TABLE bot_inbox ADD COLUMN progress_attempted INTEGER NOT NULL DEFAULT 0")
+        if "file_context" not in columns:
+            self.db.execute("ALTER TABLE bot_inbox ADD COLUMN file_context TEXT")
+
+    async def download_document(self, metadata, limit):
+        if self.file_download is None:
+            raise ValueError("Сейчас не удалось открыть файл из Telegram.")
+        try:
+            return await self.file_download(metadata, limit)
+        except TelegramError as error:
+            if error.code in (400, 404):
+                raise ValueError("Telegram не смог открыть файл. Пришли его ещё раз.") from None
+            raise ValueError("Telegram сейчас не загрузил файл. Попробуй ещё раз чуть позже.") from None
 
     def bind_project(self, update_id, uid):
         self.db.execute("UPDATE bot_inbox SET project_id=? WHERE id=? AND uid=? AND project_id IS NULL",
@@ -181,8 +195,9 @@ class Inbox:
                 sender = message.get("from") or {}
                 chat = message.get("chat") or {}
                 if chat.get("type") == "private" and sender.get("id") == chat.get("id") and not sender.get("is_bot"):
-                    self.db.execute("INSERT OR IGNORE INTO bot_inbox(id,uid,message) VALUES (?,?,?)",
-                                    (event["update_id"], chat["id"], json.dumps(message, ensure_ascii=False)))
+                    available = now + .7 if message.get("document") and message.get("media_group_id") else 0
+                    self.db.execute("INSERT OR IGNORE INTO bot_inbox(id,uid,message,available) VALUES (?,?,?,?)",
+                                    (event["update_id"], chat["id"], json.dumps(message, ensure_ascii=False), available))
             self.store.set_offset(max(e["update_id"] for e in updates) + 1)
             self.db.execute("INSERT OR REPLACE INTO runtime_state VALUES ('telegram_last_batch',?)", (str(now),))
             self.db.execute("COMMIT")
@@ -298,8 +313,8 @@ class Inbox:
             for i, call in enumerate(json.loads(row["message"]).get("tool_calls") or []):
                 name = call.get("function", {}).get("name")
                 result = self.get_tool(f"tg:{update_id}:{row['step']}:{i}")
-                if name in {"create_task","update_task","change_settings","subscribe_feed","unsubscribe_feed","remember_fact","forget_fact","create_routine","set_routine_active","delete_routine","create_document","set_project_context","capture_project_update","schedule_report"} and isinstance(result, dict) and "error" not in result:
-                    results.append(result.get("title") or {"change_settings": "Настройки", "remember_fact": "Память", "forget_fact": "Память", "create_document": "Файл", "delete_routine": "Расписание", "set_routine_active": "Расписание", "set_project_context": "Контекст проекта"}.get(name, "Подписка"))
+                if name in {"create_task","update_task","change_settings","subscribe_feed","unsubscribe_feed","remember_fact","forget_fact","create_routine","set_routine_active","delete_routine","create_document","edit_document","set_project_context","capture_project_update","schedule_report"} and isinstance(result, dict) and "error" not in result:
+                    results.append(result.get("title") or result.get("prepared_attachment") or {"change_settings": "Настройки", "remember_fact": "Память", "forget_fact": "Память", "delete_routine": "Расписание", "set_routine_active": "Расписание", "set_project_context": "Контекст проекта"}.get(name, "Подписка"))
         return results
 
 async def _typing(telegram, uid):
@@ -359,7 +374,7 @@ async def _announce_progress(inbox, tg, update_id, uid, message_id, text, ru, fi
         # Optional delivery must never interrupt the user's main request.
         return
 
-async def _message_text(tg, msg):
+async def _message_text(tg, msg, *, files=()):
     ru = _uses_russian(msg)
     text = msg.get("text") or msg.get("caption") or ""
     photo = None
@@ -376,16 +391,16 @@ async def _message_text(tg, msg):
         photo = await media.normalize_photo(await tg.download(largest, media.MAX_PHOTO_BYTES))
         text = text or ("Что на этой фотографии?" if ru else "What is in this photo?")
     elif "document" in msg:
-        attachment = await documents.read_document(msg["document"], tg.download)
-        prompt = "Помоги кратко разобрать этот файл." if ru else "Give me a brief summary of this file."
-        text = (text or prompt) + "\n\n[Attached document content]\n" + attachment
+        if not files:
+            raise media.MediaError("Не удалось открыть документ. Пришли его ещё раз.")
+        text = text or ("Помоги кратко разобрать вложения." if ru else "Give me a brief summary of the attached files.")
     if not text.strip():
-        raise media.MediaError("Можешь прислать текст, голосовое, фотографию или текстовый файл.")
+        raise media.MediaError("Можешь прислать текст, голосовое, фотографию или документ.")
     quoted = msg.get("reply_to_message") or {}
     quote = (quoted.get("text") or quoted.get("caption") or "")[:1800]
     if quote:
         text += "\n\n[Цитата из сообщения, на которое дан ответ]\n" + quote
-    return text, photo
+    return text + document_chat.prompt_section(files), photo
 
 def chunks(text):
     remaining = text.strip()
@@ -449,8 +464,14 @@ async def _compose(row, store, inbox, tg, agent):
             reply += ("\n\nСвою подписку ChatGPT можно подключить в настройках Алефа." if ru else
                       "\n\nYou can connect your ChatGPT plan in Aleph settings.")
         return None, reply
-    inbox.bind_project(row["id"], uid)
-    query, photo = await _message_text(tg, msg)
+    project_id = inbox.bind_project(row["id"], uid)
+    files = []
+    if msg.get("document") or (msg.get("reply_to_message") or {}).get("document"):
+        try:
+            msg, files = document_chat.collect(store, uid, project_id, row["id"], msg)
+        except ValueError as error:
+            raise media.MediaError(str(error)) from None
+    query, photo = await _message_text(tg, msg, files=files)
     if "voice" in msg:
         try:
             project_reply = projects.chat_command(store, uid, query, _uses_russian(msg))
@@ -462,7 +483,7 @@ async def _compose(row, store, inbox, tg, agent):
         russian_question = MODEL_QUESTION_RU.fullmatch(query.strip())
         if russian_question or MODEL_QUESTION_EN.fullmatch(query.strip()):
             return query, models.identity_reply(store, uid, agent.model, russian=bool(russian_question))
-    source = query.split("\n\n[Attached document content]", 1)[0][:900]
+    source = query.split("\n\n[Files for this request]", 1)[0].split("\n\n[Attached document content]", 1)[0][:900]
     store.db.execute("UPDATE bot_inbox SET source=? WHERE id=?", (source, row["id"]))
     text = progress.request_text(query)
     if row["progress_attempted"] or progress.skip_ack(text):
@@ -569,6 +590,7 @@ async def _reply_with_photos(tg, uid, message, photos):
 
 async def _handle(row, store, inbox, tg, agent):
     uid, update_id = row["uid"], row["id"]
+    inbox.file_download = getattr(tg, "download", None)
     original = json.loads(row["message"])
     ru = _uses_russian(original)
     scheduled = update_id < 0
@@ -596,8 +618,10 @@ async def _handle(row, store, inbox, tg, agent):
                     reply = str(error)
                 elif "voice" in original:
                     reply = "I couldn’t transcribe this voice note. Try a clearer recording under five minutes or send the text."
-                elif "photo" in original or "document" in original:
-                    reply = "I couldn’t read this attachment. Try a smaller photo, a text PDF (up to 4 MB) or a text file."
+                elif "document" in original:
+                    reply = "I couldn't open that document. Try a PDF, Office file or text file up to 16 MB."
+                elif "photo" in original:
+                    reply = "I couldn't read that photo. Try a smaller copy."
                 else:
                     reply = "Send me a message, a voice note, a photo or a text document."
             except TelegramError as error:
@@ -628,6 +652,8 @@ async def _handle(row, store, inbox, tg, agent):
                     reply = _report_failure(report, ru)
                 elif widgets.for_update(store, update_id):
                     reply = "Подготовил виджет." if ru else "Here’s the widget."
+                elif store.db.execute("SELECT 1 FROM bot_documents WHERE update_id=? LIMIT 1", (update_id,)).fetchone():
+                    reply = "Готово, файл приложен." if ru else "Done. The file is attached."
                 elif saved:
                     reply = "Сохранил изменения: " + ", ".join(saved) + ". Подробности есть во вкладке «Задачи»."
                 elif using_chatgpt and error.status == 429:
@@ -662,11 +688,15 @@ async def _handle(row, store, inbox, tg, agent):
             inbox.save_reply(row, query, reply, report_title=report_title)
         for artifact in inbox.db.execute("SELECT * FROM bot_documents WHERE update_id=? AND sent=0 ORDER BY rowid", (update_id,)).fetchall():
             try:
-                await documents.send_document(tg.session, tg.token, uid, artifact["filename"], artifact["mime"], artifact["data"])
+                sent = await documents.send_document(tg.session, tg.token, uid, artifact["filename"], artifact["mime"], artifact["data"], receipt=True)
+                if isinstance(sent, dict) and isinstance(sent.get("document"), dict):
+                    with suppress(ValueError):
+                        document_chat.register(store, uid, inbox.bind_project(update_id, uid), sent.get("message_id"), sent["document"])
             except documents.DocumentDeliveryError as error:
-                if error.status != 400:
+                if error.status not in (400, 413, 422):
                     raise TelegramError(error.status, error.retry_after) from None
-                reply = "Telegram не принял файл. Попробуй попросить другой формат или вывести результат в чат."
+                reply = ("Telegram не принял файл. Попробуй попросить другой формат или вывести результат в чат."
+                         if ru else "Telegram declined the file. Try another format or ask for the result in chat.")
                 inbox.db.execute("UPDATE bot_inbox SET reply=? WHERE id=?", (reply, update_id))
                 inbox.db.execute("DELETE FROM bot_documents WHERE update_id=? AND sent=0", (update_id,))
                 break

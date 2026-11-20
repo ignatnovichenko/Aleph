@@ -23,7 +23,8 @@ def run(turn):
             request = Request(turn["endpoint"] + "/tool", method="POST", headers={
                 "Authorization": "Bearer " + turn["key"], "Content-Type": "application/json",
             }, data=json.dumps({"name": name, "arguments": arguments, "id": tool_call_id}).encode())
-            with local_http.open(request, timeout=22) as response:
+            timeout = 105 if name in {"inspect_document", "edit_document", "create_document"} else 22
+            with local_http.open(request, timeout=timeout) as response:
                 return response.read(180000).decode()
         return invoke
 

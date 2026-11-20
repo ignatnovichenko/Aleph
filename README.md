@@ -8,7 +8,7 @@ Aleph is a personal Telegram agent. The conversation lives in the bot. The Mini 
 - Expand project folders in **Tasks** to see their tasks and completed work. Use **Save to project** under a detailed chat answer or delivered report to keep it in the project's **Results**.
 - Add articles, YouTube videos, Notion pages and Google Drive files under **Projects → Sources**. Upload PDFs, documents, spreadsheets, presentations or text up to 4 MB. Aleph searches the saved content for relevant passages in the project's chat and scheduled reports. Links can be refreshed. Use Jina Reader from a saved public article when a direct read is unavailable. YouTube accepts an attached TXT, SRT or VTT transcript when captions are unavailable. Private Notion and Drive sources use the account's permissions.
 - Create reusable skills in Settings → Skills. Import the text of a `SKILL.md` from a file, a public GitHub link to the file, or its GitHub folder. Review the instructions before saving, then enable the skill from the project's Skills panel. Aleph reads enabled skill instructions on demand in chat and scheduled reports, using the tools available for that request.
-- Send text, voice, a photo, a PDF or a text document. The model can act on tasks, follow up on a schedule, and send TXT, Markdown, CSV and calendar files back to the chat.
+- Send text, voice, a photo or an office document. Aleph can read attachments, create files from scratch and return edited or converted copies in Telegram.
 - Ask it to remember a preference, recall it across conversations, or forget it. A recent conversation window and explicitly saved memories are stored separately.
 - Ask Aleph to prepare and send a result later. For example, “Tomorrow at 18:00, send me an analysis of SpaceX.” Aleph starts the work at the scheduled time and sends the result in Telegram. You can open the task in the Mini App to change the time or pause it.
 - Set a one-off reminder or a recurring routine in plain language. Weather, RSS and agenda routines fetch fresh data when they run. The morning brief appears when there is something to report. Disable proactive briefs or set quiet hours in the Mini App. Explicit one-off reminders follow their requested times.
@@ -87,6 +87,17 @@ In **Settings → Chat replies**, the owner can choose ChatGPT or OpenCode, then
 4. In a project, open **Runs on** and select that computer. Keep the runner open while Aleph works. On the same computer, start it again with `sh deploy/computer.sh run`.
 
 The runner connects over HTTPS without an incoming port. Hermes runs on the selected computer and receives that project's turn context. Your selected model, Telegram delivery and integrations are brokered by the Aleph server. Connected computers do not receive provider credentials or expose their files or terminal to the model. When a computer is offline, scheduled work waits for it to reconnect. To switch back, select **Aleph server** for the project. Disconnecting a computer in Settings revokes its credentials and moves its projects back to the server.
+
+## Document workflows in Telegram
+
+Attach the file and describe the change in its caption. To continue editing a file Aleph sent back, reply to the attachment. To combine PDF files, attach them together and say how to arrange their pages. Files are scoped to the current workspace.
+
+- Word and presentations support exact text replacements across formatted runs. Spreadsheets support typed cell changes and standard Excel formulas. Aleph can build new documents, workbooks and presentations from a chat request.
+- PDF supports page extraction, merging, removal, reordering, rotation, interactive form filling and text replacements. Changing the text in a PDF can reflow its layout. OCR reads English and Russian scans in batches of up to six image-only pages. Choose specific pages for longer scans.
+- Chat supports PDF, DOCX, XLSX, PPTX, ODT, ODS, ODP, RTF, TXT, Markdown, CSV, TSV, JSON, HTML and ICS. Legacy DOC, XLS and PPT and layout-preserving Office conversions use LibreOffice inside Bubblewrap. On servers without the sandbox, modern formats use the built-in parsers and exporters.
+- Chat supports files up to 16 MB and a combined input of 24 MB per operation. PDF operations support up to 250 pages.
+
+For a bare-metal server, install DejaVu Sans, Poppler, Tesseract with English and Russian data, Bubblewrap and LibreOffice. Set ALEPH_TESSDATA to a custom language data directory if needed. ALEPH_OFFICE_BIN can select a LibreOffice installation outside the system path. The server must allow Bubblewrap user namespaces for native conversions.
 
 ## Checks
 

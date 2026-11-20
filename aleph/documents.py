@@ -3,8 +3,11 @@ import asyncio
 import csv
 import io
 import json
+import os
 import re
+import signal
 import sys
+import tempfile
 import unicodedata
 import uuid
 from datetime import date, datetime, timezone
@@ -14,41 +17,18 @@ import aiohttp
 
 from .api import fold_ical, ical_text
 from .media import MediaError
+from . import office_formats, office_native
 from .pdf_worker import MAX_BYTES, MAX_TEXT
 
 _pdf_slots = asyncio.Semaphore(2)
 TEXT_BYTES = 128 * 1024
-MAX_OUTPUT = 128 * 1024
-MIMES = {"md": "text/markdown", "txt": "text/plain", "csv": "text/csv", "ics": "text/calendar"}
+MAX_TEXT_OUTPUT = 128 * 1024
+MAX_INPUT = 16 * 1024 * 1024
+MAX_OUTPUT = 16 * 1024 * 1024
+MIMES = {"md": "text/markdown", "txt": "text/plain", "csv": "text/csv", "ics": "text/calendar",
+         **office_formats.MIMES, **office_native.MIMES}
 TEXT_EXTENSIONS = {".txt", ".md", ".csv", ".json", ".ics", ".tsv"}
-_CALENDAR_EVENT = {
-    "type": "object",
-    "properties": {
-        "title": {"type": "string"},
-        "start": {"type": "string", "description": "ISO date or datetime with explicit timezone"},
-        "end": {"type": "string", "description": "Optional exclusive end; same type as start"},
-        "description": {"type": "string"},
-    },
-    "required": ["title", "start"],
-    "additionalProperties": False,
-}
-DOCUMENT_TOOL = {"type": "function", "function": {
-    "name": "create_document",
-    "description": "Prepare a downloadable file only when the user explicitly asks for an attachment, export or file. Supply actual content, and use the user's language. Delivery is to their private Telegram chat.",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "filename": {"type": "string", "description": "Descriptive filename without directories"},
-            "format": {"type": "string", "enum": list(MIMES)},
-            "content": {"type": "string", "description": "For txt/md, complete file contents"},
-            "rows": {"type": "array", "description": "For CSV, rows of string cells including a header row",
-                     "items": {"type": "array", "items": {"type": "string"}}},
-            "events": {"type": "array", "description": "For ICS, calendar events", "items": _CALENDAR_EVENT},
-        },
-        "required": ["filename", "format"],
-        "additionalProperties": False,
-    },
-}}
+_office_slots = asyncio.Semaphore(3)
 
 
 async def read_document(metadata, download):
@@ -117,23 +97,24 @@ def _limited_text(value, limit, *, blank=False):
     return value
 
 
-def _csv(rows):
-    if not isinstance(rows, list) or not 1 <= len(rows) <= 500:
-        raise ValueError("В таблице должно быть от 1 до 500 строк.")
+def delimited(rows, fmt):
+    if not isinstance(rows, list) or not 1 <= len(rows) <= 1500:
+        raise ValueError("В таблице должно быть от 1 до 1500 строк.")
     buf = io.StringIO(newline="")
-    writer = csv.writer(buf)
+    writer = csv.writer(buf, delimiter="\t" if fmt == "tsv" else ",")
     for row in rows:
         if not isinstance(row, list) or not 1 <= len(row) <= 64:
             raise ValueError("В строке таблицы должно быть от 1 до 64 ячеек.")
         cells = []
         for cell in row:
-            cell = _limited_text(cell, 8192, blank=True)
+            value = office_formats.cell_value(cell)
+            cell = str(value) if value is not None else ""
             # Preserve ordinary signed numeric values and neutralize spreadsheet formulas.
             if cell.lstrip().startswith(("=", "+", "-", "@")) and not re.fullmatch(r"[+-]?\d+(?:[.,]\d+)?", cell):
                 cell = "'" + cell
             cells.append(cell)
         writer.writerow(cells)
-        if buf.tell() > MAX_OUTPUT:
+        if buf.tell() > MAX_TEXT_OUTPUT:
             raise ValueError("Таблица слишком большая. Раздели её на несколько файлов.")
     return "\ufeff" + buf.getvalue()
 
@@ -174,27 +155,99 @@ def _calendar(events):
     return "\r\n".join(fold_ical(line) for line in lines) + "\r\n"
 
 
-def render_document(arguments):
-    """Render model-authored content in memory. No local paths are accepted."""
-    fmt = arguments.get("format")
+def document_name(filename, fmt):
     if not isinstance(fmt, str) or fmt not in MIMES:
-        raise ValueError("Поддерживаются форматы TXT, MD, CSV и ICS.")
-    name = unicodedata.normalize("NFKC", _limited_text(arguments.get("filename"), 160))
+        raise ValueError("Формат документа не поддерживается.")
+    name = unicodedata.normalize("NFKC", _limited_text(filename, 160))
     if name.lower().endswith("." + fmt):
         name = name[:-(len(fmt) + 1)]
     name = re.sub(r"[^\w -]+", "-", name).strip(" -_")[:72].strip()
     if not name:
         raise ValueError("Укажи имя файла.")
-    if fmt == "csv":
-        text = _csv(arguments.get("rows"))
+    return f"{name}.{fmt}"
+
+
+def render_document(arguments):
+    """Render model-authored content. No local paths are accepted."""
+    fmt = arguments.get("format")
+    name = document_name(arguments.get("filename"), fmt)
+    if fmt in office_native.LEGACY:
+        modern = office_native.LEGACY[fmt]
+        content = office_native.convert(office_formats.render(modern, arguments), modern, fmt)
+        if not content:
+            raise ValueError("Преобразование в старый Office недоступно. Выбери DOCX, XLSX или PPTX.")
+    elif fmt in ("csv", "tsv"):
+        content = delimited(arguments.get("rows"), fmt).encode("utf-8")
     elif fmt == "ics":
-        text = _calendar(arguments.get("events"))
+        content = _calendar(arguments.get("events")).encode("utf-8")
+    elif fmt in ("txt", "md", "json"):
+        text = _limited_text(arguments.get("content"), MAX_TEXT_OUTPUT)
+        if fmt == "json":
+            json.loads(text)
+        content = text.encode("utf-8")
     else:
-        text = _limited_text(arguments.get("content"), MAX_OUTPUT)
-    content = text.encode("utf-8")
-    if len(content) > MAX_OUTPUT:
+        content = office_formats.render(fmt, arguments)
+    limit = MAX_OUTPUT if fmt in {"docx", "pdf", "xlsx", "pptx", "odt", "ods", "odp", *office_native.LEGACY} else MAX_TEXT_OUTPUT
+    if len(content) > limit:
         raise ValueError("Документ слишком большой. Раздели его на несколько частей.")
-    return f"{name}.{fmt}", MIMES[fmt], content
+    return name, MIMES[fmt], content
+
+
+async def run_office(operation, arguments, inputs):
+    """Bound time and memory for parsers, renderers and OCR on untrusted files."""
+    async with _office_slots:
+        with tempfile.TemporaryDirectory(prefix="aleph-doc-") as work:
+            root = Path(work)
+            packet = {"operation": operation, "arguments": arguments, "inputs": []}
+            for file_id, (fmt, raw) in inputs.items():
+                path = f"input-{file_id}.{fmt}"
+                await asyncio.to_thread((root / path).write_bytes, raw)
+                packet["inputs"].append({"id": file_id, "format": fmt, "path": path})
+            env = {"HOME": work, "TMPDIR": work, "PATH": os.defpath, "LANG": "C.UTF-8", "OMP_THREAD_LIMIT": "1"}
+            binary = os.getenv("ALEPH_OFFICE_BIN")
+            if not binary:
+                configured = Path.home() / ".local/share/aleph/soffice-path"
+                if configured.is_file():
+                    binary = configured.read_text().strip()
+            if binary and Path(binary).is_absolute():
+                env["ALEPH_OFFICE_BIN"] = binary
+            ocr_data = os.getenv("ALEPH_TESSDATA")
+            if ocr_data:
+                env["TESSDATA_PREFIX"] = ocr_data
+            else:
+                tessdata = Path.home() / ".local/share/aleph/tessdata"
+                if tessdata.is_dir():
+                    env["TESSDATA_PREFIX"] = str(tessdata)
+            worker = await asyncio.create_subprocess_exec(
+                sys.executable, "-I", str(Path(__file__).with_name("office_worker.py")), cwd=work, env=env,
+                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            try:
+                budget = 42 if operation == "edit" or any(fmt == "pdf" for fmt, _ in inputs.values()) else 20
+                stdout, _ = await asyncio.wait_for(worker.communicate(json.dumps(packet).encode()), timeout=budget)
+            except TimeoutError:
+                raise ValueError("Документ слишком сложный. Выбери несколько страниц или раздели его на части.") from None
+            finally:
+                if worker.returncode is None:
+                    try:
+                        os.killpg(worker.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    await worker.wait()
+            try:
+                result = json.loads(stdout)
+            except (ValueError, TypeError):
+                raise ValueError("Не удалось обработать документ. Попробуй сохранить его заново.") from None
+            if reason := result.pop("error", ""):
+                raise ValueError(reason)
+            blob = None
+            if "filename" in result:
+                output = root / "result.bin"
+                if not output.is_file() or not 0 < output.stat().st_size <= MAX_OUTPUT:
+                    raise ValueError("Готовый документ слишком большой или пустой.")
+                blob = await asyncio.to_thread(output.read_bytes)
+            return result, blob
 
 
 class DocumentDeliveryError(Exception):
@@ -204,7 +257,7 @@ class DocumentDeliveryError(Exception):
         self.retry_after = retry_after
 
 
-async def send_document(session, token, uid, filename, mime, content):
+async def send_document(session, token, uid, filename, mime, content, *, receipt=False):
     if type(uid) is not int or uid <= 0 or not isinstance(content, bytes) or len(content) > MAX_OUTPUT:
         raise ValueError("Некорректный адресат или размер документа.")
     form = aiohttp.FormData(quote_fields=False)
@@ -216,7 +269,9 @@ async def send_document(session, token, uid, filename, mime, content):
                                 timeout=response_timeout, allow_redirects=False) as response:
             payload = await response.json(content_type=None)
             if response.status != 200 or not payload.get("ok"):
-                raise DocumentDeliveryError(response.status, int((payload.get("parameters") or {}).get("retry_after") or 0))
-            return int(payload["result"]["message_id"])
+                raise DocumentDeliveryError(int(payload.get("error_code") or response.status),
+                                            int((payload.get("parameters") or {}).get("retry_after") or 0))
+            result = payload["result"]
+            return result if receipt else int(result["message_id"])
     except (aiohttp.ClientError, OSError, ValueError, KeyError, TypeError):
         raise DocumentDeliveryError() from None
