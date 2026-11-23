@@ -1361,7 +1361,13 @@ function enabledLabel(on: boolean) {
 function settingsPage() {
   const s = state.settings;
   const responseLabel = replyStyleOptions().find(([key]) => key === (s.reply_style ?? "balanced"))?.[1];
-  const connections = serviceRows() + chatgptRow();
+  const invite = state.group_invite_url
+    ? `<a class="setting-row" data-telegram-link href="${e(state.group_invite_url)}">${glyph("plane")}
+        <span class="setting-copy"><strong>${t("Добавить Алефа в группу", "Add Aleph to a group")}</strong>
+        <span class="setting-detail">${t("Поручения из рабочего чата", "Requests from your team chat")}</span></span>
+        <span class="tail">${icon("arrow")}</span></a>`
+    : "";
+  const connections = serviceRows() + chatgptRow() + invite;
   return `<div class="settings-grid">
     ${settingsGroup(t("Ассистент", "Assistant"), modelRow() +
       settingRow("edit", t("Персонализация ответов", "Personalize replies"), responseLabel, "reply-preferences") +

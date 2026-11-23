@@ -24,7 +24,7 @@ def privacy_reply(store, uid, text, update_id):
         # confirmation in the outbox just long enough for Telegram to receive it.
         db.execute("DELETE FROM bot_inbox WHERE uid=? AND id<>?", (uid, update_id))
         tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        for name in ("deliveries", "routine_runs", "routines", "history", "memories", "feeds", "tasks", "erasure_requests"):
+        for name in ("group_handoffs", "group_replies", "deliveries", "routine_runs", "routines", "history", "memories", "feeds", "tasks", "erasure_requests"):
             if name in tables:
                 db.execute(f'DELETE FROM "{name}" WHERE user_id=?', (uid,))
         db.execute("DELETE FROM users WHERE id=?", (uid,))

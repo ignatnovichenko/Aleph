@@ -56,6 +56,7 @@ def bounded_text(value, limit, *, required=False):
 
 class Store:
     def __init__(self, path):
+        self.group_invite_url = None
         self.path = str(path)
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(mode=0o700, parents=True, exist_ok=True)

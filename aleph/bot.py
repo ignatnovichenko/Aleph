@@ -18,7 +18,7 @@ from .chatgpt_pair import owner as chatgpt_owner
 from .computers import ComputerUnavailable
 from .hermes import create_agent
 from .links import settings_url, task_button, view_url
-from . import models, projects
+from . import groups, models, projects
 from .llm import ChatGPTUnavailable, ModelRejectsPhoto, ModelUnavailable, RegionUnavailable
 from . import article_images, articles, capture, document_chat, documents, integrations, media, progress, reminders, reports, saved_results, widgets
 
@@ -98,7 +98,8 @@ class Telegram:
 
 class Inbox:
     """Pending inputs, tool checkpoints and unsent replies survive restarts."""
-    def __init__(self, store):
+    def __init__(self, store, identity=None):
+        self.identity = identity
         self.store = store
         self.db = store.db
         self.file_download = None
@@ -130,6 +131,7 @@ class Inbox:
             );
         """)
 
+        groups.initialize(self.db)
         widgets.initialize(self.db)
         if "parent_version" not in {r["name"] for r in self.db.execute("PRAGMA table_info(bot_documents)")}:
             self.db.execute("ALTER TABLE bot_documents ADD COLUMN parent_version INTEGER")
@@ -141,6 +143,8 @@ class Inbox:
             self.db.execute("INSERT OR IGNORE INTO runtime_state VALUES('file_versions_migrated','1')")
 
         columns = {r["name"] for r in self.db.execute("PRAGMA table_info(bot_inbox)")}
+        if "group_chat" not in columns:
+            self.db.execute("ALTER TABLE bot_inbox ADD COLUMN group_chat INTEGER")
         if "waiting_runner" not in columns:
             self.db.execute("ALTER TABLE bot_inbox ADD COLUMN waiting_runner INTEGER NOT NULL DEFAULT 0")
         if "project_id" not in columns:
@@ -202,6 +206,8 @@ class Inbox:
         try:
             now = time.time()
             self.db.execute("DELETE FROM bot_receipts WHERE received_at < ?", (now-172800,))
+            self.db.execute("DELETE FROM group_handoffs WHERE expires<=?", (now,))
+            self.db.execute("DELETE FROM group_replies WHERE expires<=?", (now,))
             for event in updates:
                 if not self.db.execute("INSERT OR IGNORE INTO bot_receipts VALUES (?,?)", (event["update_id"], now)).rowcount:
                     continue
@@ -209,9 +215,16 @@ class Inbox:
                 sender = message.get("from") or {}
                 chat = message.get("chat") or {}
                 if chat.get("type") == "private" and sender.get("id") == chat.get("id") and not sender.get("is_bot"):
+                    if link := groups.START.fullmatch(message.get("text") or ""):
+                        restored = groups.take_private(self.db, link[1], sender, message["message_id"])
+                        message = restored or {**message, "invalid_group_link":True}
                     available = now + .7 if message.get("document") and message.get("media_group_id") else 0
                     self.db.execute("INSERT OR IGNORE INTO bot_inbox(id,uid,message,available) VALUES (?,?,?,?)",
                                     (event["update_id"], chat["id"], json.dumps(message, ensure_ascii=False), available))
+                elif request := groups.addressed(message, self.identity):
+                    groups.reply_context(self.db, message, request, self.identity)
+                    self.db.execute("INSERT OR IGNORE INTO bot_inbox(id,uid,message,group_chat) VALUES(?,?,?,?)",
+                                    (event["update_id"], sender["id"], json.dumps(request, ensure_ascii=False), chat["id"]))
             self.store.set_offset(max(e["update_id"] for e in updates) + 1)
             self.db.execute("INSERT OR REPLACE INTO runtime_state VALUES ('telegram_last_batch',?)", (str(now),))
             self.db.execute("COMMIT")
@@ -231,15 +244,15 @@ class Inbox:
             return self.db.execute("""WITH ready AS (
                 SELECT b.*, json_extract(b.message,'$.due_at') AS due,
                        row_number() OVER (PARTITION BY uid ORDER BY waiting_runner,
-                           json_extract(b.message,'$.due_at'), -id) AS position
-                FROM bot_inbox b WHERE id<0 AND available<=?
+                           json_extract(b.message,'$.due_at'), abs(id)) AS position
+                FROM bot_inbox b WHERE (id<0 OR group_chat IS NOT NULL) AND available<=?
                   AND id NOT IN (SELECT value FROM json_each(?))
                   AND uid NOT IN (SELECT value FROM json_each(?)))
-                SELECT * FROM ready WHERE position<=? ORDER BY position, due, -id LIMIT 24""",
+                SELECT * FROM ready WHERE position<=? ORDER BY position, due, abs(id) LIMIT 24""",
                 (time.time(), json.dumps(list(running)), json.dumps(list(saturated)), reports.MAX_PARALLEL)).fetchall()
         return self.db.execute("""SELECT b.* FROM bot_inbox b
-            WHERE b.id>=0 AND b.available<=?
-              AND NOT EXISTS (SELECT 1 FROM bot_inbox p WHERE p.uid=b.uid AND p.id>=0 AND p.id<b.id AND p.waiting_runner=0)
+            WHERE b.id>=0 AND b.group_chat IS NULL AND b.available<=?
+              AND NOT EXISTS (SELECT 1 FROM bot_inbox p WHERE p.uid=b.uid AND p.group_chat IS NULL AND p.id>=0 AND p.id<b.id AND p.waiting_runner=0)
             ORDER BY b.id LIMIT 24""", (time.time(),)).fetchall()
 
     def get_step(self, update_id, step):
@@ -400,7 +413,12 @@ async def _message_text(tg, msg, *, files=()):
         if msg["voice"].get("duration", 0) > media.MAX_VOICE_SECONDS:
             raise media.MediaError("Голосовое длиннее пяти минут. Пришли его частями.")
         audio = await tg.download(msg["voice"], media.MAX_VOICE_BYTES)
-        text = await media.transcribe(audio)
+        transcript = await media.transcribe(audio)
+        if msg.get("quoted_voice"):
+            request = text or ("Кратко перескажи голосовое." if ru else "Summarize this voice note.")
+            text = request + "\n\n[Цитата из сообщения, на которое дан ответ]\n" + transcript
+        else:
+            text = transcript
     elif "photo" in msg:
         candidates = [p for p in msg["photo"] if p.get("file_size", 0) <= media.MAX_PHOTO_BYTES]
         if not candidates:
@@ -439,6 +457,9 @@ async def _compose(row, store, inbox, tg, agent):
     msg = json.loads(row["message"])
     sender = msg["from"]
     store.ensure_user(uid, sender.get("first_name", ""), sender.get("language_code", ""))
+    if msg.get("invalid_group_link"):
+        return None, ("Это личная ссылка автора поручения. Если это твоё поручение, оно уже принято или ссылка истекла."
+                      if _uses_russian(msg) else "This link belongs to the requester. If it is yours, the request was already accepted or expired.")
     bridge_url = os.getenv("MINI_APP_BRIDGE_URL", "").strip()
     from .privacy import privacy_reply
     erasure = privacy_reply(store, uid, msg.get("text") or "", row["id"])
@@ -507,6 +528,10 @@ async def _compose(row, store, inbox, tg, agent):
             return None, str(error)
         if project_reply is not None:
             return None, project_reply
+    if msg.get("group_request"):
+        notice = groups.connection_notice(store, uid, progress.request_text(query), _uses_russian(msg))
+        if notice:
+            return query, notice
     if not photo and progress.STATUS.fullmatch(progress.request_text(query)):
         return query, reports.queue_status(store, uid, _uses_russian(msg))
     computer = projects.get(store, uid, project_id).get("computer_id") if project_id else None
@@ -648,6 +673,20 @@ async def _reply_with_photos(tg, uid, message, photos):
 
 
 async def _handle(row, store, inbox, tg, agent):
+    if row["group_chat"] is not None:
+        try:
+            await groups.handle(row, inbox, tg, agent)
+        except Exception as error:
+            log.error("Group request failed type=%s", type(error).__name__)
+            if row["retries"] < 2:
+                inbox.retry(row, 5)
+            elif row["reply"] is None:
+                msg = json.loads(row["message"])
+                text = "Не удалось выполнить поручение. Попробуй ещё раз." if _uses_russian(msg) else "I couldn’t complete this request. Please try again."
+                inbox.db.execute("UPDATE bot_inbox SET reply=? WHERE id=?", (text, row["id"]))
+            else:
+                inbox.retry(row, 60)
+        return
     uid, update_id = row["uid"], row["id"]
     inbox.file_download = getattr(tg, "download", None)
     original = json.loads(row["message"])
@@ -817,6 +856,9 @@ async def _handle(row, store, inbox, tg, agent):
                 url = view_url()
                 if url:
                     keyboard.append([{"text": "Открыть задачи" if ru else "Open tasks", "web_app": {"url": url}}])
+            if command in {"/start", "/help"} and inbox.identity and inbox.identity.get("can_join_groups"):
+                keyboard.append([{"text":"Добавить в группу" if ru else "Add to a group",
+                                  "url":f"https://t.me/{inbox.identity['username']}?startgroup=team"}])
             if not result_link and command.split(" ", 1)[0] == "/start" and chatgpt_owner(uid):
                 url = settings_url()
                 if url:
@@ -1007,8 +1049,24 @@ async def _widget_updates(store, telegram, updates, queue_external=None):
 
 
 async def run_bot(store, session, token, model_key):
-    inbox = Inbox(store)
     telegram = Telegram(session, token)
+    while True:
+        try:
+            identity = await telegram.call("getMe")
+            break
+        except TelegramError as error:
+            await asyncio.sleep(max(3, error.retry_after))
+    inbox = Inbox(store, identity)
+    if identity.get("can_join_groups"):
+        store.group_invite_url = f"https://t.me/{identity['username']}?startgroup=team"
+    try:
+        scope = {"type":"all_group_chats"}
+        commands = await telegram.call("getMyCommands", scope=scope)
+        if not any(item["command"] == "ask" for item in commands):
+            await telegram.call("setMyCommands", scope=scope,
+                                commands=[*commands, {"command":"ask", "description":"Ask Aleph about this message"}])
+    except TelegramError as error:
+        log.warning("Group command menu unavailable status=%s", error.code)
     changed = asyncio.Event()
     agent = create_agent(session, model_key)
     log.info("Telegram conversation engine: %s", type(agent).__name__)

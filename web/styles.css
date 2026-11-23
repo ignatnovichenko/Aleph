@@ -59,6 +59,7 @@ h1, h2, h3, p { margin: 0; }
   display: flex; align-items: center; width: 100%; gap: 11px; min-height: 57px;
   padding: 8px 11px; text-align: left;
 }
+a.setting-row { text-decoration: none; }
 .task-row + .task-row,
 .setting-row + .setting-row, .project-row + .project-row { border-top: 1px solid var(--hair); }
 .task-row { min-height: 61px; padding-block: 6px; transition: opacity .15s ease, transform .18s var(--ease); }

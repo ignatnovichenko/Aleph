@@ -181,6 +181,7 @@ export interface WorkspaceState {
   integrations?: { rss: boolean; calendar: boolean };
   model?: ModelSummary;
   model_configurable?: boolean;
+  group_invite_url?: string | null;
   connections?: Connections;
 }
 

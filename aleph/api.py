@@ -146,6 +146,7 @@ def install_api(app, store, token, model_key=None):
                                   "connections": connections.statuses(store, uid)}
         result["model"] = models.describe(store, uid, catalogs.opencode_model)
         result["model_configurable"] = chatgpt_owner(uid)
+        result["group_invite_url"] = store.group_invite_url
         if not compact:
             result["feed_items"] = store.feed_items(uid)
         elif result["model_configurable"]:
