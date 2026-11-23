@@ -32,6 +32,7 @@ The Telegram server runs on Python 3.12. Hermes runs in a separate Python 3.14 e
     python -m venv .venv
     . .venv/bin/activate
     pip install -r requirements-voice.txt
+    python deploy/install-bluetts.py
     npm ci
     npm run build
     python -m aleph
@@ -139,3 +140,10 @@ Open Aleph privately and choose **Add to a group** under `/start`. In a group or
 Public questions and research use the server’s model and public reference sources. Results go back to the original message and topic. Personal accounts, project files and actions use the requester’s own private chat. Existing users receive the request there automatically. First-time users can open the owner-bound button on the group reply for 24 hours. A Notion or Drive write follows the normal private preview and approval flow and requires the corresponding OAuth connection.
 
 Telegram supplies addressed slash commands and replies with group privacy enabled. For plain @mentions in ordinary group messages, the owner can use BotFather’s `/setprivacy` setting and re-add the bot to existing groups. Aleph discards unrelated conversation even when Telegram delivers it. [Telegram group privacy](https://core.telegram.org/bots/features#privacy-mode)
+
+
+### On-demand voice replies
+
+Ask “ответь голосовым” in a message or voice note. Aleph sends the answer using Telegram’s `sendVoice` in the requesting conversation, including the topic for a public group reply. Without that request the standard reply is text. Asking just “ответь голосовым” in a private chat reads the previous answer from the current project.
+
+The Linux x86-64 installer uses the official BlueTTS v3.0.1 Russian frontend, the optimized FP32 graphs under `onnx/` on ONNX Runtime’s CPU provider, and FFmpeg for mono Ogg/Opus. For a native installation, install `uv`, `curl`, `git` and `ffmpeg` and run `python deploy/install-bluetts.py`. `ALEPH_BLUETTS_HOME` overrides the default `~/.local/share/aleph/bluetts` for installation and serving. The amd64 container includes this runtime. The stock David voice uses LibriTTS-R speaker 708 (CC BY 4.0, Koizumi et al., 2023). [Model and component licenses](https://huggingface.co/notmax123/BlueV3-onnx/blob/8410bbfe508a9b84a967324ecf3caf5f655326c9/LICENSES.md)

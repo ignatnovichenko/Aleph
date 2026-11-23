@@ -350,10 +350,10 @@ class Aleph:
         if name in {"schedule_report","start_assignment"}:
             if name=="start_assignment":
                 args={**args,"run_at":(datetime.now(timezone.utc)+timedelta(seconds=2)).isoformat()}
-            source = store.db.execute("SELECT source,file_context,json_extract(message,'$.message_id') AS origin_message FROM bot_inbox WHERE id=? AND uid=?",
+            source = store.db.execute("SELECT source,file_context,voice_requested,json_extract(message,'$.message_id') AS origin_message FROM bot_inbox WHERE id=? AND uid=?",
                                       (int(request_key.split(":")[1]), uid)).fetchone()
             return reports.schedule(store, uid, project_id, **args, request_key=request_key,
-                                    source=source[0] if source else "", origin_message=source["origin_message"] if source else None, input_versions=reports.pins(store,uid,project_id,source["file_context"] if source else None))
+                                    source=source[0] if source else "", voice_requested=bool(source and source["voice_requested"]), origin_message=source["origin_message"] if source else None, input_versions=reports.pins(store,uid,project_id,source["file_context"] if source else None))
         if name == "capture_project_update":
             return capture.create(store, uid, project_id, request_key, args)
         if name == "project_overview":

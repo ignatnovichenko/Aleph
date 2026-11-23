@@ -18,7 +18,7 @@ from .chatgpt_pair import owner as chatgpt_owner
 from .computers import ComputerUnavailable
 from .hermes import create_agent
 from .links import settings_url, task_button, view_url
-from . import groups, models, projects
+from . import groups, models, projects, voice_replies
 from .llm import ChatGPTUnavailable, ModelRejectsPhoto, ModelUnavailable, RegionUnavailable
 from . import article_images, articles, capture, document_chat, documents, integrations, media, progress, reminders, reports, saved_results, widgets
 
@@ -143,6 +143,10 @@ class Inbox:
             self.db.execute("INSERT OR IGNORE INTO runtime_state VALUES('file_versions_migrated','1')")
 
         columns = {r["name"] for r in self.db.execute("PRAGMA table_info(bot_inbox)")}
+        for name, spec in (("voice_requested", "INTEGER NOT NULL DEFAULT 0"),
+                           ("voice_part", "INTEGER NOT NULL DEFAULT 0"), ("voice_audio", "BLOB")):
+            if name not in columns:
+                self.db.execute(f"ALTER TABLE bot_inbox ADD COLUMN {name} {spec}")
         if "group_chat" not in columns:
             self.db.execute("ALTER TABLE bot_inbox ADD COLUMN group_chat INTEGER")
         if "waiting_runner" not in columns:
@@ -418,7 +422,7 @@ async def _message_text(tg, msg, *, files=()):
             request = text or ("Кратко перескажи голосовое." if ru else "Summarize this voice note.")
             text = request + "\n\n[Цитата из сообщения, на которое дан ответ]\n" + transcript
         else:
-            text = transcript
+            text = (text + "\n" + transcript).strip() if text else transcript
     elif "photo" in msg:
         candidates = [p for p in msg["photo"] if p.get("file_size", 0) <= media.MAX_PHOTO_BYTES]
         if not candidates:
@@ -521,6 +525,19 @@ async def _compose(row, store, inbox, tg, agent):
         except ValueError as error:
             raise media.MediaError(str(error)) from None
     query, photo = await _message_text(tg, msg, files=files)
+    original_query = query
+    wants_voice, query = voice_replies.preference(query)
+    if wants_voice:
+        inbox.db.execute("UPDATE bot_inbox SET voice_requested=1 WHERE id=?", (row["id"],))
+        if not progress.request_text(query).strip() and not files and not photo:
+            quoted = msg.get("reply_to_message") or {}
+            if quoted.get("text") or quoted.get("caption"):
+                return original_query, quoted.get("text") or quoted["caption"]
+            previous = next((item["content"] for item in reversed(store.history(uid, project_id=project_id))
+                             if item["role"] == "assistant"), None)
+            return original_query, previous or ("Слушаю. Что хочешь обсудить?" if _uses_russian(msg) else "What would you like to discuss?")
+        if not progress.request_text(query).strip():
+            query = ("Расскажи, что здесь." if _uses_russian(msg) else "Describe this.") + query
     if "voice" in msg:
         try:
             project_reply = projects.chat_command(store, uid, query, _uses_russian(msg))
@@ -546,7 +563,7 @@ async def _compose(row, store, inbox, tg, agent):
                 reports.schedule(store, uid, project_id, title[:110], prompt, run_at,
                                  f"tg:{row['id']}:background:{index}", source=title[:900],
                                  needs_folder=bool(computer and re.search(r"папк|\bfolder\b", prompt, re.I)),
-                                 input_versions=versions, origin_message=msg.get("message_id"))
+                                 input_versions=versions, origin_message=msg.get("message_id"), voice_requested=wants_voice)
         except ValueError as error:
             store.db.execute("ROLLBACK TO delegate_message")
             return query, str(error)
@@ -570,7 +587,7 @@ async def _compose(row, store, inbox, tg, agent):
     source = query.split("\n\n[Files for this request]", 1)[0].split("\n\n[Attached document content]", 1)[0][:900]
     store.db.execute("UPDATE bot_inbox SET source=? WHERE id=?", (source, row["id"]))
     text = progress.request_text(query)
-    if row["progress_attempted"] or progress.skip_ack(text):
+    if wants_voice or row["progress_attempted"] or progress.skip_ack(text):
         answer = await agent.respond(store, uid, query, photo, inbox, row["id"])
     else:
         finished = asyncio.Event()
@@ -582,7 +599,7 @@ async def _compose(row, store, inbox, tg, agent):
         finally:
             finished.set()
             await announcement
-    historical = ("[Фото] " if photo else "") + query
+    historical = ("[Фото] " if photo else "") + original_query
     return historical, answer
 
 async def _send_widget(store, tg, uid, update_id, reply, show_plan, *, russian=True):
@@ -873,7 +890,21 @@ async def _handle(row, store, inbox, tg, agent):
         if scheduled and not reports.current(store, row, allow_failed=True):
             inbox.done(update_id)
             return
-        reply = await _send_widget(store, tg, uid, update_id, reply, show_plan, russian=ru)
+        voice = inbox.db.execute("SELECT voice_requested FROM bot_inbox WHERE id=?", (update_id,)).fetchone()
+        voice = bool(voice and voice[0] and reply.strip())
+        widget_reply = await _send_widget(store, tg, uid, update_id, "" if voice else reply, show_plan, russian=ru)
+        if voice:
+            address = {"chat_id": uid}
+            message_id = origin_message if scheduled else original.get("message_id")
+            if message_id:
+                address["reply_parameters"] = {"message_id": message_id, "allow_sending_without_reply": True}
+            message = await voice_replies.deliver(inbox, tg, update_id, reply, address, ru,
+                                                  lambda: not scheduled or reports.current(store, row, allow_failed=True))
+            if answer_id and isinstance(message, dict):
+                saved_results.remember_message(store, uid, answer_id, message)
+            inbox.done(update_id, delivered=True)
+            return
+        reply = widget_reply
         rich = articles.rich_content(reply) if not show_plan and not widgets.for_update(store, update_id) else None
         photos = []
         if rich:

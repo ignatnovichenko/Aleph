@@ -16,7 +16,7 @@ def initialize(db):
         )
     """)
     columns = {row["name"] for row in db.execute("PRAGMA table_info(scheduled_reports)")}
-    for column, kind in {"origin_message":"INTEGER","stage":"TEXT NOT NULL DEFAULT ''","on_server":"INTEGER NOT NULL DEFAULT 0",
+    for column, kind in {"voice_requested":"INTEGER NOT NULL DEFAULT 0","origin_message":"INTEGER","stage":"TEXT NOT NULL DEFAULT ''","on_server":"INTEGER NOT NULL DEFAULT 0",
                          "needs_folder":"INTEGER NOT NULL DEFAULT 0","inputs":"TEXT NOT NULL DEFAULT '[]'",
                          "started_at": "TEXT", "result": "TEXT", "delivered_at": "TEXT",
                          "revision": "INTEGER NOT NULL DEFAULT 0"}.items():
@@ -24,7 +24,7 @@ def initialize(db):
             db.execute(f"ALTER TABLE scheduled_reports ADD COLUMN {column} {kind}")
 
 
-def schedule(store, uid, project_id, title, prompt, run_at, request_key, source="", needs_folder=False, input_versions=(), origin_message=None):
+def schedule(store, uid, project_id, title, prompt, run_at, request_key, source="", needs_folder=False, input_versions=(), origin_message=None, voice_requested=False):
     from .store import bounded_text
 
     existing = store.db.execute("""
@@ -53,7 +53,7 @@ def schedule(store, uid, project_id, title, prompt, run_at, request_key, source=
     try:
         task = store.create_task(uid, title, run_at, prompt, request_key, project_id=project_id,
                                  remind_at=None, source=source)
-        store.db.execute("INSERT INTO scheduled_reports(task_id,needs_folder,inputs,origin_message) VALUES(?,?,?,?)", (task["id"],int(needs_folder),json.dumps(input_versions),origin_message))
+        store.db.execute("INSERT INTO scheduled_reports(task_id,needs_folder,inputs,origin_message,voice_requested) VALUES(?,?,?,?,?)", (task["id"],int(needs_folder),json.dumps(input_versions),origin_message,int(voice_requested)))
         result = store.get_task(uid, task["id"])
     except BaseException:
         store.db.execute("ROLLBACK TO schedule_report")
@@ -91,10 +91,10 @@ def enqueue(db, now=None):
 
     at = timestamp(now)
     db.execute("""
-        INSERT OR IGNORE INTO bot_inbox(id,uid,message,project_id)
+        INSERT OR IGNORE INTO bot_inbox(id,uid,message,project_id,voice_requested)
         SELECT -t.id, t.user_id,
             json_object('from',json_object('id',t.user_id,'language_code',u.language_code),
-                        'due_at',t.due_at,'notes',t.notes,'title',t.title,'revision',r.revision,'origin_message',r.origin_message), t.project_id
+                        'due_at',t.due_at,'notes',t.notes,'title',t.title,'revision',r.revision,'origin_message',r.origin_message), t.project_id, r.voice_requested
         FROM tasks t JOIN scheduled_reports r ON r.task_id=t.id
         JOIN users u ON u.id=t.user_id
         WHERE t.status='open' AND r.state='pending' AND t.due_at<=?

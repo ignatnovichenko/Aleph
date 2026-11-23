@@ -9,7 +9,7 @@ from urllib.parse import quote
 
 import aiohttp
 
-from . import articles, connections
+from . import articles, connections, voice_replies
 from .llm import TOOLS, ModelUnavailable, _string, _tool
 from .store import timestamp
 
@@ -376,6 +376,7 @@ async def handle(row, inbox, tg, agent):
     msg = json.loads(row["message"])
     ru = _uses_russian(msg)
     ident = row["id"]
+    wants_voice, question = voice_replies.preference(msg["text"])
     address = {
         "chat_id": msg["chat_id"],
         "reply_parameters": {"message_id": msg["origin"], "allow_sending_without_reply": True},
@@ -385,17 +386,35 @@ async def handle(row, inbox, tg, agent):
     try:
         answer = row["reply"]
         if not answer:
+            if msg["media"].get("voice") and (wants_voice or not msg.get("quoted_voice")):
+                from . import media
+                voice = msg["media"]["voice"]
+                if voice.get("duration", 0) <= media.MAX_VOICE_SECONDS:
+                    try:
+                        transcript = await media.transcribe(await tg.download(voice, media.MAX_VOICE_BYTES))
+                    except media.MediaError:
+                        transcript = ""
+                    if transcript:
+                        if msg.get("quoted_voice"):
+                            msg["quote"] = transcript
+                        else:
+                            msg["text"] = (msg["text"] + " " + transcript).strip()
+                            wants_voice, question = voice_replies.preference(msg["text"])
+                        del msg["media"]["voice"]
+                        msg["voice_handoff"] = not wants_voice
+                        inbox.db.execute("UPDATE bot_inbox SET message=? WHERE id=?", (json.dumps(msg), ident))
             if msg["help"]:
                 answer = help_text(inbox.identity["username"], ru)
             elif (
                 msg["media"]
-                or private_request(msg["text"])
+                or msg.get("voice_handoff")
+                or private_request(question)
                 or inbox.db.execute("SELECT 1 FROM group_handoffs WHERE update_id=?", (ident,)).fetchone()
             ):
                 await handoff(row, msg, tg, inbox, address, ru)
                 return
             else:
-                if RESEARCH.search(msg["text"]) and inbox.claim_progress(ident):
+                if not wants_voice and RESEARCH.search(msg["text"]) and inbox.claim_progress(ident):
                     sent = await tg.call(
                         "sendMessage",
                         **address,
@@ -408,7 +427,10 @@ async def handle(row, inbox, tg, agent):
                     )
                     remember_public_reply(inbox.db, msg, sent, "")
                 try:
-                    answer = await public_answer(agent, msg, ident)
+                    if wants_voice and not question and msg["quote"]:
+                        answer = msg["quote"]
+                    else:
+                        answer = await public_answer(agent, {**msg, "text":question or ("Что обсудим?" if ru else "What shall we discuss?")}, ident)
                 except ModelUnavailable:
                     if row["retries"] < 2:
                         inbox.retry(row, 5)
@@ -422,6 +444,11 @@ async def handle(row, inbox, tg, agent):
                     await handoff(row, msg, tg, inbox, address, ru)
                     return
             inbox.db.execute("UPDATE bot_inbox SET reply=? WHERE id=?", (answer, ident))
+        if wants_voice:
+            sent = await voice_replies.deliver(inbox, tg, ident, answer, address, ru)
+            remember_public_reply(inbox.db, msg, sent, answer)
+            inbox.done(ident)
+            return
         rich = articles.rich_content(answer)
         if rich and not row["sent_chunks"]:
             try:
