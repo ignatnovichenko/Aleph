@@ -89,6 +89,22 @@ In **Settings → Chat replies**, the owner can choose ChatGPT or OpenCode, then
 
 The runner connects over HTTPS without an incoming port. Hermes runs on the selected computer and receives that project's turn context. Your selected model, Telegram delivery and integrations are brokered by the Aleph server. Connected computers keep provider credentials on the server. Each optional project folder requires a local access grant. When a computer is offline, scheduled work waits for it to reconnect. To switch back, select **Aleph server** for the project. Disconnecting a computer in Settings revokes its credentials and moves its projects back to the server.
 
+### Chrome on the paired computer
+
+Install desktop Google Chrome and start the updated runner in a graphical desktop session. Existing pairings keep their token. In a private Telegram chat, try “В Chrome открой https://example.org и найди форму”. Aleph can use multiple tabs, click visible controls, fill forms and save downloads to `~/.config/aleph/browser/downloads`. Browser tasks start only with an online runner. The selected model receives visible page text and control labels. The dedicated profile, site sessions and password fields stay on the computer.
+
+For manual sign-in, run these commands from the Aleph checkout. Close the profile window after signing in.
+
+```sh
+sh deploy/computer.sh browser-stop
+sh deploy/computer.sh browser-login
+sh deploy/computer.sh browser-resume
+```
+
+**Emergency stop.** Tap **Стоп** on the Telegram task or send `/browser_stop`. The server blocks new steps immediately upon receipt. An online runner closes its automation window and acknowledges shutdown. If Telegram or the network is unavailable, run `sh deploy/computer.sh browser-stop` locally. A loss of contact with the server also interrupts the active run. An already submitted transaction cannot be recalled. To accept fresh tasks after stopping, explicitly unlock in the same place (`/browser_resume` or `browser-resume`) and send a new instruction. Old tasks never resume.
+
+Before a consequential action, Telegram shows the site, action and available form details. Approval applies once. To authorize that precise operation in a new task in advance, add a separate line beginning with **Разрешаю:** followed by the exact action description. Changed details require fresh approval. Passwords, payment card data and verification codes should be entered manually using the dedicated profile.
+
 ## Document workflows in Telegram
 
 Attach the file and describe the change in its caption. To continue editing a file Aleph sent back, reply to the attachment. To combine PDF files, attach them together and say how to arrange their pages. Files are scoped to the current workspace.

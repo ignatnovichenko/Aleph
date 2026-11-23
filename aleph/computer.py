@@ -50,7 +50,8 @@ class Runner:
         self.headers = {"Authorization": f"Bearer {token}", "X-Aleph-Runner": secrets.token_urlsafe(24)} if token else {}
 
     async def request(self, path, fields=None):
-        async with self.session.post(self.server + path, json=fields or {}, headers=self.headers,
+        timeout = aiohttp.ClientTimeout(total=125) if path == "/browser/plan" else self.session.timeout
+        async with self.session.post(self.server + path, json=fields or {}, headers=self.headers, timeout=timeout,
                                      allow_redirects=False) as response:
             if response.status == 401:
                 raise Revoked
@@ -192,7 +193,10 @@ async def main(args):
             config = json.loads(args.config.read_text())
             server = origin(args.server or config["server"])
         print(f"{config['name']} · Aleph runner started. Keep this window open. Ctrl+C to stop.", flush=True)
-        listeners = []
+        from .chrome_runner import listen
+        from .chrome_local import ROOT, pairing_key
+        browser = Runner(session, server, config["token"])
+        listeners = [asyncio.create_task(listen(browser, ROOT, pairing_key(config)))]
         for lane in ("chat", *("background" for _ in range(reports.MAX_PARALLEL))):
             runner = Runner(session, server, config["token"])
             runner.headers["X-Aleph-Lane"] = lane

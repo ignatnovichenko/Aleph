@@ -525,6 +525,15 @@ async def _compose(row, store, inbox, tg, agent):
         except ValueError as error:
             raise media.MediaError(str(error)) from None
     query, photo = await _message_text(tg, msg, files=files)
+    from . import chrome_jobs
+    request_text = progress.request_text(query).strip()
+    if not msg.get("group_request") and row["id"] > 0:
+        if request_text.lower() in ("/browser_resume", "/browser_stop"):
+            pause = request_text.lower() == "/browser_stop"
+            store.chrome.pause(uid, row["id"], pause)
+            return None, ("Chrome заблокирован." if pause else "Новые поручения для Chrome разрешены. Предыдущая работа остановлена.")
+        if chrome_jobs.requested(request_text):
+            return None, store.chrome.stage(uid, row["id"], project_id, re.split(r"\n\n\[(?:Цитата|Attached document|Files for this request)", query, maxsplit=1)[0].strip())
     original_query = query
     wants_voice, query = voice_replies.preference(query)
     if wants_voice:
@@ -830,6 +839,15 @@ async def _handle(row, store, inbox, tg, agent):
                 break
             inbox.db.execute("UPDATE bot_documents SET sent=1 WHERE key=?", (artifact["key"],))
 
+        browser_job = store.chrome.offer(update_id)
+        if browser_job:
+            from .chrome_jobs import CONTROL
+            await tg.call("sendMessage", chat_id=uid, text=reply, reply_markup=CONTROL)
+            browser_job["ready"] = True
+            inbox.done(update_id, delivered=True)
+            return
+        if store.db.execute("SELECT 1 FROM chrome_runs WHERE turn=?", (update_id,)).fetchone():
+            reply = "Предыдущее поручение Chrome завершено или прервано. Для нового запуска напиши задачу ещё раз."
         command = (original.get("text") or "").strip().lower().split("@",1)[0].rstrip(".!")
         result_link = saved_results.OPEN.fullmatch((original.get("text") or "").strip())
         show_plan = not result_link and (command.split(" ", 1)[0] in ("/start", "/help", "/plan", "/tasks") or command in PLAN_ALIASES
@@ -1051,6 +1069,9 @@ async def _widget_updates(store, telegram, updates, queue_external=None):
         if isinstance(query, dict) and isinstance(query.get("id"), str):
             message = query if native else (query.get("message") or {})
             chat_id = (message.get("chat") or {}).get("id", 0)
+            if str(query.get("data", "")).startswith("chrome:"):
+                await store.chrome.callback(telegram, query, update["update_id"])
+                continue
             lanes.setdefault((chat_id, message.get("message_id", 0)), []).append((native, query))
     limit = asyncio.Semaphore(16)
 
@@ -1100,6 +1121,7 @@ async def run_bot(store, session, token, model_key):
         log.warning("Group command menu unavailable status=%s", error.code)
     changed = asyncio.Event()
     agent = create_agent(session, model_key)
+    store.chrome.tg, store.chrome.agent = telegram, agent
     log.info("Telegram conversation engine: %s", type(agent).__name__)
     worker = asyncio.create_task(_work(store, inbox, telegram, agent, changed))
     confirmations = set()
@@ -1119,21 +1141,38 @@ async def run_bot(store, session, token, model_key):
         confirmations.add(task)
         task.add_done_callback(confirmations.discard)
 
+    widget_batches = asyncio.Queue()
+    async def deliver_widgets():
+        while True:
+            batch = await widget_batches.get()
+            try:
+                await _widget_updates(store, telegram, batch, queue_external)
+            except TelegramError as error:
+                log.warning("Callback delivery status=%s", error.code)
+    widget_worker = asyncio.create_task(deliver_widgets())
+
     try:
         while True:
             if worker.done():
                 await worker
+            if widget_worker.done():
+                await widget_worker
             try:
                 updates = await telegram.call("getUpdates", offset=inbox.offset(), timeout=25, allowed_updates=["message", "widget_query", "callback_query"])
                 if updates:
+                    # Persist the emergency barrier before dispatching any other work in this batch.
+                    for item in updates:
+                        store.chrome.intercept_stop(item)
                     inbox.ingest(updates)
                     changed.set()
-                    await _widget_updates(store, telegram, updates, queue_external)
+                    if any("widget_query" in item or "callback_query" in item for item in updates):
+                        widget_batches.put_nowait(updates)
             except TelegramError as error:
                 log.warning("Polling Telegram status=%s", error.code)
                 await asyncio.sleep(max(4, error.retry_after))
     finally:
         worker.cancel()
+        widget_worker.cancel()
         for task in confirmations:
             task.cancel()
-        await asyncio.gather(worker, *confirmations, return_exceptions=True)
+        await asyncio.gather(worker, widget_worker, *confirmations, return_exceptions=True)

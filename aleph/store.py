@@ -138,6 +138,8 @@ class Store:
         projects.initialize(self.db)
         computers.initialize(self.db)
         self.computer_hub = computers.ComputerHub()
+        from .chrome_jobs import ChromeJobs
+        self.chrome = ChromeJobs(self)
         project_sources.initialize(self.db)
         from . import price_rules
         price_rules.initialize(self.db)

@@ -621,6 +621,7 @@ def install_api(app, store, token, model_key=None):
         app.router.add_route(method, path, scoped(handler))
     app.router.add_post(IMPORT_PATH, chatgpt_import)
     app.router.add_get(r"/api/projects/{id:\d{1,18}}/versions",scoped(versions))
+    app.router.add_post(computers.RUNNER_PATH + "/browser/{op:claim|watch|plan|authorize|approval|gate|record|finish|closed}", store.chrome.endpoint)
     app.router.add_post(computers.RUNNER_PATH + "/pair", register_runner)
     app.router.add_post(computers.RUNNER_PATH + "/claim", runner)
     app.router.add_post(computers.RUNNER_PATH + r"/{job:[A-Za-z0-9_-]{32}}/{command:complete|tool|folder|artifact|result|alive}", runner)
