@@ -1,7 +1,8 @@
 """Telegram long polling, bounded parallel private chats and durable reply delivery."""
 import asyncio
+from collections import Counter
 from contextlib import suppress
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from html import escape
 import json
 import logging
@@ -225,13 +226,17 @@ class Inbox:
             self.db.execute("DELETE FROM runtime_state WHERE key IN ('telegram_offset','telegram_last_batch')")
         return self.store.get_offset()
 
-    def pending(self, *, scheduled=False):
+    def pending(self, *, scheduled=False, running=(), saturated=()):
         if scheduled:
-            return self.db.execute("""SELECT b.* FROM bot_inbox b
-                WHERE b.id<0 AND b.available<=?
-                  AND NOT EXISTS (SELECT 1 FROM bot_inbox p WHERE p.uid=b.uid AND p.id<0 AND p.waiting_runner=0
-                    AND (json_extract(p.message,'$.due_at'), -p.id) < (json_extract(b.message,'$.due_at'), -b.id))
-                ORDER BY json_extract(b.message,'$.due_at'), -b.id LIMIT 24""", (time.time(),)).fetchall()
+            return self.db.execute("""WITH ready AS (
+                SELECT b.*, json_extract(b.message,'$.due_at') AS due,
+                       row_number() OVER (PARTITION BY uid ORDER BY waiting_runner,
+                           json_extract(b.message,'$.due_at'), -id) AS position
+                FROM bot_inbox b WHERE id<0 AND available<=?
+                  AND id NOT IN (SELECT value FROM json_each(?))
+                  AND uid NOT IN (SELECT value FROM json_each(?)))
+                SELECT * FROM ready WHERE position<=? ORDER BY position, due, -id LIMIT 24""",
+                (time.time(), json.dumps(list(running)), json.dumps(list(saturated)), reports.MAX_PARALLEL)).fetchall()
         return self.db.execute("""SELECT b.* FROM bot_inbox b
             WHERE b.id>=0 AND b.available<=?
               AND NOT EXISTS (SELECT 1 FROM bot_inbox p WHERE p.uid=b.uid AND p.id>=0 AND p.id<b.id AND p.waiting_runner=0)
@@ -316,7 +321,7 @@ class Inbox:
                    for call in json.loads(row[0]).get("tool_calls") or [])
 
     def created_tasks(self, uid, update_id):
-        rows = self.db.execute("SELECT id FROM tasks WHERE user_id=? AND request_key GLOB ? ORDER BY id LIMIT 4",
+        rows = self.db.execute("SELECT id FROM tasks WHERE user_id=? AND request_key GLOB ? ORDER BY id LIMIT 25",
                                (uid, f"tg:{update_id}:*"))
         return [self.store.get_task(uid, row["id"]) for row in rows]
 
@@ -326,7 +331,7 @@ class Inbox:
             for i, call in enumerate(json.loads(row["message"]).get("tool_calls") or []):
                 name = call.get("function", {}).get("name")
                 result = self.get_tool(f"tg:{update_id}:{row['step']}:{i}")
-                if name in {"create_task","update_task","change_settings","subscribe_feed","unsubscribe_feed","remember_fact","forget_fact","create_routine","set_routine_active","delete_routine","create_document","edit_document","set_project_context","capture_project_update","schedule_report"} and isinstance(result, dict) and "error" not in result:
+                if name in {"create_task","update_task","change_settings","subscribe_feed","unsubscribe_feed","remember_fact","forget_fact","create_routine","set_routine_active","delete_routine","create_document","edit_document","set_project_context","capture_project_update","schedule_report","start_assignment"} and isinstance(result, dict) and "error" not in result:
                     results.append(result.get("title") or result.get("prepared_attachment") or {"change_settings": "Настройки", "remember_fact": "Память", "forget_fact": "Память", "delete_routine": "Расписание", "set_routine_active": "Расписание", "set_project_context": "Контекст проекта"}.get(name, "Подписка"))
         return results
 
@@ -502,19 +507,37 @@ async def _compose(row, store, inbox, tg, agent):
             return None, str(error)
         if project_reply is not None:
             return None, project_reply
-    if (not photo and not progress.DEFERRED.search(query) and
-            re.search(r"папк|\bfolder\b",progress.request_text(query),re.I) and
-            re.search(r"сравни|собери|подготовь|compare|compile|prepare",progress.request_text(query),re.I) and
-            projects.get(store,uid,project_id).get("computer_id")):
-        from datetime import timedelta, timezone
-        text = progress.request_text(query)
-        context = store.db.execute("SELECT file_context FROM bot_inbox WHERE id=?",(row["id"],)).fetchone()
-        reports.schedule(store,uid,project_id,text[:110],text[:4000],
-                         (datetime.now(timezone.utc)+timedelta(seconds=2)).isoformat(),
-                         f"tg:{row['id']}:folder",source=text[:900],needs_folder=True,
-                         input_versions=reports.pins(store,uid,project_id,context[0]))
-        return query, ("Принял поручение. Открою документы в папке проекта и пришлю результат сюда." if _uses_russian(msg)
-                       else "I’ll read the documents in your project folder and send the result here.")
+    if not photo and progress.STATUS.fullmatch(progress.request_text(query)):
+        return query, reports.queue_status(store, uid, _uses_russian(msg))
+    computer = projects.get(store, uid, project_id).get("computer_id") if project_id else None
+    assignments = progress.background_prompts(query, files, bool(computer)) if not photo else []
+    if assignments:
+        context = store.db.execute("SELECT file_context FROM bot_inbox WHERE id=?", (row["id"],)).fetchone()
+        versions = reports.pins(store, uid, project_id, context[0])
+        run_at = (datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat()
+        store.db.execute("SAVEPOINT delegate_message")
+        try:
+            for index, (title, prompt) in enumerate(assignments):
+                reports.schedule(store, uid, project_id, title[:110], prompt, run_at,
+                                 f"tg:{row['id']}:background:{index}", source=title[:900],
+                                 needs_folder=bool(computer and re.search(r"папк|\bfolder\b", prompt, re.I)),
+                                 input_versions=versions, origin_message=msg.get("message_id"))
+        except ValueError as error:
+            store.db.execute("ROLLBACK TO delegate_message")
+            return query, str(error)
+        except BaseException:
+            store.db.execute("ROLLBACK TO delegate_message")
+            raise
+        finally:
+            store.db.execute("RELEASE delegate_message")
+        ru = _uses_russian(msg)
+        if len(assignments) == 1:
+            ack = progress.immediate_ack(progress.request_text(query), ru)
+            return query, ((ack + " " if ack else "") + ("Взял в фоновую работу. Результат пришлю сюда."
+                              if ru else "Queued for background work. I’ll send the result here."))
+        ack = (f"Поручений в очереди: {len(assignments)}. По каждому пришлю результат сюда."
+               if ru else f"Queued {len(assignments)} separate tasks. I’ll reply as each one finishes.")
+        return query, ack
     if not photo:
         russian_question = MODEL_QUESTION_RU.fullmatch(query.strip())
         if russian_question or MODEL_QUESTION_EN.fullmatch(query.strip()):
@@ -634,10 +657,12 @@ async def _handle(row, store, inbox, tg, agent):
     if scheduled and report is None:
         inbox.done(update_id)
         return
+    origin_message = original.get("origin_message") if scheduled else None
+    thread = {"reply_parameters": {"message_id": origin_message, "allow_sending_without_reply": True}} if origin_message else {}
     try:
         reply = row["reply"]
         if reply is None:
-            typing = asyncio.create_task(_typing(tg, uid))
+            typing = None if scheduled else asyncio.create_task(_typing(tg, uid))
             query = None
             report_title = ""
             try:
@@ -721,9 +746,10 @@ async def _handle(row, store, inbox, tg, agent):
                 else:
                     reply = "Сейчас не удаётся получить ответ модели. Попробуй ещё раз чуть позже." if ru else "I couldn’t reach the model just now. Please try again in a moment."
             finally:
-                typing.cancel()
-                with suppress(asyncio.CancelledError):
-                    await typing
+                if typing:
+                    typing.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await typing
             if scheduled and not reports.current(store, row, allow_failed=True):
                 inbox.done(update_id)
                 return
@@ -734,7 +760,7 @@ async def _handle(row, store, inbox, tg, agent):
             inbox.save_reply(row, query, reply, report_title=report_title)
         for artifact in inbox.db.execute("SELECT * FROM bot_documents WHERE update_id=? AND sent=0 ORDER BY rowid", (update_id,)).fetchall():
             try:
-                sent = await documents.send_document(tg.session, tg.token, uid, artifact["filename"], artifact["mime"], artifact["data"], receipt=True)
+                sent = await documents.send_document(tg.session, tg.token, uid, artifact["filename"], artifact["mime"], artifact["data"], receipt=True, **thread)
                 if isinstance(sent, dict) and isinstance(sent.get("document"), dict):
                     with suppress(ValueError):
                         document_chat.register(store, uid, inbox.bind_project(update_id, uid), sent.get("message_id"), sent["document"],parent=artifact["parent_version"],task=-update_id if scheduled else None)
@@ -797,7 +823,8 @@ async def _handle(row, store, inbox, tg, agent):
                     keyboard.append([{"text": "Настройки" if ru else "Settings", "web_app": {"url": url}}])
         answer_id = saved_results.for_update(store, uid, update_id, reply) if not show_plan and not widgets.for_update(store, update_id) else None
         save_button = [{"text": "Сохранить в проект" if ru else "Save to project", "callback_data": f"save:{answer_id}"}] if answer_id else []
-        original_message = None
+        receipt = not scheduled and any(task["report_state"] for task in tasks)
+        original_message = original.get("message_id") if receipt else origin_message
         if result_link:
             with suppress(KeyError):
                 original_message = saved_results.saved(store, uid, int(result_link[1]))["origin_message"]
@@ -813,6 +840,7 @@ async def _handle(row, store, inbox, tg, agent):
         if rich and not row["sent_chunks"] and row["article_fallback"] != ARTICLE_PLAIN:
             rich_keyboard = keyboard + ([save_button] if save_button else [])
             markup = {"reply_markup": {"inline_keyboard": rich_keyboard}} if rich_keyboard else {}
+            markup.update(thread)
             embed = bool(photos) and not row["article_fallback"]
             if embed:
                 inbox.db.execute("UPDATE bot_inbox SET article_fallback=? WHERE id=?", (ARTICLE_TEXT_ONLY, update_id))
@@ -847,6 +875,8 @@ async def _handle(row, store, inbox, tg, agent):
                 rows.append(save_button)
             if rows:
                 params["reply_markup"] = {"inline_keyboard": rows}
+            if receipt:
+                params["disable_notification"] = True
             if n == 0 and original_message:
                 params["reply_parameters"] = {"message_id": original_message, "allow_sending_without_reply": True}
             formatted = articles.basic_content(chunk)
@@ -888,6 +918,7 @@ async def _handle(row, store, inbox, tg, agent):
 
 async def _work(store, inbox, tg, agent, changed):
     interactive, scheduled, notices = {}, {}, {}
+    owners = {}
     try:
         while True:
             changed.clear()
@@ -897,6 +928,8 @@ async def _work(store, inbox, tg, agent, changed):
                     if task.done():
                         await task
                         del active[uid]
+                        if active is scheduled:
+                            owners.pop(uid)
             for notice in projects.pending_notices(store):
                 if len(notices) >= 8:
                     break
@@ -905,14 +938,28 @@ async def _work(store, inbox, tg, agent, changed):
                     task = asyncio.create_task(_workspace_notice(store, tg, notice["id"]))
                     task.add_done_callback(lambda _: changed.set())
                     notices[uid] = task
-            for is_scheduled, active, limit in ((False, interactive, 8), (True, scheduled, 2)):
-                for row in inbox.pending(scheduled=is_scheduled):
-                    if len(active) >= limit:
+            for row in inbox.pending():
+                if len(interactive) >= 8:
+                    break
+                uid = row["uid"]
+                if uid not in interactive and uid not in notices:
+                    task = asyncio.create_task(_handle(row, store, inbox, tg, agent))
+                    task.add_done_callback(lambda _: changed.set())
+                    interactive[uid] = task
+            counts = Counter(owners.values())
+            if len(scheduled) < 8:
+                saturated = [uid for uid, count in counts.items() if count >= reports.MAX_PARALLEL]
+                for row in inbox.pending(scheduled=True, running=scheduled, saturated=saturated):
+                    uid, job_id = row["uid"], row["id"]
+                    if counts[uid] >= reports.MAX_PARALLEL:
+                        continue
+                    task = asyncio.create_task(_handle(row, store, inbox, tg, agent))
+                    task.add_done_callback(lambda _: changed.set())
+                    scheduled[job_id] = task
+                    owners[job_id] = uid
+                    counts[uid] += 1
+                    if len(scheduled) >= 8:
                         break
-                    if row["uid"] not in active and (is_scheduled or row["uid"] not in notices):
-                        task = asyncio.create_task(_handle(row, store, inbox, tg, agent))
-                        task.add_done_callback(lambda _: changed.set())
-                        active[row["uid"]] = task
             with suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(changed.wait(), 1)
     finally:

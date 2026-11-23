@@ -336,7 +336,10 @@ def install_api(app, store, token, model_key=None):
         hub.touch(computer_id)
         command = request.match_info.get("command")
         if command is None:
-            return web.json_response(await hub.claim(computer_id, runner_session), headers={"Cache-Control": "no-store"})
+            lane = request.headers.get("X-Aleph-Lane", "any")
+            if lane not in {"any", "chat", "background"}:
+                raise web.HTTPBadRequest()
+            return web.json_response(await hub.claim(computer_id, runner_session, lane), headers={"Cache-Control": "no-store"})
         job = hub.job(computer_id, runner_session, request.match_info["job"])
         if not job:
             raise web.HTTPNotFound()

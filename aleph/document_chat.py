@@ -28,6 +28,12 @@ def initialize(db):
           available REAL NOT NULL,
           UNIQUE(uid,project_id,message_id)
         );
+        CREATE TABLE IF NOT EXISTS bot_file_pins (
+          update_id INTEGER NOT NULL REFERENCES bot_inbox(id) ON DELETE CASCADE,
+          ref INTEGER NOT NULL REFERENCES bot_file_refs(id) ON DELETE CASCADE,
+          PRIMARY KEY(update_id,ref)
+        );
+        CREATE INDEX IF NOT EXISTS bot_file_pin_ref ON bot_file_pins(ref);
         CREATE INDEX IF NOT EXISTS bot_file_scope ON bot_file_refs(uid,project_id,id);
         CREATE INDEX IF NOT EXISTS bot_file_expiry ON bot_file_refs(available);
     """)
@@ -50,7 +56,7 @@ def _metadata(document):
     return {"file_id": file_id, "file_name": filename or f"Файл.{fmt}", "file_size": size}, fmt
 
 
-def register(store, uid, project_id, message_id, document, *, parent=None, task=None):
+def register(store, uid, project_id, message_id, document, *, parent=None, task=None, update_id=None):
     if not isinstance(document, dict) or type(message_id) is not int or message_id <= 0:
         return None
     metadata, fmt = _metadata(document)
@@ -58,12 +64,14 @@ def register(store, uid, project_id, message_id, document, *, parent=None, task=
     file_versions.record(store,uid,project_id,message_id,metadata,parent,task)
     now = time.time()
     db = store.db
-    db.execute("DELETE FROM bot_file_refs WHERE available<=?", (now,))
+    db.execute("DELETE FROM bot_file_refs WHERE available<=? AND id NOT IN (SELECT ref FROM bot_file_pins)", (now,))
     row = db.execute("""INSERT INTO bot_file_refs(uid,project_id,message_id,metadata,format,available)
         VALUES(?,?,?,?,?,?) ON CONFLICT(uid,project_id,message_id) DO UPDATE SET
         metadata=excluded.metadata, format=excluded.format, available=excluded.available RETURNING id""",
         (uid, project_id, message_id, json.dumps(metadata), fmt, now + KEEP_SECONDS)).fetchone()
-    db.execute("""DELETE FROM bot_file_refs WHERE uid=? AND project_id=? AND id IN (
+    if update_id is not None:
+        db.execute("INSERT OR IGNORE INTO bot_file_pins SELECT id,? FROM bot_inbox WHERE id=?", (row["id"], update_id))
+    db.execute("""DELETE FROM bot_file_refs WHERE uid=? AND project_id=? AND id NOT IN (SELECT ref FROM bot_file_pins) AND id IN (
         SELECT id FROM bot_file_refs WHERE uid=? AND project_id=?
         ORDER BY available DESC,id DESC LIMIT -1 OFFSET ?)""", (uid, project_id, uid, project_id, RECENT))
     return {"id": row["id"], "filename": metadata["file_name"], "format": fmt}
@@ -104,7 +112,7 @@ def collect(store, uid, project_id, update_id, original):
     try:
         for item in matches:
             if document := item.get("document"):
-                ref = register(store, uid, project_id, item.get("message_id"), document)
+                ref = register(store, uid, project_id, item.get("message_id"), document, update_id=update_id)
                 if ref and ref not in files:
                     files.append(ref)
         if siblings:

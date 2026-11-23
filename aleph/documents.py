@@ -257,11 +257,13 @@ class DocumentDeliveryError(Exception):
         self.retry_after = retry_after
 
 
-async def send_document(session, token, uid, filename, mime, content, *, receipt=False):
+async def send_document(session, token, uid, filename, mime, content, *, receipt=False, reply_parameters=None):
     if type(uid) is not int or uid <= 0 or not isinstance(content, bytes) or len(content) > MAX_OUTPUT:
         raise ValueError("Некорректный адресат или размер документа.")
     form = aiohttp.FormData(quote_fields=False)
     form.add_field("chat_id", str(uid))
+    if reply_parameters:
+        form.add_field("reply_parameters", json.dumps(reply_parameters))
     form.add_field("document", content, filename=filename, content_type=mime)
     response_timeout = aiohttp.ClientTimeout(total=30)
     try:

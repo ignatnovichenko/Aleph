@@ -1,7 +1,10 @@
 """One-time AI work scheduled as an ordinary, user-owned task."""
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 from zoneinfo import ZoneInfo
+
+
+MAX_PARALLEL = 4
 
 
 def initialize(db):
@@ -13,7 +16,7 @@ def initialize(db):
         )
     """)
     columns = {row["name"] for row in db.execute("PRAGMA table_info(scheduled_reports)")}
-    for column, kind in {"stage":"TEXT NOT NULL DEFAULT ''","on_server":"INTEGER NOT NULL DEFAULT 0",
+    for column, kind in {"origin_message":"INTEGER","stage":"TEXT NOT NULL DEFAULT ''","on_server":"INTEGER NOT NULL DEFAULT 0",
                          "needs_folder":"INTEGER NOT NULL DEFAULT 0","inputs":"TEXT NOT NULL DEFAULT '[]'",
                          "started_at": "TEXT", "result": "TEXT", "delivered_at": "TEXT",
                          "revision": "INTEGER NOT NULL DEFAULT 0"}.items():
@@ -21,7 +24,7 @@ def initialize(db):
             db.execute(f"ALTER TABLE scheduled_reports ADD COLUMN {column} {kind}")
 
 
-def schedule(store, uid, project_id, title, prompt, run_at, request_key, source="", needs_folder=False, input_versions=()):
+def schedule(store, uid, project_id, title, prompt, run_at, request_key, source="", needs_folder=False, input_versions=(), origin_message=None):
     from .store import bounded_text
 
     existing = store.db.execute("""
@@ -50,7 +53,7 @@ def schedule(store, uid, project_id, title, prompt, run_at, request_key, source=
     try:
         task = store.create_task(uid, title, run_at, prompt, request_key, project_id=project_id,
                                  remind_at=None, source=source)
-        store.db.execute("INSERT INTO scheduled_reports(task_id,needs_folder,inputs) VALUES(?,?,?)", (task["id"],int(needs_folder),json.dumps(input_versions)))
+        store.db.execute("INSERT INTO scheduled_reports(task_id,needs_folder,inputs,origin_message) VALUES(?,?,?,?)", (task["id"],int(needs_folder),json.dumps(input_versions),origin_message))
         result = store.get_task(uid, task["id"])
     except BaseException:
         store.db.execute("ROLLBACK TO schedule_report")
@@ -58,6 +61,28 @@ def schedule(store, uid, project_id, title, prompt, run_at, request_key, source=
     finally:
         store.db.execute("RELEASE schedule_report")
     return {**result, "scheduled_local": when.isoformat(timespec="minutes")}
+
+
+def queue_status(store, uid, russian):
+    from .store import timestamp
+
+    rows = store.db.execute("""
+        SELECT t.title, r.stage, r.started_at FROM scheduled_reports r JOIN tasks t ON t.id=r.task_id
+        WHERE t.user_id=? AND t.status='open' AND r.state='pending' AND t.due_at<=?
+        ORDER BY r.started_at IS NULL, t.due_at, t.id
+    """, (uid, timestamp(datetime.now(timezone.utc) + timedelta(seconds=2)))).fetchall()
+    if not rows:
+        return "Сейчас фоновых поручений нет." if russian else "There are no background tasks right now."
+    lines = []
+    for row in rows:
+        if row["stage"] == "offline":
+            state = "Жду компьютер" if russian else "Waiting for computer"
+        elif row["started_at"]:
+            state = "В работе" if russian else "Running"
+        else:
+            state = "В очереди" if russian else "Queued"
+        lines.append(f"{state} · {row['title']}")
+    return "\n".join(lines)
 
 
 def enqueue(db, now=None):
@@ -69,7 +94,7 @@ def enqueue(db, now=None):
         INSERT OR IGNORE INTO bot_inbox(id,uid,message,project_id)
         SELECT -t.id, t.user_id,
             json_object('from',json_object('id',t.user_id,'language_code',u.language_code),
-                        'due_at',t.due_at,'notes',t.notes,'title',t.title,'revision',r.revision), t.project_id
+                        'due_at',t.due_at,'notes',t.notes,'title',t.title,'revision',r.revision,'origin_message',r.origin_message), t.project_id
         FROM tasks t JOIN scheduled_reports r ON r.task_id=t.id
         JOIN users u ON u.id=t.user_id
         WHERE t.status='open' AND r.state='pending' AND t.due_at<=?
@@ -152,5 +177,5 @@ def input_context(store,task):
                                    (ident,task["project_id"],task["id"])).fetchone()
         if not version:
             raise ValueError("Исходная версия документа недоступна.")
-        refs.append(document_chat.register(store,version["uid"],version["project"],version["message"],json.loads(version["metadata"])))
+        refs.append(document_chat.register(store,version["uid"],version["project"],version["message"],json.loads(version["metadata"]),update_id=-task["id"]))
     return document_chat.prompt_section(refs)

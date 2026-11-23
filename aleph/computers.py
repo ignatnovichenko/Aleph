@@ -150,18 +150,20 @@ class ComputerHub:
     def touch(self, computer_id):
         self._seen[computer_id] = time.monotonic()
 
-    async def claim(self, computer_id, runner_session):
-        # One waiting poll and one running turn per computer.
-        if computer_id in self._waiters:
+    async def claim(self, computer_id, runner_session, lane="any"):
+        poll = (computer_id, runner_session)
+        if poll in self._waiters:
             return None
-        event = self._waiters[computer_id] = asyncio.Event()
+        event = self._waiters[poll] = asyncio.Event()
         try:
             while self.online(computer_id):
                 jobs = [(key, job) for key, job in self._jobs.items()
                         if job.computer_id == computer_id and not job.result.done()]
-                active = next(((key, job) for key, job in jobs if job.claimed_by), None)
-                if jobs and (active is None or active[1].claimed_by == runner_session):
-                    key, job = active or jobs[0]
+                owned = next((entry for entry in jobs if entry[1].claimed_by == runner_session), None)
+                available = next((entry for entry in jobs if entry[1].claimed_by is None and
+                                  (lane == "any" or (entry[1].broker.update_id < 0) == (lane == "background"))), None)
+                if owned or available:
+                    key, job = owned or available
                     job.claimed_by = runner_session
                     job.last_seen = time.monotonic()
                     if job.started is None:
@@ -174,7 +176,7 @@ class ComputerHub:
                     return None
             return None
         finally:
-            self._waiters.pop(computer_id, None)
+            self._waiters.pop(poll, None)
 
     def job(self, computer_id, runner_session, key):
         job = self._jobs.get(key)
@@ -184,8 +186,9 @@ class ComputerHub:
         return None
 
     def _wake(self, computer_id):
-        if (event := self._waiters.get(computer_id)) is not None:
-            event.set()
+        for (device, _), event in self._waiters.items():
+            if device == computer_id:
+                event.set()
 
     def revoke(self, computer_id):
         self._seen.pop(computer_id, None)

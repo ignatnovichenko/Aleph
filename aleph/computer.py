@@ -1,7 +1,7 @@
 """Connect and run Aleph's Hermes worker on a personal computer."""
 import argparse
 import base64
-from . import folder
+from . import folder, reports
 import asyncio
 from getpass import getpass
 import hmac
@@ -192,9 +192,18 @@ async def main(args):
             config = json.loads(args.config.read_text())
             server = origin(args.server or config["server"])
         print(f"{config['name']} · Aleph runner started. Keep this window open. Ctrl+C to stop.", flush=True)
-        runner = Runner(session, server, config["token"])
-        runner.config_path = args.config
-        await runner.run(python)
+        listeners = []
+        for lane in ("chat", *("background" for _ in range(reports.MAX_PARALLEL))):
+            runner = Runner(session, server, config["token"])
+            runner.headers["X-Aleph-Lane"] = lane
+            runner.config_path = args.config
+            listeners.append(asyncio.create_task(runner.run(python)))
+        try:
+            await asyncio.gather(*listeners)
+        finally:
+            for listener in listeners:
+                listener.cancel()
+            await asyncio.gather(*listeners, return_exceptions=True)
 
 
 if __name__ == "__main__":

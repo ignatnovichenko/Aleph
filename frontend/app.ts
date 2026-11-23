@@ -559,6 +559,7 @@ function reportStatus(task: Task) {
   if (task.report_stage === "writing") return t("Готовлю файл","Preparing file");
   if (task.report_stage === "research") return t("Проверяю источники","Checking sources");
   if (task.report_started_at) return t("Выполняется", "In progress");
+  if (task.due_at && Date.parse(task.due_at) <= Date.now()) return t("В очереди", "Queued");
   return t("Запланировано", "Scheduled");
 }
 function needsAttention(task: Task) {

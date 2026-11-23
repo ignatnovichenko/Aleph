@@ -82,3 +82,47 @@ def immediate_ack(text, russian):
         return (f"Подготовлю {topic}. Соберу всё в одном ответе."
                 if russian else f"I’ll prepare {topic} and put it together in one reply.")
     return None
+
+
+BACKGROUND = re.compile(r"\b(?:в\s+фон(?:е|овом\s+режиме)|параллельно|in\s+(?:the\s+)?background|in parallel)\b", re.I)
+FILE_WORK = re.compile(r"\b(?:отредактируй|исправь|пересчитай|обнови|добавь|заполни|объедини|сравни|собери|измени|edit|fix|recalculate|update|add|merge|compare|fill)\b", re.I)
+FOLDER_WORK = re.compile(r"сравни|собери|подготовь|compare|compile|prepare", re.I)
+SEPARATE = re.compile(r"субагент|subagents?|отдельн\w* (?:задач|поручен)|separate tasks", re.I)
+LIST_ITEM = re.compile(r"(?m)^\s*(?:\d{1,2}[.)]|[-•])\s+")
+STATUS = re.compile(
+    r"^(?:а\s+)?(?:что (?:сейчас )?(?:в фоне|в работе|ты делаешь в фоне)|(?:какие|сколько) "
+    r"(?:у (?:меня|тебя) )?(?:сейчас )?(?:фоновых |фоновые )?(?:задач\w*|поручени\w*) (?:сейчас )?(?:в фоне|в работе|в очереди|выполня\w*)"
+    r"|(?:покажи|перечисли) (?:мои |текущие )?фоновые (?:задачи|поручения)|what(?:’s|'s| is) (?:running|in the queue)"
+    r"|(?:show|list) (?:my )?background (?:jobs|tasks))[?!. ]*$", re.I)
+QUESTION = re.compile(r"^(?:а\s+)?(?:как\b|что такое\b|можно ли\b|сколько\b|какие\b|что сейчас\b|how\b|what\b|which\b|are you\b|is there\b)|\b(?:не\s+(?:делай\s+)?в фон|не параллельно|not in (?:the )?background|don't run)", re.I)
+
+
+def background_prompts(query, files, has_computer):
+    """Fast path for self-contained requests. Context-dependent requests go to the planner."""
+    prompt = query.partition("\n\n[Files for this request]")[0].strip()
+    text = request_text(query)
+    if (not text or STATUS.fullmatch(text) or QUESTION.search(text) or DEFERRED.search(text)
+            or re.search(r"\b(?:отслеживай|отследи|следи за|уведоми|watch for|notify me|monitor)\b", text, re.I)):
+        return []
+    if not files and prompt == query and "[Цитата" not in prompt and re.search(
+            r"\b(?:сделай это|по нашему обсуждению|предыдущ\w* (?:файл|таблиц|сообщени)|do that|as discussed|previous (?:file|message))\b",
+            text, re.I):
+        return []
+    explicit = BACKGROUND.search(text)
+    batch = SEPARATE.search(text)
+    folder = has_computer and re.search(r"папк|\bfolder\b", text, re.I)
+    spreadsheet = any(item["format"] in {"xlsx", "xls", "ods", "csv", "tsv"} for item in files)
+    research = RESEARCH_RU.search(text) or RESEARCH_EN.search(text)
+    substantial = (folder and FOLDER_WORK.search(text) or spreadsheet and FILE_WORK.search(text)
+                   or research and (MARKET.search(text) or DETAIL.search(text)))
+    if not (explicit or batch or substantial and not skip_ack(text)):
+        return []
+    if (explicit or batch) and len(LIST_ITEM.findall(prompt)) >= 2 and "\n\n[Цитата" not in prompt:
+        header, *items = LIST_ITEM.split(prompt)
+        # A numbered procedure is one job unless the user explicitly asks for separate workers.
+        if SEPARATE.search(header) or re.search(r"параллельно|in parallel", header, re.I):
+            parts = [(item.strip(), header.strip() + "\n" + item.strip()) for item in items if item.strip()]
+            return parts if all(len(body) <= 4000 for _, body in parts) else []
+    if batch or explicit and not files and len(BACKGROUND.sub("", text).split()) < 3:
+        return []
+    return [(text, prompt)] if len(prompt) <= 4000 else []

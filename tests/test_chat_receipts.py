@@ -4,7 +4,9 @@ from unittest.mock import AsyncMock, patch
 
 from aiohttp.test_utils import TestClient, TestServer
 
-from aleph import bot, progress, projects
+from datetime import datetime, timedelta, timezone
+
+from aleph import bot, progress, projects, reports
 from aleph.__main__ import application
 from aleph.llm import ModelUnavailable
 from aleph.store import Store
@@ -102,34 +104,26 @@ class ChatReceipts(unittest.IsolatedAsyncioTestCase):
 
     async def test_contextual_message_precedes_result_and_survives_model_retry(self):
         self.ingest("Проведи подробный ресерч рынка металлургии в России.")
-        finish = asyncio.Event()
-
-        async def unavailable(*args, **kwargs):
-            await finish.wait()
-            raise ModelUnavailable(503)
-
-        self.agent.respond.side_effect = unavailable
-        attempt = asyncio.create_task(self.handle())
-        try:
-            first = await self.receipt()
-            self.assertIn("исследование рынка металлургии в России", first["text"])
-            self.assertIn("конкурентов", first["text"])
-            self.assertEqual(first["reply_parameters"]["message_id"], 112)
-            self.assertTrue(first["disable_notification"])
-            self.assertFalse(attempt.done())
-        finally:
-            finish.set()
-            await attempt
+        await self.handle()
+        first = await self.receipt()
+        self.assertIn("исследование рынка металлургии в России", first["text"])
+        self.assertIn("конкурентов", first["text"])
+        self.assertEqual(first["reply_parameters"]["message_id"], 112)
+        self.assertTrue(first["disable_notification"])
+        self.agent.respond.assert_not_awaited()
+        reports.enqueue(self.store.db, datetime.now(timezone.utc) + timedelta(minutes=1))
+        self.agent.respond.side_effect = ModelUnavailable(503)
+        await bot._handle(self.inbox.pending(scheduled=True)[0], self.store, self.inbox, self.tg, self.agent)
+        self.assertTrue(self.sent.empty())
 
         self.store.db.execute("UPDATE bot_inbox SET available=0")
         self.agent.respond.side_effect = None
         self.agent.respond.return_value = "Подробный итог исследования."
-        await self.handle()
-        self.assertEqual((await self.receipt())["text"], "Подробный итог исследования.")
+        await bot._handle(self.inbox.pending(scheduled=True)[0], self.store, self.inbox, self.tg, self.agent)
+        result = await self.receipt()
+        self.assertEqual(result["text"], "Подробный итог исследования.")
+        self.assertEqual(result["reply_parameters"]["message_id"], 112)
         self.assertTrue(self.sent.empty())
-        self.assertEqual([item["content"] for item in self.store.history(70)], [
-            "Проведи подробный ресерч рынка металлургии в России.", "Подробный итог исследования.",
-        ])
 
     async def test_quick_reply_has_one_message_and_slow_unclassified_reply_has_two(self):
         self.ingest("Привет!")
@@ -168,19 +162,11 @@ class ChatReceipts(unittest.IsolatedAsyncioTestCase):
         self.tg.download.return_value = b"audio"
         self.agent.respond.return_value = "Разбор готов."
         with patch.object(bot.media, "transcribe", AsyncMock(return_value="Проведи исследование рынка стали.")):
-            finish = asyncio.Event()
-
-            async def research(*args, **kwargs):
-                await finish.wait()
-                return "Разбор готов."
-
-            self.agent.respond.side_effect = research
-            job = asyncio.create_task(self.handle())
-            try:
-                self.assertIn("исследование рынка стали", (await self.receipt())["text"])
-            finally:
-                finish.set()
-                await job
+            await self.handle()
+            self.assertIn("исследование рынка стали", (await self.receipt())["text"])
+            self.agent.respond.assert_not_awaited()
+        reports.enqueue(self.store.db, datetime.now(timezone.utc) + timedelta(minutes=1))
+        await bot._handle(self.inbox.pending(scheduled=True)[0], self.store, self.inbox, self.tg, self.agent)
         self.assertEqual((await self.receipt())["text"], "Разбор готов.")
         self.ingest("Завтра в 18:00 подготовь и пришли отчёт по рынку стали.", update_id=2)
         self.agent.respond.side_effect = None
