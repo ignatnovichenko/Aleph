@@ -13,13 +13,15 @@ def initialize(db):
         )
     """)
     columns = {row["name"] for row in db.execute("PRAGMA table_info(scheduled_reports)")}
-    for column, kind in {"started_at": "TEXT", "result": "TEXT", "delivered_at": "TEXT",
+    for column, kind in {"stage":"TEXT NOT NULL DEFAULT ''","on_server":"INTEGER NOT NULL DEFAULT 0",
+                         "needs_folder":"INTEGER NOT NULL DEFAULT 0","inputs":"TEXT NOT NULL DEFAULT '[]'",
+                         "started_at": "TEXT", "result": "TEXT", "delivered_at": "TEXT",
                          "revision": "INTEGER NOT NULL DEFAULT 0"}.items():
         if column not in columns:
             db.execute(f"ALTER TABLE scheduled_reports ADD COLUMN {column} {kind}")
 
 
-def schedule(store, uid, project_id, title, prompt, run_at, request_key, source=""):
+def schedule(store, uid, project_id, title, prompt, run_at, request_key, source="", needs_folder=False, input_versions=()):
     from .store import bounded_text
 
     existing = store.db.execute("""
@@ -48,7 +50,7 @@ def schedule(store, uid, project_id, title, prompt, run_at, request_key, source=
     try:
         task = store.create_task(uid, title, run_at, prompt, request_key, project_id=project_id,
                                  remind_at=None, source=source)
-        store.db.execute("INSERT INTO scheduled_reports(task_id) VALUES(?)", (task["id"],))
+        store.db.execute("INSERT INTO scheduled_reports(task_id,needs_folder,inputs) VALUES(?,?,?)", (task["id"],int(needs_folder),json.dumps(input_versions)))
         result = store.get_task(uid, task["id"])
     except BaseException:
         store.db.execute("ROLLBACK TO schedule_report")
@@ -94,12 +96,12 @@ def current(store, row, *, allow_failed=False):
 
 def start(db, task_id):
     from .store import timestamp
-    db.execute("UPDATE scheduled_reports SET started_at=COALESCE(started_at,?) WHERE task_id=?",
+    db.execute("UPDATE scheduled_reports SET stage='running',started_at=COALESCE(started_at,?) WHERE task_id=?",
                (timestamp(), task_id))
 
 
 def wait_for_computer(db, task_id):
-    db.execute("UPDATE scheduled_reports SET started_at=NULL WHERE task_id=? AND state='pending'", (task_id,))
+    db.execute("UPDATE scheduled_reports SET stage='offline',started_at=NULL WHERE task_id=? AND state='pending'", (task_id,))
 
 
 def fail(db, uid, update_id):
@@ -125,3 +127,30 @@ def result(store, uid, task_id):
     if row is None:
         raise KeyError("Результат не найден.")
     return dict(row)
+
+
+def pins(store,uid,project,context):
+    if not context:
+        return []
+    ids = [item["id"] for item in json.loads(context)["files"]]
+    versions = []
+    for ident in ids:
+        row = store.db.execute("""SELECT v.id FROM file_versions v JOIN bot_file_refs f ON f.uid=v.uid AND
+            f.project_id=v.project AND f.message_id=v.message WHERE f.uid=? AND f.project_id=? AND f.id=?""",
+            (uid,project,ident)).fetchone()
+        if row:
+            versions.append(row[0])
+    return versions
+
+
+def input_context(store,task):
+    from . import document_chat
+    row = store.db.execute("SELECT inputs FROM scheduled_reports WHERE task_id=?",(task["id"],)).fetchone()
+    refs = []
+    for ident in json.loads(row[0]):
+        version = store.db.execute("SELECT * FROM file_versions WHERE id=? AND project=? AND uid=(SELECT user_id FROM tasks WHERE id=?)",
+                                   (ident,task["project_id"],task["id"])).fetchone()
+        if not version:
+            raise ValueError("Исходная версия документа недоступна.")
+        refs.append(document_chat.register(store,version["uid"],version["project"],version["message"],json.loads(version["metadata"])))
+    return document_chat.prompt_section(refs)

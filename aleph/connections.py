@@ -61,6 +61,8 @@ def initialize(db):
         );
         CREATE INDEX IF NOT EXISTS connection_actions_update ON connection_actions(user_id,update_id,status);
     """)
+    if "account_epoch" not in {r[1] for r in db.execute("PRAGMA table_info(connections)")}:
+        db.execute("ALTER TABLE connections ADD COLUMN account_epoch TEXT NOT NULL DEFAULT ''")
 
 
 def setting(name):
@@ -213,9 +215,14 @@ async def finish(store, session, provider, state, code):
         credentials = pack(settings, tokens)
         if not store.db.execute("DELETE FROM connection_requests WHERE hash=?", (key,)).rowcount:
             raise ConnectionError("Подключение отменено.")
+        store.db.execute("DELETE FROM profile_sources WHERE uid=? AND provider=?", (row["user_id"],provider))
+        if provider == "gmail":
+            from .mail_events import reset
+            reset(store, row["user_id"])
         store.db.execute("""INSERT INTO connections(user_id,provider,credentials) VALUES(?,?,?)
-            ON CONFLICT(user_id,provider) DO UPDATE SET credentials=excluded.credentials,state='connected',calendar_id=NULL
+            ON CONFLICT(user_id,provider) DO UPDATE SET credentials=excluded.credentials,state='connected',calendar_id=NULL,account_epoch=lower(hex(randomblob(16)))
         """, (row["user_id"], provider, credentials))
+        store.db.execute("UPDATE connections SET account_epoch=lower(hex(randomblob(16))) WHERE user_id=? AND provider=?",(row["user_id"],provider))
         store.db.execute("DELETE FROM connection_actions WHERE user_id=? AND provider=?", (row["user_id"], provider))
     finally:
         store.db.execute("DELETE FROM connection_requests WHERE hash=?", (key,))
@@ -224,6 +231,10 @@ async def finish(store, session, provider, state, code):
 def disconnect(store, uid, provider):
     if provider not in PROVIDERS:
         raise KeyError("Подключение не найдено.")
+    if provider == "gmail":
+        from .mail_events import reset
+        reset(store, uid)
+    store.db.execute("DELETE FROM profile_sources WHERE uid=? AND provider=?", (uid,provider))
     for table in ("connections", "connection_requests", "connection_actions"):
         store.db.execute(f"DELETE FROM {table} WHERE user_id=? AND provider=?", (uid, provider))
     if provider == "drive":

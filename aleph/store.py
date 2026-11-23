@@ -7,15 +7,18 @@ import sqlite3
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .feeds import CATALOG
-from . import capture, computers, connections, memory, project_sources, projects, reports, saved_results, skills
+from . import mail_events, capture, computers, connections, memory, project_sources, projects, reports, saved_results, skills
 from .routines import day_names
 
 UTC = timezone.utc
 DEFAULT_REMINDER = object()
 REPLY_STYLES = ("short", "balanced", "detailed")
-SETTING_FLAGS = ("proactive", "daily_digest", "personal_memory")
+SETTING_FLAGS = ("proactive", "daily_digest", "personal_memory", "context_sources")
 INSTRUCTIONS_LIMIT = 600
-TASK_REPORT_FIELDS = """(SELECT state FROM scheduled_reports WHERE task_id=tasks.id) AS report_state,
+TASK_REPORT_FIELDS = """(SELECT stage FROM scheduled_reports WHERE task_id=tasks.id) AS report_stage,
+    (SELECT needs_folder FROM scheduled_reports WHERE task_id=tasks.id) AS report_needs_folder,
+    (SELECT on_server FROM scheduled_reports WHERE task_id=tasks.id) AS report_on_server,
+(SELECT state FROM scheduled_reports WHERE task_id=tasks.id) AS report_state,
     (SELECT started_at FROM scheduled_reports WHERE task_id=tasks.id) AS report_started_at,
     (SELECT revision FROM scheduled_reports WHERE task_id=tasks.id) AS report_revision,
     EXISTS(SELECT 1 FROM scheduled_reports WHERE task_id=tasks.id AND result IS NOT NULL) AS report_has_result"""
@@ -120,6 +123,9 @@ class Store:
             "theme": "TEXT NOT NULL DEFAULT 'auto' CHECK(theme IN ('auto','white','dark'))",
             "reply_style": "TEXT NOT NULL DEFAULT 'balanced' CHECK(reply_style IN ('short','balanced','detailed'))",
             "assistant_instructions": "TEXT NOT NULL DEFAULT ''",
+            "focus": "TEXT NOT NULL DEFAULT ''",
+            "initiative": "TEXT NOT NULL DEFAULT 'balanced'",
+            "context_sources": "INTEGER NOT NULL DEFAULT 0",
             "personal_memory": "INTEGER NOT NULL DEFAULT 1",
             "daily_digest": "INTEGER NOT NULL DEFAULT 1",
             "timezone_confirmed": "INTEGER NOT NULL DEFAULT 0",
@@ -132,8 +138,15 @@ class Store:
         computers.initialize(self.db)
         self.computer_hub = computers.ComputerHub()
         project_sources.initialize(self.db)
+        from . import price_rules
+        price_rules.initialize(self.db)
         skills.initialize(self.db)
         connections.initialize(self.db)
+        from . import file_versions
+        from . import profile_sources
+        profile_sources.initialize(self.db)
+        file_versions.initialize(self.db)
+        mail_events.initialize(self.db)
         capture.initialize(self.db)
         reports.initialize(self.db)
         saved_results.initialize(self.db)
@@ -156,7 +169,7 @@ class Store:
         uid = int(user_id)
         if uid <= 0:
             raise ValueError("Нужен личный чат в Telegram.")
-        self.db.execute("""INSERT INTO users(id, first_name, language_code, created_at) VALUES (?,?,?,?)
+        self.db.execute("""INSERT INTO users(id, first_name, language_code, created_at, daily_digest) VALUES (?,?,?,?,0)
             ON CONFLICT(id) DO UPDATE SET first_name=COALESCE(NULLIF(excluded.first_name,''),users.first_name),
             language_code=COALESCE(NULLIF(excluded.language_code,''),users.language_code)
             WHERE (excluded.first_name<>'' AND excluded.first_name<>users.first_name)
@@ -171,7 +184,7 @@ class Store:
         return dict(row)
 
     def get_settings(self, uid):
-        row = self.db.execute("""SELECT proactive,timezone,quiet_start,quiet_end,digest_time,theme,
+        row = self.db.execute("""SELECT initiative,focus,context_sources,proactive,timezone,quiet_start,quiet_end,digest_time,theme,
             reply_style,assistant_instructions,personal_memory,daily_digest,timezone_confirmed
             FROM users WHERE id=?""", (uid,)).fetchone()
         if row is None:
@@ -180,7 +193,7 @@ class Store:
                 "timezone_confirmed": bool(row["timezone_confirmed"] or row["timezone"] != "UTC")}
 
     def patch_settings(self, uid, fields):
-        allowed = {*SETTING_FLAGS, "quiet_start", "quiet_end", "digest_time", "timezone",
+        allowed = {*SETTING_FLAGS, "initiative","focus", "quiet_start", "quiet_end", "digest_time", "timezone",
                    "theme", "reply_style", "assistant_instructions"}
         if not fields or fields.keys() - allowed:
             raise ValueError("Неизвестная настройка.")
@@ -189,6 +202,11 @@ class Store:
             if key in SETTING_FLAGS:
                 if type(value) is not bool:
                     raise ValueError("Для переключателя ожидается true или false.")
+            elif key == "focus":
+                fields[key] = bounded_text(value, 400)
+            elif key == "initiative":
+                if value not in ("quiet", "balanced", "active"):
+                    raise ValueError("Выбери уровень инициативы.")
             elif key == "reply_style":
                 if value not in REPLY_STYLES:
                     raise ValueError("Выбери стиль ответов.")
@@ -210,6 +228,8 @@ class Store:
             fields["timezone_confirmed"] = 1
         sql = ",".join(key + "=?" for key in fields)
         self.db.execute(f"UPDATE users SET {sql} WHERE id=?", (*fields.values(), uid))
+        if fields.get("context_sources") is False or "focus" in fields:
+            self.db.execute("DELETE FROM profile_sources WHERE uid=? AND (focus<>? OR ?=0)", (uid,fields.get("focus",self.get_settings(uid)["focus"]),self.get_settings(uid)["context_sources"]))
         return self.get_settings(uid)
 
     def list_tasks(self, uid, include_done=True, *, project_id=None):
@@ -274,6 +294,13 @@ class Store:
     def update_task(self, uid, task_id, fields):
         old = self.get_task(uid, task_id)
         fields = dict(fields)
+        if old["source"] in ("gmail","price") and set(fields)-{"title","status"}:
+            raise ValueError("Для другого условия создай новое правило в чате.")
+        if fields=={"run_on_server":True}:
+            if not self.db.execute("""UPDATE scheduled_reports SET on_server=1,stage='',revision=revision+1
+                WHERE task_id=? AND state='pending' AND stage='offline' AND needs_folder=0""",(task_id,)).rowcount:
+                raise ValueError("Это поручение сейчас нельзя перенести на сервер.")
+            return self.get_task(uid,task_id)
         if not fields or fields.keys() - {"title", "notes", "status", "due_at", "remind_at", "project_id"}:
             raise ValueError("Неизвестное поле задачи.")
         if "title" in fields:
@@ -303,6 +330,10 @@ class Store:
         report_changed = old["report_state"] in ("pending", "failed") and any(
             key in fields and fields[key] != old[key] for key in ("status", "due_at", "title", "notes", "project_id")
         )
+        if fields.get("status")=="open" and old["source"] in {"gmail","price"}:
+            table = "gmail_rules" if old["source"]=="gmail" else "price_rules"
+            if not self.db.execute(f"SELECT 1 FROM {table} WHERE task_id=?",(task_id,)).fetchone():
+                raise ValueError("Источник отключён. Подключи его и создай новое условие в чате.")
         fields["updated_at"] = timestamp()
         sql = ",".join(key + "=?" for key in fields)
         self.db.execute("SAVEPOINT edit_task")
@@ -310,8 +341,11 @@ class Store:
             self.db.execute(f"UPDATE tasks SET {sql} WHERE id=? AND user_id=?", (*fields.values(), task_id, uid))
             if old["report_state"] == "failed" and fields.get("due_at", "") > timestamp():
                 self.db.execute("UPDATE scheduled_reports SET state='pending' WHERE task_id=?", (task_id,))
+            if fields.get("status")=="open" and old["status"]=="done" and old["source"]=="gmail":
+                import time
+                self.db.execute("UPDATE gmail_rules SET matched=NULL,since=? WHERE task_id=?", (int(time.time()*1000),task_id))
             if report_changed:
-                self.db.execute("""UPDATE scheduled_reports SET started_at=NULL, revision=revision+1
+                self.db.execute("""UPDATE scheduled_reports SET stage='',started_at=NULL, revision=revision+1
                     WHERE task_id=?""", (task_id,))
         except BaseException:
             self.db.execute("ROLLBACK TO edit_task")

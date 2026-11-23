@@ -10,6 +10,7 @@ import aiohttp
 from aiohttp import web
 
 from .api import install_api
+from . import mail_events, price_rules, profile_sources
 from .links import mini_app_url
 from .bot import Telegram, TelegramError, run_bot
 from .scheduler import run_scheduler
@@ -94,7 +95,7 @@ async def main():
             log.info("Starting Telegram polling and proactive scheduler")
             jobs = [asyncio.create_task(coro) for coro in (
                 run_bot(store, session, token, key), run_scheduler(store, session, token),
-                update_menu(tg), stopping.wait())]
+                profile_sources.run(store,session), price_rules.refresh_sources(store), mail_events.run(store, session), update_menu(tg), stopping.wait())]
             try:
                 finished, _ = await asyncio.wait(jobs, return_when=asyncio.FIRST_COMPLETED)
                 for job in finished:

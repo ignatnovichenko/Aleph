@@ -144,9 +144,16 @@ async def add_link(store, uid, project_id, url):
 async def add_file(store, uid, project_id, name, data):
     authorize(store, uid, project_id)
     key = "file:" + hashlib.sha256(data).hexdigest()
-    if row := _existing(store, uid, project_id, key):
-        return dict(row)
+    tracked = store.db.execute("""SELECT DISTINCT s.id FROM project_sources s JOIN price_rules r ON r.source_id=s.id
+        JOIN tasks t ON t.id=r.task_id WHERE s.user_id=? AND s.project_id=? AND s.kind='file' AND s.title=? AND t.status='open'""",
+        (uid,project_id,name)).fetchall()
+    if not tracked:
+        if row := _existing(store, uid, project_id, key):
+            return dict(row)
     contents = await source_text.read_file(name, data)
+    if len(tracked)==1:
+        old = _row(store,uid,project_id,tracked[0][0],content=True)
+        return _replace(store,uid,project_id,old["id"],old,contents)
     return _add(store, uid, project_id, "file", key, "", contents, name)
 
 
@@ -159,6 +166,8 @@ def _replace(store, uid, project_id, source_id, old, result, *, reader=False):
                               timestamp(), int(reader), uid, project_id, source_id, old["updated_at"], old["content"])).fetchone()
     if not row:
         return _row(store, uid, project_id, source_id)
+    from .price_rules import observe
+    observe(store,source_id)
     return dict(row)
 
 
@@ -193,6 +202,9 @@ async def attach_transcript(store, uid, project_id, source_id, name, data):
 
 
 def delete(store, uid, project_id, source_id):
+    _row(store,uid,project_id,source_id)
+    store.db.execute("""UPDATE tasks SET status='done' WHERE user_id=? AND id IN
+        (SELECT task_id FROM price_rules WHERE source_id=?)""",(uid,source_id))
     if not store.db.execute("DELETE FROM project_sources WHERE user_id=? AND project_id=? AND id=?",
                             (uid, project_id, source_id)).rowcount:
         raise KeyError("Источник не найден в этом проекте.")

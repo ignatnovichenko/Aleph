@@ -261,7 +261,7 @@ class Persistence(unittest.IsolatedAsyncioTestCase):
             queue_messages(s, now)
             await deliver(s,session,TEST_TOKEN,now=now)
             self.assertEqual(len(session.messages),1)
-            s.patch_settings(1, {"proactive":True})
+            s.patch_settings(1, {"proactive":True,"daily_digest":True})
             queue_messages(s,now)
             self.assertEqual(s.db.execute("SELECT COUNT(*) FROM deliveries").fetchone()[0],1)
             morning = now + timedelta(hours=10)

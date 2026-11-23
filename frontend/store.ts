@@ -7,7 +7,9 @@ import type { CalendarEvent, ChatGPTConnection, ChatGPTPairing, Connections, Ser
 export { bridge };
 export type { RequestOptions, WriteMethod };
 
+type Version = {id:number; name:string; parent:number|null; url:string; created:string};
 type Reads = {
+  [path: `/api/projects/${number}/versions`]: Version[];
   "/api/state": WorkspaceState;
   [statePath]: WorkspaceState;
   "/api/calendar.ics": Blob;
@@ -15,7 +17,7 @@ type Reads = {
   "/api/computers": Computer[];
   "/api/models": ModelCatalog;
   "/api/memory": SavedMemory[];
-  [path: `/api/tasks/${number}/result`]: {html: string | null; delivered_at: string | null};
+  [path: `/api/tasks/${number}/result`]: {html: string | null; files?: Version[]; delivered_at: string | null};
   [path: `/api/connections/calendar/events?${string}`]: {events: CalendarEvent[]; more: boolean};
   [path: `/api/projects/${number}/entries`]: ProjectEntry[];
   [path: `/api/projects/${number}/results`]: ProjectResult[];

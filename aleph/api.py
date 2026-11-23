@@ -84,6 +84,8 @@ def calendar_export(tasks, uid):
 
 
 def install_api(app, store, token, model_key=None):
+    from . import mail_events
+    mail_events.install(app, store)
     catalogs = models.ModelCatalogs(model_key)
     github_imports = asyncio.Semaphore(4)
     source_imports = asyncio.Semaphore(4)
@@ -243,10 +245,19 @@ def install_api(app, store, token, model_key=None):
         return web.json_response(store.save_task_timezone(uid, fields,
                                  lambda values: store.update_task(uid, task_id, values)))
 
+    async def versions(request,user):
+        from . import file_versions
+        pid = int(request.match_info["id"])
+        projects.get(store,user["id"],pid)
+        return web.json_response(file_versions.listing(store,user["id"],pid))
+
     async def result(request, user):
+        from . import file_versions
+        task = store.get_task(user["id"],int(request.match_info["id"]))
+        files = file_versions.listing(store,user["id"],task["project_id"],task["id"])
         saved = reports.result(store, user["id"], int(request.match_info["id"]))
         return web.json_response({"html": articles.MARKDOWN.render(saved["text"]) if saved["text"] else None,
-                                  "delivered_at": saved["delivered_at"]})
+                                  "files":files, "delivered_at": saved["delivered_at"]})
 
     async def settings(request, user):
         return web.json_response(store.patch_settings(user["id"], await body(request)))
@@ -332,7 +343,7 @@ def install_api(app, store, token, model_key=None):
         if command == "alive":
             return web.Response(status=204)
         try:
-            fields = await body(request, limit=computers.JOB_REQUEST_LIMIT if command == "complete" else 262144)
+            fields = await body(request, limit=computers.JOB_REQUEST_LIMIT if command in ("complete","folder") else 262144)
         except ValueError:
             raise web.HTTPBadRequest() from None
         if hub.job(computer_id, runner_session, request.match_info["job"]) is not job:
@@ -341,6 +352,40 @@ def install_api(app, store, token, model_key=None):
             return await job.broker.complete_payload(fields)
         if command == "tool":
             return await job.broker.tool_payload(fields)
+        if command in ("folder","artifact"):
+            import base64
+            from . import folder
+            broker = job.broker
+            match = broker.calls.get(fields.get("id"))
+            if not match:
+                raise web.HTTPForbidden()
+            step,n,call = match
+            key = f"tg:{broker.update_id}:{step}:{n}"
+            if command == "artifact":
+                if call["function"]["name"] not in ("create_document","edit_document"):
+                    raise web.HTTPForbidden()
+                row = store.db.execute("SELECT filename,data FROM bot_documents WHERE update_id=? AND key=?", (broker.update_id,key)).fetchone()
+                if not row:
+                    raise web.HTTPNotFound()
+                return web.json_response({"filename":row[0],"data":base64.b64encode(row[1]).decode()})
+            if call["function"]["name"]!="open_folder_file" or fields.get("arguments")!=json.loads(call["function"]["arguments"]):
+                raise web.HTTPForbidden()
+            if broker.update_id<0:
+                store.db.execute("UPDATE scheduled_reports SET needs_folder=1 WHERE task_id=?",(-broker.update_id,))
+            name = folder.filename(fields["arguments"]["filename"])
+            data = base64.b64decode(fields["content"],validate=True)
+            if not 0<len(data)<=folder.LIMIT:
+                raise web.HTTPBadRequest()
+            existing = store.db.execute("SELECT id FROM folder_inputs WHERE call_key=?",(key,)).fetchone()
+            if existing:
+                ident = existing[0]
+            else:
+                size = store.db.execute("SELECT coalesce(sum(length(data)),0) FROM folder_inputs WHERE update_id=?",(broker.update_id,)).fetchone()[0]
+                if size + len(data)>24*1024**2:
+                    return web.json_response({"error":"Лимит входных файлов для поручения 24 МБ."})
+                ident = store.db.execute("INSERT INTO folder_inputs(update_id,call_key,format,data) VALUES(?,?,?,?) RETURNING id",
+                    (broker.update_id,key,name.rsplit(".",1)[1].lower(),data)).fetchone()[0]
+            return web.json_response({"file_id":-ident,"filename":name})
         answer = fields.get("answer")
         if isinstance(answer, str) and 0 < len(answer.strip()) <= 14000:
             job.result.set_result({"answer": answer.strip()})
@@ -571,6 +616,7 @@ def install_api(app, store, token, model_key=None):
     for method, path, handler in routes:
         app.router.add_route(method, path, scoped(handler))
     app.router.add_post(IMPORT_PATH, chatgpt_import)
+    app.router.add_get(r"/api/projects/{id:\d{1,18}}/versions",scoped(versions))
     app.router.add_post(computers.RUNNER_PATH + "/pair", register_runner)
     app.router.add_post(computers.RUNNER_PATH + "/claim", runner)
-    app.router.add_post(computers.RUNNER_PATH + r"/{job:[A-Za-z0-9_-]{32}}/{command:complete|tool|result|alive}", runner)
+    app.router.add_post(computers.RUNNER_PATH + r"/{job:[A-Za-z0-9_-]{32}}/{command:complete|tool|folder|artifact|result|alive}", runner)

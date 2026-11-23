@@ -1,5 +1,7 @@
 """Connect and run Aleph's Hermes worker on a personal computer."""
 import argparse
+import base64
+from . import folder
 import asyncio
 from getpass import getpass
 import hmac
@@ -60,17 +62,44 @@ class Runner:
         job_id = job.get("id") if isinstance(job, dict) else None
         if not isinstance(job_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{32}", job_id) or not isinstance(job.get("turn"), dict):
             raise ValueError("Invalid turn ID")
+        root = getattr(self, "folders", {}).get(str(job["turn"].get("project_id")))
+        root = Path(root) if root else None
         local_key = secrets.token_urlsafe(32)
 
         async def proxy(request):
             if not hmac.compare_digest(request.headers.get("Authorization", ""), f"Bearer {local_key}"):
                 raise web.HTTPUnauthorized()
             command = "complete" if request.path == "/v1/chat/completions" else "tool"
-            async with self.session.post(f"{self.server}/{job_id}/{command}", data=await request.read(),
+            raw = await request.read()
+            if command == "tool":
+                payload = json.loads(raw)
+                name = payload.get("name")
+                if name in {"folder_files","open_folder_file"}:
+                    if not root:
+                        return web.json_response({"error":"Рабочая папка не подключена на этом компьютере."})
+                    try:
+                        if name == "folder_files":
+                            return web.json_response({"files":await asyncio.to_thread(folder.list_files,root)})
+                        content = await asyncio.to_thread(folder.read,root,payload["arguments"]["filename"])
+                        payload["content"] = base64.b64encode(content).decode()
+                        command, raw = "folder", json.dumps(payload).encode()
+                    except (ValueError, OSError, KeyError):
+                        return web.json_response({"error":"Документ недоступен в рабочей папке."})
+            async with self.session.post(f"{self.server}/{job_id}/{command}", data=raw,
                                          headers={**self.headers, "Content-Type": "application/json"},
                                          timeout=aiohttp.ClientTimeout(total=108 if command == "tool" else 35),
                                          allow_redirects=False) as response:
-                return web.Response(body=await response.read(), status=response.status, content_type="application/json")
+                body = await response.read()
+                if command == "tool" and root and response.status==200:
+                    prepared = json.loads(body)
+                    if isinstance(prepared,dict) and prepared.get("prepared_attachment"):
+                        try:
+                            output = await self.request(f"/{job_id}/artifact",{"id":payload["id"]})
+                            actual = await asyncio.to_thread(folder.save,root,output["filename"],base64.b64decode(output["data"],validate=True))
+                            return web.json_response({**prepared,"saved_in_project_folder":actual})
+                        except (OSError,ValueError,aiohttp.ClientError,KeyError):
+                            return web.json_response({**prepared,"folder_save_error":"Копия доступна только в Telegram."})
+                return web.Response(body=body, status=response.status, content_type="application/json")
 
         async def keepalive():
             while True:
@@ -126,6 +155,8 @@ class Runner:
             try:
                 job = await self.request("/claim")
                 if job:
+                    if hasattr(self,"config_path"):
+                        self.folders = json.loads(self.config_path.read_text()).get("folders",{})
                     await self.execute(python, job)
                 delays = 1
             except (aiohttp.ClientError, TimeoutError, ValueError):
@@ -136,6 +167,19 @@ class Runner:
 
 
 async def main(args):
+    if args.command == "folder":
+        config = json.loads(args.config.read_text())
+        folders = config.setdefault("folders",{})
+        if args.path:
+            root = Path(args.path).expanduser().resolve(strict=True)
+            if not root.is_dir() or root in (Path(root.anchor),Path.home()):
+                raise ValueError("Select a project folder.")
+            folders[str(args.project)] = str(root)
+        else:
+            folders.pop(str(args.project),None)
+        save_config(args.config,config)
+        print("Folder settings saved. Running workers use them on the next job.")
+        return
     python = hermes_python()
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=35), trust_env=True) as session:
         if args.command == "connect":
@@ -148,7 +192,9 @@ async def main(args):
             config = json.loads(args.config.read_text())
             server = origin(args.server or config["server"])
         print(f"{config['name']} · Aleph runner started. Keep this window open. Ctrl+C to stop.", flush=True)
-        await Runner(session, server, config["token"]).run(python)
+        runner = Runner(session, server, config["token"])
+        runner.config_path = args.config
+        await runner.run(python)
 
 
 if __name__ == "__main__":
@@ -156,6 +202,9 @@ if __name__ == "__main__":
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("connect").add_argument("--server", required=True)
+    bind = commands.add_parser("folder")
+    bind.add_argument("--project",type=int,required=True)
+    bind.add_argument("--path")
     commands.add_parser("run").add_argument("--server")
     args = parser.parse_args()
     try:

@@ -111,6 +111,10 @@ class Inbox:
               id INTEGER PRIMARY KEY, received_at REAL NOT NULL
             );
             CREATE INDEX IF NOT EXISTS bot_uid ON bot_inbox(uid,id);
+            CREATE TABLE IF NOT EXISTS folder_inputs (
+                id INTEGER PRIMARY KEY, update_id INTEGER NOT NULL REFERENCES bot_inbox(id) ON DELETE CASCADE,
+                call_key TEXT NOT NULL UNIQUE,format TEXT NOT NULL,data BLOB NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS bot_documents (
                 key TEXT PRIMARY KEY, update_id INTEGER REFERENCES bot_inbox(id) ON DELETE CASCADE,
                 filename TEXT NOT NULL, mime TEXT NOT NULL, data BLOB NOT NULL, sent INTEGER NOT NULL DEFAULT 0
@@ -126,9 +130,18 @@ class Inbox:
         """)
 
         widgets.initialize(self.db)
+        if "parent_version" not in {r["name"] for r in self.db.execute("PRAGMA table_info(bot_documents)")}:
+            self.db.execute("ALTER TABLE bot_documents ADD COLUMN parent_version INTEGER")
         document_chat.initialize(self.db)
+        if not self.db.execute("SELECT 1 FROM runtime_state WHERE key='file_versions_migrated'").fetchone():
+            from . import file_versions
+            for ref in self.db.execute("SELECT uid,project_id,message_id,metadata FROM bot_file_refs ORDER BY id"):
+                file_versions.record(store,ref["uid"],ref["project_id"],ref["message_id"],json.loads(ref["metadata"]))
+            self.db.execute("INSERT OR IGNORE INTO runtime_state VALUES('file_versions_migrated','1')")
 
         columns = {r["name"] for r in self.db.execute("PRAGMA table_info(bot_inbox)")}
+        if "waiting_runner" not in columns:
+            self.db.execute("ALTER TABLE bot_inbox ADD COLUMN waiting_runner INTEGER NOT NULL DEFAULT 0")
         if "project_id" not in columns:
             self.db.execute("ALTER TABLE bot_inbox ADD COLUMN project_id INTEGER")
         if "chatgpt_client" not in columns:
@@ -216,12 +229,12 @@ class Inbox:
         if scheduled:
             return self.db.execute("""SELECT b.* FROM bot_inbox b
                 WHERE b.id<0 AND b.available<=?
-                  AND NOT EXISTS (SELECT 1 FROM bot_inbox p WHERE p.uid=b.uid AND p.id<0
+                  AND NOT EXISTS (SELECT 1 FROM bot_inbox p WHERE p.uid=b.uid AND p.id<0 AND p.waiting_runner=0
                     AND (json_extract(p.message,'$.due_at'), -p.id) < (json_extract(b.message,'$.due_at'), -b.id))
                 ORDER BY json_extract(b.message,'$.due_at'), -b.id LIMIT 24""", (time.time(),)).fetchall()
         return self.db.execute("""SELECT b.* FROM bot_inbox b
             WHERE b.id>=0 AND b.available<=?
-              AND NOT EXISTS (SELECT 1 FROM bot_inbox p WHERE p.uid=b.uid AND p.id>=0 AND p.id<b.id)
+              AND NOT EXISTS (SELECT 1 FROM bot_inbox p WHERE p.uid=b.uid AND p.id>=0 AND p.id<b.id AND p.waiting_runner=0)
             ORDER BY b.id LIMIT 24""", (time.time(),)).fetchall()
 
     def get_step(self, update_id, step):
@@ -449,6 +462,14 @@ async def _compose(row, store, inbox, tg, agent):
         return None, ("Нажми «Открыть задачи» внизу чата." if bridge_url else "Открой «Задачи» кнопкой Aleph внизу чата.")
     command = (msg.get("text") or "").partition(" ")[0].partition("@")[0]
     result_link = saved_results.OPEN.fullmatch((msg.get("text") or "").strip())
+    if version := re.fullmatch(r"/start file_([0-9]{1,18})",(msg.get("text") or "").strip()):
+        from . import file_versions
+        found = store.db.execute("SELECT project FROM file_versions WHERE uid=? AND id=?",(uid,int(version[1]))).fetchone()
+        if not found:
+            return None, "Версия недоступна." if _uses_russian(msg) else "Version unavailable."
+        store.db.execute("UPDATE bot_inbox SET project_id=? WHERE uid=? AND id=?", (found[0],uid,row["id"]))
+        await file_versions.stage_restore(store,uid,found[0],int(version[1]),f"tg:{row['id']}:restore",inbox.download_document)
+        return None, "Копия выбранной версии." if _uses_russian(msg) else "A copy of the selected version."
     if result_link:
         ru = _uses_russian(msg)
         try:
@@ -460,6 +481,8 @@ async def _compose(row, store, inbox, tg, agent):
     if command in ("/start", "/help"):
         ru = _uses_russian(msg)
         reply = HELLO_RU if ru else HELLO_EN
+        if command == "/start" and not store.get_settings(uid)["focus"]:
+            reply += ("\n\nЧто для тебя сейчас в приоритете и о чём написать сразу?" if ru else "\n\nWhat are you focusing on, and what should I tell you about right away?")
         if command == "/start" and chatgpt_owner(uid) and settings_url():
             reply += ("\n\nСвою подписку ChatGPT можно подключить в настройках Алефа." if ru else
                       "\n\nYou can connect your ChatGPT plan in Aleph settings.")
@@ -479,6 +502,19 @@ async def _compose(row, store, inbox, tg, agent):
             return None, str(error)
         if project_reply is not None:
             return None, project_reply
+    if (not photo and not progress.DEFERRED.search(query) and
+            re.search(r"папк|\bfolder\b",progress.request_text(query),re.I) and
+            re.search(r"сравни|собери|подготовь|compare|compile|prepare",progress.request_text(query),re.I) and
+            projects.get(store,uid,project_id).get("computer_id")):
+        from datetime import timedelta, timezone
+        text = progress.request_text(query)
+        context = store.db.execute("SELECT file_context FROM bot_inbox WHERE id=?",(row["id"],)).fetchone()
+        reports.schedule(store,uid,project_id,text[:110],text[:4000],
+                         (datetime.now(timezone.utc)+timedelta(seconds=2)).isoformat(),
+                         f"tg:{row['id']}:folder",source=text[:900],needs_folder=True,
+                         input_versions=reports.pins(store,uid,project_id,context[0]))
+        return query, ("Принял поручение. Открою документы в папке проекта и пришлю результат сюда." if _uses_russian(msg)
+                       else "I’ll read the documents in your project folder and send the result here.")
     if not photo:
         russian_question = MODEL_QUESTION_RU.fullmatch(query.strip())
         if russian_question or MODEL_QUESTION_EN.fullmatch(query.strip()):
@@ -609,7 +645,8 @@ async def _handle(row, store, inbox, tg, agent):
                     reply = _report_failure(report, ru)
                 elif report:
                     reports.start(store.db, report["id"])
-                    reply = await agent.respond(store, uid, report["notes"], None, inbox, update_id, scheduled=True)
+                    prompt = report["notes"] + reports.input_context(store,report)
+                    reply = await agent.respond(store, uid, prompt, None, inbox, update_id, scheduled=True)
                     report_title = report["title"]
                 else:
                     query, reply = await _compose(row, store, inbox, tg, agent)
@@ -632,7 +669,16 @@ async def _handle(row, store, inbox, tg, agent):
                 if report:
                     if reports.current(store, row):
                         reports.wait_for_computer(store.db, report["id"])
-                        inbox.db.execute("UPDATE bot_inbox SET available=? WHERE id=?", (time.time() + 30, update_id))
+                        inbox.db.execute("UPDATE bot_inbox SET waiting_runner=1,available=? WHERE id=?", (time.time() + 30, update_id))
+                    return
+                work = inbox.db.execute("SELECT source,waiting_runner FROM bot_inbox WHERE id=?", (update_id,)).fetchone()
+                if work and (re.search(r"папк|folder",work["source"],re.I) or
+                             inbox.db.execute("SELECT 1 FROM folder_inputs WHERE update_id=?",(update_id,)).fetchone()):
+                    if not work["waiting_runner"]:
+                        note = (f"Жду компьютер «{error.name}». Продолжу работу с папкой, когда он подключится." if ru else
+                                f'Waiting for “{error.name}”. I’ll resume the folder task when it reconnects.')
+                        await tg.call("sendMessage",chat_id=uid,text=note)
+                    inbox.db.execute("UPDATE bot_inbox SET waiting_runner=1,available=? WHERE id=?",(time.time()+30,update_id))
                     return
                 reply = (f"Компьютер «{error.name}» сейчас не на связи. Запусти на нём Алефа или выбери сервер в настройках проекта."
                          if ru else f'“{error.name}” is offline. Start Aleph on that computer or select the server in project settings.')
@@ -691,7 +737,7 @@ async def _handle(row, store, inbox, tg, agent):
                 sent = await documents.send_document(tg.session, tg.token, uid, artifact["filename"], artifact["mime"], artifact["data"], receipt=True)
                 if isinstance(sent, dict) and isinstance(sent.get("document"), dict):
                     with suppress(ValueError):
-                        document_chat.register(store, uid, inbox.bind_project(update_id, uid), sent.get("message_id"), sent["document"])
+                        document_chat.register(store, uid, inbox.bind_project(update_id, uid), sent.get("message_id"), sent["document"],parent=artifact["parent_version"],task=-update_id if scheduled else None)
             except documents.DocumentDeliveryError as error:
                 if error.status not in (400, 413, 422):
                     raise TelegramError(error.status, error.retry_after) from None

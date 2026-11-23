@@ -50,10 +50,12 @@ def _metadata(document):
     return {"file_id": file_id, "file_name": filename or f"Файл.{fmt}", "file_size": size}, fmt
 
 
-def register(store, uid, project_id, message_id, document):
+def register(store, uid, project_id, message_id, document, *, parent=None, task=None):
     if not isinstance(document, dict) or type(message_id) is not int or message_id <= 0:
         return None
     metadata, fmt = _metadata(document)
+    from . import file_versions
+    file_versions.record(store,uid,project_id,message_id,metadata,parent,task)
     now = time.time()
     db = store.db
     db.execute("DELETE FROM bot_file_refs WHERE available<=?", (now,))
@@ -135,17 +137,27 @@ def _scoped_ref(store, uid, project_id, file_id):
     return row
 
 
-async def _inputs(store, uid, project_id, ids, download):
+async def _inputs(store, uid, project_id, ids, download, update_id):
     if (not isinstance(ids, list) or not 1 <= len(ids) <= MAX_FILES
             or any(type(id_) is not int for id_ in ids) or len(ids) != len(set(ids))):
         raise ValueError("Выбери до восьми файлов из списка вложений.")
-    refs = [_scoped_ref(store, uid, project_id, id_) for id_ in ids]
-    pairs = [(row, json.loads(row["metadata"])) for row in refs]
-    if sum(meta["file_size"] for _, meta in pairs) > MAX_BATCH:
+    local = {}
+    for ident in ids:
+        if ident < 0:
+            row = store.db.execute("""SELECT f.format,f.data FROM folder_inputs f JOIN bot_inbox i ON i.id=f.update_id
+                WHERE f.id=? AND i.id=? AND i.uid=? AND i.project_id=?""",(-ident,update_id,uid,project_id)).fetchone()
+            if not row:
+                raise ValueError("Заново открой файл в папке проекта.")
+            local[ident] = (row[0],row[1])
+    if sum(len(raw) for _, raw in local.values()) > MAX_BATCH:
         raise ValueError("За один раз можно обработать до 24 МБ.")
-    if download is None:
+    refs = [_scoped_ref(store, uid, project_id, id_) for id_ in ids if id_>=0]
+    pairs = [(row, json.loads(row["metadata"])) for row in refs]
+    if sum(meta["file_size"] for _, meta in pairs) + sum(len(raw) for _,raw in local.values()) > MAX_BATCH:
+        raise ValueError("За один раз можно обработать до 24 МБ.")
+    if pairs and download is None:
         raise ValueError("Сейчас не удалось открыть файлы из Telegram.")
-    results, total = {}, 0
+    results, total = local, sum(len(raw) for _,raw in local.values())
     for row, meta in pairs:
         try:
             raw = await download(meta, min(documents.MAX_INPUT, MAX_BATCH - total))
@@ -157,7 +169,7 @@ async def _inputs(store, uid, project_id, ids, download):
         if len(raw) > documents.MAX_INPUT or total > MAX_BATCH:
             raise ValueError("Файл превышает лимит размера.")
         results[row["id"]] = (row["format"], raw)
-    return results
+    return {ident:results[ident] for ident in ids}
 
 
 async def execute(store, uid, project_id, name, args, request_key, download):
@@ -168,9 +180,9 @@ async def execute(store, uid, project_id, name, args, request_key, download):
     if name == "list_chat_files":
         return {"files": recent(store, uid, project_id)}
     if name == "inspect_document":
-        inputs = await _inputs(store, uid, project_id, [args["file_id"]], download)
+        inputs = await _inputs(store, uid, project_id, [args["file_id"]], download,int(request_key.split(":")[1]))
         result, _ = await documents.run_office("inspect", args, inputs)
-        return {**_item(_scoped_ref(store, uid, project_id, args["file_id"])), **result}
+        return {**(_item(_scoped_ref(store, uid, project_id, args["file_id"])) if args["file_id"]>0 else {"file_id":args["file_id"]}), **result}
     update_id = int(request_key.split(":")[1])
     db = store.db
     queued = db.execute("""SELECT d.filename, length(d.data) AS size FROM bot_documents d
@@ -183,7 +195,7 @@ async def execute(store, uid, project_id, name, args, request_key, download):
         ids = args["file_ids"]
         if isinstance(ids, list) and len(ids) > 1 and args["action"] != "pdf_pages":
             raise ValueError("Для этой операции выбери один файл.")
-        inputs = await _inputs(store, uid, project_id, ids, download)
+        inputs = await _inputs(store, uid, project_id, ids, download, update_id)
         result, blob = await documents.run_office("edit", args, inputs)
     elif args["format"] in ("txt", "md", "csv", "tsv", "ics", "json"):
         filename, mime, blob = documents.render_document(args)
@@ -194,5 +206,9 @@ async def execute(store, uid, project_id, name, args, request_key, download):
         raise ValueError("Этот запрос уже закрыт.")
     db.execute("INSERT OR IGNORE INTO bot_documents(key,update_id,filename,mime,data) VALUES (?,?,?,?,?)",
                (request_key, update_id, result.pop("filename"), result.pop("mime"), blob))
+    if name == "edit_document" and ids[0] > 0:
+        db.execute("""UPDATE bot_documents SET parent_version=(SELECT v.id FROM bot_file_refs f JOIN file_versions v
+            ON v.uid=f.uid AND v.project=f.project_id AND v.message=f.message_id
+            WHERE f.uid=? AND f.project_id=? AND f.id=?) WHERE key=?""",(uid,project_id,ids[0],request_key))
     filename = db.execute("SELECT filename FROM bot_documents WHERE key=?", (request_key,)).fetchone()[0]
     return {"prepared_attachment": filename, "bytes": len(blob), **result}

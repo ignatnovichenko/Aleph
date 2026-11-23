@@ -98,6 +98,11 @@ class TurnBroker:
         function = call["function"]
         if name != function["name"] or args != json.loads(function["arguments"]):
             return web.json_response({"error": "Tool arguments changed in transit."}, status=400)
+        if self.update_id < 0:
+            stage = {"create_document":"writing","edit_document":"writing","inspect_document":"reading",
+                     "read_project_source":"reading","reference_search":"research"}.get(name)
+            if stage:
+                self.store.db.execute("UPDATE scheduled_reports SET stage=? WHERE task_id=?",(stage,-self.update_id))
         async with self.tool_lock:
             result = await self.agent.call_tool(self.store, self.uid, self.ledger, self.update_id, step, n, call, project_id=self.project_id)
         response = json.dumps(result, ensure_ascii=False, default=str)
@@ -114,12 +119,19 @@ class HermesAleph(Aleph):
     async def respond(self, store, uid, text, photo, ledger, update_id, *, scheduled=False):
         project_id = ledger.bind_project(update_id, uid)
         project = projects.get(store, uid, project_id)
+        if scheduled and store.get_task(uid,-update_id)["report_on_server"]:
+            project = {**project,"computer_id":None}
         messages, opencode_model = self.turn_context(store, uid, text, photo, project_id, scheduled=scheduled)
         choice, _ = self.bind_turn_model(uid, ledger, update_id, opencode_model)
         model = choice["model"] or choice["provider"]
         toolset = REPORT_TOOLS if scheduled else TOOLS
+        if project.get("computer_id"):
+            from .llm import _tool, _string
+            toolset = [*toolset, _tool("folder_files", "List available documents in this project's locally granted folder.", {}),
+                       _tool("open_folder_file", "Import the named document from the project folder for inspect_document or edit_document. Use only relevant files.", {"filename":_string("Exact name returned by folder_files")},["filename"])]
+            messages[0]["content"] += "\nFor a request about the project folder use folder_files and open_folder_file. Inspect the returned file ID. Cite original file and page or cell when comparing. Use create_document or edit_document for the final attachment."
         broker = TurnBroker(self, store, uid, ledger, update_id, model, opencode_model, project_id, toolset=toolset)
-        turn = {"model": model, "messages": messages, "tools": toolset, "max_steps": MAX_STEPS - 1}
+        turn = {"project_id":project_id, "model": model, "messages": messages, "tools": toolset, "max_steps": MAX_STEPS - 1}
         if computer_id := project.get("computer_id"):
             try:
                 packet = await store.computer_hub.run(computer_id, project["computer_name"], turn, broker, TURN_TIMEOUT)

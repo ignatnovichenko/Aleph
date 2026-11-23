@@ -554,6 +554,10 @@ function reportStatus(task: Task) {
   if (task.report_state === "sent") return t("Готово", "Ready");
   if (task.report_state === "failed") return t("Нужен повтор", "Needs a retry");
   if (task.status === "done") return t("На паузе", "Paused");
+  if (task.report_stage === "offline") return t("Жду компьютер","Waiting for computer");
+  if (task.report_stage === "reading") return t("Читаю материалы","Reading sources");
+  if (task.report_stage === "writing") return t("Готовлю файл","Preparing file");
+  if (task.report_stage === "research") return t("Проверяю источники","Checking sources");
   if (task.report_started_at) return t("Выполняется", "In progress");
   return t("Запланировано", "Scheduled");
 }
@@ -580,7 +584,8 @@ function taskRow(task: Task, withProject = true) {
   const report = Boolean(task.report_state);
   const done = taskDone(task);
   const urgent = needsAttention(task);
-  const status = report ? reportStatus(task) : urgent ? t("Просрочено","Overdue") :
+  const condition = task.source==="gmail" ? t("Жду письмо","Waiting for email") : task.source==="price" ? t("Слежу за ценой","Watching price") : "";
+  const status = condition && !done ? condition : report ? reportStatus(task) : urgent ? t("Просрочено","Overdue") :
     task.remind_at && !task.due_at ? t("Напоминание","Reminder") : "";
   const due = task.due_at ? `${report ? t("Запуск","Run") : t("Срок","Due")} ${taskDate(task.due_at)}` : "";
   const reminder = task.remind_at && !done ? (task.remind_at === task.due_at
@@ -979,7 +984,7 @@ async function projectResultsSheet(projectId: number) {
   openSheet(t("Результаты", "Results"), `<div data-saved-results aria-live="polite"><p class="sheet-desc">${t("Загружаю…","Loading…")}</p></div>`);
   const node = requiredElement(sheet, "[data-saved-results]");
   try {
-    const items = demo ? [] : await request(`/api/projects/${projectId}/results`);
+    const [items, versions] = demo ? [[],[]] : await Promise.all([request(`/api/projects/${projectId}/results`),request(`/api/projects/${projectId}/versions`)]);
     if (!node.isConnected || !sheet.open) return;
     node.innerHTML = items.length ? `<div class="panel">${items.map(item =>
       settingRow("document", item.title, formatDate("day", item.saved_at),
@@ -987,6 +992,10 @@ async function projectResultsSheet(projectId: number) {
       : `<div class="empty surface"><strong>${t("Пока нет сохранённых ответов", "No saved answers yet")}</strong>
         <p>${t("Нажми «Сохранить в проект» под разбором или отчётом в чате с Алефом.",
                  "Tap Save to project under a detailed answer or report in your chat with Aleph.")}</p></div>`;
+    if (versions.length) {
+      if (!items.length) node.innerHTML="";
+      node.insertAdjacentHTML("beforeend",`<h3>${t("Версии файлов","File versions")}</h3><div class="panel">${versions.map(v=>`<a class="setting-row" data-telegram-link href="${e(v.url)}"><span class="setting-copy"><strong>${e(v.name)}</strong><span class="setting-detail">#${v.id}${v.parent ? " ← #"+v.parent : ""} · ${e(formatDate("day",v.created))}</span></span></a>`).join("")}</div>`);
+    }
   } catch (error) {
     if (node.isConnected) node.textContent = errorMessage(error);
   }
@@ -1361,10 +1370,7 @@ function settingsPage() {
     ${settingsGroup(t("Приложение", "App"), settingRow("sun", t("Оформление", "Appearance"), themeName(visibleTheme()), "appearance") +
       settingRow("globe", t("Часовой пояс", "Time zone"), zone().replaceAll("_", " "), "timezone"))}
     ${settingsGroup(t("Уведомления", "Notifications"),
-      settingRow("bell", t("Расписание уведомлений", "Notification schedule"),
-        s.proactive ? (s.daily_digest !== false ? t("Утренний обзор в", "Morning brief at") + " " + timeLabel(s.digest_time)
-          : t("Утренний обзор выключен", "Morning brief off")) : t("Уведомления на паузе", "Updates paused") +
-            (s.daily_digest !== false ? " · " + t("обзор в", "brief at") + " " + timeLabel(s.digest_time) : ""), "notifications") +
+      settingRow("bell", t("Инициатива Алефа", "Aleph’s initiative"), s.proactive ? initiativeLevels()[s.initiative || "balanced"] : t("Подсказки на паузе","Suggestions paused"), "notifications") +
       settingRow("rss", t("Источники новостей", "News sources"),
         state.feeds.length ? t("Подключено", "Connected") + " · " + state.feeds.length : t("Для утреннего обзора", "For your morning brief"), "feeds"))}
     ${connections ? settingsGroup(t("Подключения", "Connections"), connections) : ""}
@@ -1481,6 +1487,7 @@ async function projectComputerSheet(project: Project) {
       <p class="sheet-desc">${t("Выбери, где Алеф будет отвечать в этом проекте и выполнять его запланированные поручения.",
       "Choose where Aleph handles project chats and scheduled work.")}</p>
       <div class="panel computer-list">${row(null, serverName(), "", "cloud")}${computers.map(item => row(item.id, item.name, computerStatus(item), "computer")).join("")}</div>
+      ${assigned ? `<p class="sheet-desc">${t("Чтобы дать проекту доступ к папке, выполни на этом компьютере команду с путём к ней.","To grant access to one folder, run this command on the assigned computer with its path.")}</p><code>sh deploy/computer.sh folder --project ${project.id} --path "/path/to/folder"</code>` : ""}
       ${computers.length ? "" : `<button type="button" class="small-action" data-action="computers">${t("Подключить компьютер", "Connect a computer")}${icon("arrow")}</button>`}
       ${submit()}</form>`;
   } catch (error) {
@@ -1697,6 +1704,12 @@ function submit(label = saveLabel()) {
 }
 let viewedReportId: number | undefined;
 function taskSheet(task?: Task, projectId = activeId()) {
+  if (task && (task.source==="gmail" || task.source==="price")) {
+    openSheet(task.title,`<p class="sheet-desc">${e(task.notes)}</p>
+      <p class="sheet-desc">${task.source==="gmail" ? t("Сообщение придёт, когда в Gmail появится подходящее входящее письмо.","Aleph alerts you when a matching email arrives.") : t("Алеф сверяет цену с предыдущей версией прайса.","Aleph compares the price to the preceding observation.")}</p>
+      <button class="button primary" data-action="watch-toggle" data-id="${task.id}">${task.status==="done" ? t("Следить снова","Watch again") : t("Остановить","Stop watching")}</button>`);
+    return;
+  }
   if (!task?.report_state) {
     taskEditor(task, projectId);
     return;
@@ -1711,6 +1724,8 @@ function taskSheet(task?: Task, projectId = activeId()) {
         ${task.report_state === "failed" ? t("Назначить новое время","Set a new time") : t("Изменить поручение","Edit task")}</button>
         ${task.report_state === "pending" ? `<button class="button" data-action="toggle-report" data-id="${task.id}">
           ${task.status === "done" ? t("Возобновить","Resume") : t("Приостановить","Pause")}</button>` : ""}</div>`}
+    ${task.report_stage==="offline" && task.status==="open" && !task.report_needs_folder ? `<button class="button" data-action="run-on-server" data-id="${task.id}">${t("Выполнить это поручение на сервере","Run this task on the server")}</button>` : ""}
+    <p class="sheet-desc">${e(task.report_on_server ? serverName() : state.projects?.find(p=>p.id===task.project_id)?.computer_name || serverName())}</p>
     ${task.notes ? `<details class="task-details"><summary>${t("Исходное поручение","Original instructions")}</summary>
       <p class="sheet-desc" dir="auto">${e(task.notes)}</p></details>` : ""}`);
   viewedReportId = task.id;
@@ -1730,6 +1745,7 @@ async function resultSheet(task: Task) {
     node.innerHTML = result.html ? `<article class="task-result">${result.html}</article>` :
       `<p class="sheet-desc">${t("Результат в переписке с Алефом.","Find the result in your chat with Aleph.")}</p>
        <button class="button primary" data-action="chat">${t("Открыть чат","Open chat")}</button>`;
+    for (const f of result.files || []) node.insertAdjacentHTML("beforeend",`<a class="button" data-telegram-link href="${e(f.url)}">${e(f.name)}</a>`);
     prepareResultLinks(node);
   } catch (error) {
     if (node.isConnected) node.innerHTML = `<p class="sheet-desc">${e(errorMessage(error))}</p>
@@ -1776,12 +1792,22 @@ function timezoneSheet() {
     <p class="sheet-desc">${t("По этому времени Алеф присылает напоминания и выполняет запланированные задачи.", "Aleph uses this time zone for reminders and scheduled tasks.")}</p>
     <label class="field">${t("Часовой пояс", "Time zone")}<select name="timezone">${timezoneOptions(zone())}</select></label>${submit()}</form>`);
 }
+function initiativeLevels(): Record<string,string> {
+  return {quiet:t("По запросу","On request"), balanced:t("По моим приоритетам","My priorities"), active:t("На шаг впереди","Look ahead")};
+}
 function notificationsSheet() {
   const s = state.settings;
-  openSheet(t("Расписание уведомлений", "Notification schedule"), `<form id="notifications-form">
+  openSheet(t("Инициатива Алефа", "Aleph’s initiative"), `<form id="notifications-form">
+    <fieldset class="setting-choices"><legend>${t("Когда писать первым","When to reach out")}</legend><div class="panel">
+      ${Object.entries(initiativeLevels()).map(([id,label])=>`<label class="setting-row notification-option"><span class="setting-copy"><strong>${label}</strong>
+        <span class="setting-detail">${id==="quiet" ? t("Только заданные тобой условия и напоминания.","Only your explicit rules and reminders.") : id==="balanced" ? t("Замечать изменения по твоим приоритетам.","Flag changes related to your priorities.") : t("Также подсказывать, когда приближаются сроки других задач.","Also flag approaching deadlines across your tasks.")}</span></span>
+        <input type="radio" name="initiative" value="${id}" ${id===(s.initiative||"balanced")?"checked":""}></label>`).join("")}
+    </div></fieldset>
+    <label class="field">${t("Что сейчас важно","Current priorities")}<textarea name="focus" maxlength="400" rows="2">${e(s.focus||"")}</textarea></label>
+    <label class="setting-row"><span class="setting-copy">${t("Искать по моим приоритетам в подключённых Gmail, Календаре, Notion, Drive и материалах проекта","Find relevant items in my connected Gmail, Calendar, Notion, Drive and project materials")}</span><input type="checkbox" name="context_sources" ${s.context_sources?"checked":""}></label>
     <div class="panel">
       <label class="setting-row notification-option"><span class="setting-copy"><strong id="automatic-label">${t("Автоматические уведомления", "Automatic updates")}</strong>
-        <span class="setting-detail" id="automatic-detail">${t("Утренний обзор и регулярные сообщения в чате.", "Morning brief and recurring messages in chat.")}</span></span>
+        <span class="setting-detail" id="automatic-detail">${t("Подсказки Алефа и сообщения по расписанию. Условия о письмах и ценах действуют отдельно.", "Suggestions and scheduled updates. Your email and price rules run independently.")}</span></span>
         <input type="checkbox" name="proactive" aria-labelledby="automatic-label" aria-describedby="automatic-detail" ${s.proactive ? "checked" : ""}></label>
       <label class="setting-row notification-option"><span class="setting-copy"><strong id="digest-label">${t("Утренний обзор", "Morning brief")}</strong>
         <span class="setting-detail" id="digest-detail"></span></span>
@@ -2151,6 +2177,16 @@ async function act(action: string, id?: string) {
       if (item?.report_state === "sent") await resultSheet(item);
       break;
     }
+    case "run-on-server": {
+      const item = byId(id);
+      if (item && await write(`/api/tasks/${item.id}`,"PATCH",{run_on_server:true},task=>Object.assign(item,task),t("Назначен сервер","Assigned to server"))) taskSheet(item);
+      break;
+    }
+    case "watch-toggle": {
+      const item=byId(id);
+      if (item && await write(`/api/tasks/${item.id}`,"PATCH",{status:item.status==="done"?"open":"done"},task=>Object.assign(item,task),t("Условие обновлено","Watch updated"))) taskSheet(item);
+      break;
+    }
     case "toggle-report": {
       const item = byId(id);
       if (item?.report_state !== "pending") break;
@@ -2499,6 +2535,7 @@ sheet.addEventListener("submit", async (event) => {
       ok = await saveSettings({timezone: field("timezone")});
     } else if (form.id === "notifications-form") {
       ok = await saveSettings({
+        initiative:field("initiative"), ...(!bridge() || field("focus") ? {focus:field("focus")} : {}), context_sources:data.has("context_sources"),
         proactive: data.has("proactive"),
         daily_digest: requiredElement<HTMLInputElement>(form,'[name="daily_digest"]').checked,
         digest_time: requiredElement<HTMLInputElement>(form,'[name="digest_time"]').value,

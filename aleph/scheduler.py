@@ -9,7 +9,7 @@ import aiohttp
 
 from .feeds import fetch_feed
 from .routines import SourceUnavailable, eligible, format_routine, queue_routines
-from . import reminders, saved_results
+from . import initiative, reminders, saved_results
 from .store import UTC, timestamp
 
 log = logging.getLogger(__name__)
@@ -102,6 +102,17 @@ def queue_messages(store, now):
 
 def delivery_text(store, item, now):
     user = store.db.execute("SELECT * FROM users WHERE id=?", (item["user_id"],)).fetchone()
+    if item["kind"] == "price":
+        return item["body"] if store.db.execute("SELECT 1 FROM tasks WHERE id=? AND status='open' AND user_id=?", (item["task_id"],user["id"])).fetchone() else None
+    if item["kind"] == "mail":
+        return item["body"] if store.db.execute("SELECT 1 FROM gmail_rules WHERE task_id=? AND matched IS NOT NULL", (item["task_id"],)).fetchone() else None
+    if item["kind"] == "initiative":
+        if not user["proactive"] or user["initiative"]=="quiet":
+            return None
+        local = now.astimezone(ZoneInfo(user["timezone"]))
+        if quiet(local.strftime("%H:%M"), user["quiet_start"], user["quiet_end"]):
+            return ""
+        return next((body for tag,body in initiative.candidates(store,user,now) if item["key"]==f"initiative:{user['id']}:{tag}"), None)
     if item["kind"] == "digest":
         local = now.astimezone(ZoneInfo(user["timezone"]))
         if not user["proactive"] or not user["daily_digest"] or not item["key"].endswith(":" + str(local.date())):
@@ -214,6 +225,7 @@ async def run_scheduler(store, session, token, *, weather=None):
         try:
             now = datetime.now(UTC)
             if now >= next_feeds:
+                initiative.queue(store, now)
                 saved_results.prune(store, now)
                 await refresh_feeds(store, session, now)
                 next_feeds = now + timedelta(minutes=5)
