@@ -1,6 +1,7 @@
 import type { TelegramWidget, WidgetFrameConfig, WidgetFrameReply, WidgetFrameRequest } from "./types.js";
 
 declare const __WIDGET_FRAME_CONFIG__: WidgetFrameConfig;
+document.documentElement.style.colorScheme = "dark";
 const frameConfig = __WIDGET_FRAME_CONFIG__;
 const { originKey } = frameConfig;
 let sequence = 0;
@@ -39,9 +40,7 @@ window.TelegramWidget = widget;
 addEventListener("message", (event: MessageEvent<WidgetFrameReply | null>) => {
   const message = event.data;
   if (event.source !== parent || message?.originKey !== originKey) return;
-  if (message.type === "theme") {
-    if (message.scheme === "light" || message.scheme === "dark") document.documentElement.style.colorScheme = message.scheme;
-  } else if (message.type === "answer") {
+  if (message.type === "answer") {
     const call = pending.get(message.id);
     pending.delete(message.id);
     if (message.ok && typeof message.chatData === "string") {

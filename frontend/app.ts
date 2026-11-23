@@ -5,7 +5,7 @@ import { moveTaskBranch } from "./task-tree-motion.js";
 import { ApiMessage } from "./transport.js";
 import type { IconName } from "./icons.js";
 import type { RequestOptions, WriteMethod, Writes } from "./store.js";
-import type { CalendarEvent, ChatGPTConnection, ChatGPTPairing, ProjectEntry, ReplyStyle, SavedMemory, Service, ModelCatalog, ModelChoice, ModelProvider, Project, ProviderModel, Settings, Task, ThemeMode, WorkspaceState } from "./types.js";
+import type { CalendarEvent, ChatGPTConnection, ChatGPTPairing, ProjectEntry, ReplyStyle, SavedMemory, Service, ModelCatalog, ModelChoice, ModelProvider, Project, ProviderModel, Settings, Task, WorkspaceState } from "./types.js";
 import type { Computer, ComputerPairing, ProjectSkills, ProjectSource, SkillDraft, SkillSummary, SourcePreview } from "./types.js";
 import {
   bridge,
@@ -22,7 +22,6 @@ import {
 
 declare const __ALEPH_MARK_URL__: string;
 type Page = "home" | "projects" | "settings";
-type SelectableTheme = Exclude<ThemeMode, "auto">;
 
 function requiredElement<T extends HTMLElement>(scope: ParentNode, selector: string): T {
   const node = scope.querySelector<T>(selector);
@@ -94,46 +93,11 @@ const navs = (): [Page, string][] => [
   ["projects", t("Проекты", "Projects")],
   ["settings", t("Настройки", "Settings")],
 ];
-function prefersDark() {
-  const tg = webapp();
-  return tg?.platform && tg.platform !== "unknown" && tg.colorScheme
-    ? tg.colorScheme === "dark"
-    : matchMedia("(prefers-color-scheme: dark)").matches;
-}
-let previewTheme: SelectableTheme | undefined;
-function visibleTheme(): SelectableTheme {
-  const theme = previewTheme ?? state?.settings.theme;
-  return theme === "white" || theme === "dark" ? theme : prefersDark() ? "dark" : "white";
-}
-
-function setTheme() {
-  const theme = visibleTheme();
-  const root = document.documentElement;
-  const tg = webapp();
-  root.dataset.theme = theme === "dark" ? "dark" : "light";
-  for (const card of sheet.querySelectorAll<HTMLButtonElement>('[data-action="choose-theme"]')) {
-    card.setAttribute("aria-pressed", String(card.dataset.id === theme));
-  }
-  const bg = getComputedStyle(root).getPropertyValue("--bg").trim();
-  const meta = document.querySelector<HTMLMetaElement>("meta[name=theme-color]");
-  if (meta) meta.content = bg;
-  try {
-    tg?.setHeaderColor?.(bg);
-    tg?.setBackgroundColor?.(bg);
-    tg?.setBottomBarColor?.(bg);
-  } catch {}
-}
-function applySystemTheme() {
-  setTheme();
-  render();
-}
 function initTelegram() {
   const tg = webapp();
   if (!tg || sdkBound) return;
   sdkBound = true;
   revealMiniApp();
-  applySystemTheme();
-  tg.onEvent?.("themeChanged", applySystemTheme);
   tg.BackButton?.onClick(() => {
     if (sheet.open) {
       if (!pending) closeSheet();
@@ -1365,9 +1329,6 @@ function settingsGroup(title: string, rows: string) {
 function replyStyleOptions(): [ReplyStyle, string][] {
   return [["short", t("Кратко", "Concise")], ["balanced", t("Стандартно", "Standard")], ["detailed", t("Подробно", "Detailed")]];
 }
-function themeName(theme: SelectableTheme) {
-  return theme === "dark" ? t("Тёмная", "Dark") : t("Светлая", "Light");
-}
 function settingChoices<T extends string>(name: string, label: string, options: [T, string][], selected: T) {
   return `<fieldset class="setting-choices"><legend>${label}</legend>${options.map(([value, title]) =>
     `<label class="setting-choice"><input type="radio" name="${name}" value="${value}" ${value === selected ? "checked" : ""}>${title}</label>`).join("")}</fieldset>`;
@@ -1391,7 +1352,7 @@ function settingsPage() {
       (bridge() ? "" : settingRow("skills", t("Библиотека скиллов", "Skill library"),
         undefined, "skill-library")) +
       settingRow("bookmark", t("Личная память", "Personal memory"), enabledLabel(s.personal_memory !== false), "memory"))}
-    ${settingsGroup(t("Приложение", "App"), settingRow("sun", t("Оформление", "Appearance"), themeName(visibleTheme()), "appearance") +
+    ${settingsGroup(t("Приложение", "App"),
       settingRow("globe", t("Часовой пояс", "Time zone"), zone().replaceAll("_", " "), "timezone"))}
     ${settingsGroup(t("Уведомления", "Notifications"),
       settingRow("bell", t("Инициатива Алефа", "Aleph’s initiative"), s.proactive ? initiativeLevels()[s.initiative || "balanced"] : t("Подсказки на паузе","Suggestions paused"), "notifications") +
@@ -1637,22 +1598,6 @@ function meetingSkill(): SkillDraft {
   };
 }
 
-function appearanceSheet() {
-  const current = visibleTheme();
-  const card = (theme: SelectableTheme) => `<button class="theme-card" type="button" data-action="choose-theme"
-      data-id="${theme}" aria-pressed="${theme === current}">
-    <span class="theme-preview" data-preview="${theme}" aria-hidden="true">
-      <span class="theme-preview-head"><img src="${__ALEPH_MARK_URL__}" alt="" width="15" height="15">
-        <span>${t("Задачи", "Tasks")}</span></span>
-      <span class="theme-preview-tabs"><i></i><i></i><i></i></span>
-      <span class="theme-preview-list"><i></i><i></i></span>
-      <span class="theme-preview-dock">${icon("home")}${icon("projects")}${icon("settings")}</span>
-    </span>
-    <span class="theme-card-caption">${themeName(theme)}<span class="theme-card-check" aria-hidden="true">${icon("check")}</span></span>
-  </button>`;
-  openSheet(t("Оформление", "Appearance"), `<div class="theme-picker" role="group" aria-label="${t("Цветовая тема", "Color theme")}">
-    ${card("white")}${card("dark")}</div><p class="form-error" role="alert"></p>`);
-}
 function replyPreferencesSheet() {
   openSheet(t("Стиль ответов", "Reply preferences"), `<form id="reply-form">
     ${settingChoices("reply_style", t("Длина ответа по умолчанию", "Default reply length"), replyStyleOptions(), state.settings.reply_style ?? "balanced")}
@@ -1896,13 +1841,11 @@ async function load() {
       page = "home";
       taskFolders.add(target.project_id || 0);
       if (taskDone(target)) taskArchive.add(target.project_id || 0);
-      setTheme();
       render();
       if (initialView.get("result") === "1" && target.report_state === "sent") void resultSheet(target);
       else taskSheet(target);
     } else if (task) message(t("Задача не найдена","Task not found"));
   }
-  setTheme();
   render();
   if (state.model_configurable && !chatgpt && !bridge()) void syncChatGPT();
 }
@@ -2221,22 +2164,6 @@ async function act(action: string, id?: string) {
       if (await write(`/api/tasks/${item.id}`,"PATCH",{status},task => Object.assign(item,task || {status}),notice) && !bridge()) taskSheet(item);
       break;
     }
-    case "appearance":
-      appearanceSheet();
-      break;
-    case "choose-theme":
-      if ((id === "white" || id === "dark") && state.settings.theme !== id) {
-        sheet.querySelector(".form-error")?.replaceChildren();
-        previewTheme = id;
-        applySystemTheme();
-        try {
-          if (await saveSettings({theme: id}, "") && bridge()) state.settings.theme = id;
-        } finally {
-          previewTheme = undefined;
-          applySystemTheme();
-        }
-      }
-      break;
     case "reply-preferences":
       replyPreferencesSheet();
       break;
@@ -2706,7 +2633,6 @@ async function refresh(reportsOnly = false) {
       const previouslyConnected = state.connections?.calendar;
       state = fresh;
       if (!reportsOnly) chatgpt = fresh.chatgpt_connection;
-      if (!reportsOnly) setTheme();
       render();
       const current = viewing && byId(String(viewing.id));
       if (sheet.open && current && viewing && reportStatus(current) !== reportStatus(viewing)) taskSheet(current);
@@ -2728,8 +2654,6 @@ document
   .querySelector('script[src*="telegram-web-app"]')
   ?.addEventListener("load", initTelegram, { once: true });
 window.addEventListener("load", initTelegram, { once: true });
-matchMedia("(prefers-color-scheme: dark)").addEventListener("change", applySystemTheme);
-setTheme();
 setLanguage(
   webapp()?.initDataUnsafe?.user?.language_code ||
     (demo ? "ru" : navigator.language),

@@ -1,3 +1,4 @@
+import { bindTelegramColors } from "./telegram.js";
 import {request, signed} from "./store.js";
 import type { WidgetFrameConfig, WidgetFrameReply, WidgetFrameRequest, WidgetState } from "./types.js";
 
@@ -18,15 +19,8 @@ back.addEventListener("click", () => {
   if (tg?.platform !== "unknown" && tg?.close) tg.close();
   else location.assign("https://t.me/AlephAgentBot");
 });
-function syncTheme() {
-  const scheme = tg?.platform !== "unknown" && tg?.colorScheme
-    ? tg.colorScheme : matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-  document.documentElement.dataset.theme = scheme;
-  frame.contentWindow?.postMessage({ originKey, type: "theme", scheme } satisfies WidgetFrameReply, "*");
-}
-syncTheme();
+bindTelegramColors();
 tg?.ready?.();
-tg?.onEvent?.("themeChanged", syncTheme);
 
 addEventListener("message", async (event: MessageEvent<WidgetFrameRequest | null>) => {
   if (event.source !== frame.contentWindow || event.data?.originKey !== originKey) return;
@@ -53,7 +47,6 @@ try {
   const safeConfig = JSON.stringify(config).replace(/</g, "\\u003c");
   const frameScript = __WIDGET_FRAME_SOURCE__.replace("__WIDGET_FRAME_CONFIG__", () => safeConfig);
   const shim = `<script>${frameScript}</script>`;
-  frame.addEventListener("load",syncTheme,{once:true});
   frame.srcdoc = result.html.replace('<meta charset="utf-8">', '<meta charset="utf-8">' + csp + shim);
   frame.hidden = false;
   status.hidden = true;

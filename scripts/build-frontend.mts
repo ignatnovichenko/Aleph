@@ -87,12 +87,6 @@ try {
       splitting: true,
       define: { __WIDGET_FRAME_SOURCE__: JSON.stringify(frame) },
     }),
-    build({
-      ...shared,
-      entryPoints: ["frontend/privacy.ts"],
-      outfile: join(stage, "web/privacy.js"),
-      format: "iife",
-    }),
     writeFile(join(stage, "widget.js"), widget),
     buildMainPage(),
   ]);

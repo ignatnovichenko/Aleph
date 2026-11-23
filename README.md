@@ -1,6 +1,6 @@
 # Aleph
 
-Aleph is a personal Telegram agent. The conversation lives in the bot. The Mini App is a separate plan and settings view, with Void and Paper themes, a glass tab bar and Russian and English interfaces. Hermes Agent runs the conversational tool loop.
+Aleph is a personal Telegram agent. The conversation lives in the bot. The Mini App is a separate plan and settings view, with the dark Void theme, a glass tab bar and Russian and English interfaces. Hermes Agent runs the conversational tool loop.
 
 - Hermes can choose a Telegram HTML widget for a checklist, tabbed comparison or chart. Widgets render and respond to taps inside the message. Checklist marks are saved to the original widget. If Telegram rejects inline HTML, Aleph sends an interactive card with buttons in the chat and offers the same HTML widget through a signed Mini App view.
 - Detailed Telegram articles can include photos from Wikimedia Commons with author, source and license credits. Aleph searches when an image helps explain the topic and delivers the article even if no photo is available.

@@ -251,8 +251,6 @@ export type WidgetSpec = { title: string } & (
   | { kind: "chart"; items: (WidgetItem & { value: number })[]; unit: string }
 );
 
-export type Theme = "light" | "dark";
-
 export interface WidgetFrameConfig {
   originKey: string;
   chatData: string;
@@ -263,7 +261,4 @@ export type WidgetFrameRequest = { originKey: string } & (
   | { type: "action"; id: number; action: string }
 );
 
-export type WidgetFrameReply = { originKey: string } & (
-  | { type: "theme"; scheme: Theme }
-  | { type: "answer"; id: number; ok: boolean; chatData?: string }
-);
+export type WidgetFrameReply = { originKey: string; type: "answer"; id: number; ok: boolean; chatData?: string };

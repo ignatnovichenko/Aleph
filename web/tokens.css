@@ -1,31 +1,4 @@
-/* Paper and Void, with glass reserved for navigation. */
-:root, .theme-preview[data-preview="white"] {
-  color-scheme: light;
-  --bg: #f6e7d5;
-  --panel: #fcf0e3;
-  --paper: #fff6eb;
-  --text: #292520;
-  --hint: #696259;
-  --line: #59412d35;
-  --hair: #59412d23;
-  --wash: #6f4e3710;
-  --pressed: #8a5c3524;
-  --button: #161618;
-  --button-text: #f3eee6;
-  --signal: #a24231;
-  --critical: #9d3021;
-  --dock-bed: #f6e6d3b3;
-  --dock-web: #f2e0caed;
-  --dock-ink: #51514c;
-  --glass-bright: #fff6e9ec;
-  --glass-highlight: #fff4e4b8;
-  --glass-refract: #fff1dc99;
-  --glass-depth: #77664c38;
-  --glass-drop: #3a32263a;
-  --lens-rim: #65503c42;
-  --lens-inner-rim: #fff9ed77;
-  --scrim: #10110e6b;
-}
+/* Void, with glass reserved for navigation. */
 :root {
   --ease: cubic-bezier(.16,1,.3,1);
   --safe-bottom: max(env(safe-area-inset-bottom), var(--tg-content-safe-area-inset-bottom, 0px), var(--tg-safe-area-inset-bottom, 0px));
@@ -36,9 +9,7 @@
   font-family: var(--voice);
   font-weight: 350;
   -webkit-font-smoothing: antialiased;
-}
-:root[data-theme="dark"], .theme-preview[data-preview="dark"] {
-  color-scheme: dark;
+  color-scheme: only dark !important;
   --bg: #141313;
   --panel: #1e1c1b;
   --paper: #272423;
@@ -50,10 +21,14 @@
   --pressed: #f3eee61b;
   --button: #f3eee6;
   --button-text: #161618;
+  --signal: #a24231;
   --critical: #ff907e;
   --dock-bed: #151515c2;
   --dock-web: #191818f2;
   --dock-ink: #b6b4ae;
+  --glass-bright: #fff6e9ec;
+  --glass-highlight: #fff4e4b8;
+  --glass-depth: #77664c38;
   --glass-refract: #eff1de3b;
   --glass-drop: #000b;
   --lens-rim: #eee6da44;
