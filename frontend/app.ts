@@ -275,6 +275,7 @@ function mountShell() {
             <img class="app-mark" src="${__ALEPH_MARK_URL__}" width="30" height="30" alt="Aleph" decoding="async">
             <h1 class="page-title" id="title-${key}" tabindex="-1" dir="auto">${label}</h1>
             ${key === "projects" ? `<button class="project-chat-action" data-action="continue-project">${icon("plane")}${t("В чат","Open chat")}</button>` : ""}
+            ${key === "projects" && !bridge() ? projectAdd("new-project", t("Новый проект", "New project")) : ""}
             ${key === "home" ? '<p class="page-kicker"></p>' : ""}
           </header>
           <div class="page-content"></div>${footer}
@@ -581,6 +582,11 @@ function taskDate(value: string) {
   const today = localDateTime(Date.now(),zone()).slice(0,10);
   return day === today ? formatDate("clock",value) : formatDate("day",value) + " · " + formatDate("clock",value);
 }
+function executing(task: Task) {
+  return task.report_state === "pending" && task.status === "open" && task.report_stage !== "offline" &&
+    Boolean(task.report_started_at || ["reading", "research", "writing"].includes(task.report_stage || ""));
+}
+
 function taskRow(task: Task, withProject = true) {
   const report = Boolean(task.report_state);
   const done = taskDone(task);
@@ -591,17 +597,19 @@ function taskRow(task: Task, withProject = true) {
   const due = task.due_at ? `${report ? t("Запуск","Run") : t("Срок","Due")} ${taskDate(task.due_at)}` : "";
   const reminder = task.remind_at && !done ? (task.remind_at === task.due_at
     ? t("С напоминанием", "With reminder") : t("Напомню в","Reminder at") + " " + taskDate(task.remind_at)) : "";
-  const toggle = report ? glyph("sparkle") :
+  const toggle = report ? glyph(done ? "check" : executing(task) ? "activity" : "sparkle") :
     `<button class="task-toggle" data-action="toggle-task" data-id="${task.id}" aria-label="${e((done ? t("Вернуть в работу","Reopen") : t("Отметить готовой","Mark complete")) + " · " + task.title)}" aria-pressed="${done}">
       <span class="ring">${done ? icon("check") : ""}</span></button>`;
-  return `<article class="task-row ${done ? "done" : ""}">
+  const timing = [due, task.remind_at !== task.due_at ? reminder : ""].filter(Boolean);
+  const details = [withProject ? e(projectName(task.project_id)) : "", ...timing.map(e)].filter(Boolean);
+  const phase = report && task.report_state === "sent" ? t("Результат готов","Result ready") : status;
+  return `<article class="task-row ${done ? "done" : ""}${executing(task) ? " executing" : ""}">
     ${toggle}
     <button class="task-body" data-action="edit-task" data-id="${task.id}">
       <span class="task-title" dir="auto">${e(task.title)}</span>
-      <span class="task-meta">${withProject ? `<span class="task-project-name" dir="auto">${e(projectName(task.project_id))}</span>` : ""}
-        ${due ? `<span>${e(due)}</span>` : ""}${reminder ? `<span>${e(reminder)}</span>` : ""}</span>
-      ${status ? `<span class="task-status ${urgent ? "task-status-alert" : ""}">${report ? t("Алеф","Aleph") + " · " : ""}${status}</span>` : ""}
-    </button><span class="arrow">${icon("arrow")}</span></article>`;
+      ${phase ? `<span class="task-status ${urgent ? "task-status-alert" : ""}">${report ? t("Алеф","Aleph") + " · " : ""}${e(phase)}</span>` : ""}
+      ${details.length ? `<span class="task-meta">${details.join(" · ")}${task.remind_at && task.remind_at === task.due_at && !done ? `<span role="img" aria-label="${e(reminder)}" title="${e(reminder)}">${icon("bell")}</span>` : ""}</span>` : ""}
+    </button></article>`;
 }
 function glyph(symbol: IconName) {
   return `<span class="glyph">${icon(symbol)}</span>`;
@@ -620,7 +628,7 @@ function serviceRows() {
     const stateLabel = {connected:t("Подключён","Connected"), disconnected:t("Подключить","Connect"),
       reconnect:t("Повторить вход","Reconnect"), unavailable:t("Пока недоступен","Currently unavailable")};
     const info = services[key], status = state.connections?.[key] || "unavailable";
-    return settingRow(info.icon, info.name, stateLabel[status], "service", key);
+    return settingRow(info.icon, info.name, stateLabel[status], "service", key, status);
   }).join("");
 }
 function serviceSheet(key: Service) {
@@ -795,10 +803,12 @@ function taskTreeRows(items: Task[]) {
 function taskFolderBody(id: number, items: Task[]) {
   const groups: Record<TaskSection, Task[]> = {today: [], upcoming: [], inbox: [], done: []};
   const attention: Task[] = [];
+  const running: Task[] = [];
   const today = localDateTime(Date.now(), zone()).slice(0, 10);
   for (const task of sorted(items)) {
     const group = taskFilter(task, today);
-    if (group === "today" && needsAttention(task)) attention.push(task);
+    if (executing(task)) running.push(task);
+    else if (group === "today" && needsAttention(task)) attention.push(task);
     else groups[group].push(task);
   }
   const dated = (label: string, tasks: Task[], alert = false) => tasks.length
@@ -806,6 +816,7 @@ function taskFolderBody(id: number, items: Task[]) {
         <h3>${label}</h3>${taskTreeRows(tasks)}</section>` : "";
   const archived = taskArchive.has(id);
   return `<div class="task-branch-inner">
+    ${dated(t("Алеф работает", "Aleph is working"), running)}
     ${dated(t("Требует внимания", "Needs attention"), attention, true)}
     ${dated(t("Сегодня", "Today"), groups.today)}
     ${dated(t("Скоро", "Upcoming"), groups.upcoming)}
@@ -864,18 +875,18 @@ function toggleTaskBranch(id: number, archive: boolean) {
 function overview() {
   const folders = taskTreeData();
   initTaskTree(folders);
-  const ids = [...new Set([0, activeId(), ...(state.projects || []).map(project => project.id), ...folders.keys()])];
+  const ids = [...new Set([activeId(), 0, ...(state.projects || []).map(project => project.id), ...folders.keys()])];
   const first = !state.tasks.length && ids.length === 1;
   return `<div class="task-tree-toolbar">
     <button class="active-context" data-action="view-project" data-id="${activeId()}">${icon(activeId() ? "projects" : "person")}
       <span>${t("В чате", "In chat")} · <strong dir="auto">${e(projectName(activeId()))}</strong></span>${icon("arrow")}</button>
-    <button class="action-plus" data-action="new-task" aria-label="${t("Добавить задачу","Add task")}">${icon("plus")}</button>
+    ${first ? "" : `<button class="action-plus" data-action="new-task" aria-label="${t("Добавить задачу","Add task")}">${icon("plus")}</button>`}
     </div>
-    <div class="task-tree panel" role="region" aria-label="${t("Папки задач", "Task folders")}">
+    ${first ? "" : `<div class="task-tree panel" role="region" aria-label="${t("Папки задач", "Task folders")}">
       ${ids.map(id => taskFolder(id, folders.get(id) || [])).join("")}
-    </div>
-    ${first ? `<div class="empty surface task-tree-first"><strong>${t("С чего начнём?", "What shall we start with?")}</strong>
-      <p>${t("Попробуй: «Завтра в 18:00 пришли разбор SpaceX».", "Try: “Send me a SpaceX analysis tomorrow at 6 PM.”")}</p>
+    </div>`}
+    ${first ? `<div class="empty surface task-tree-first"><strong>${t("Задач пока нет", "No tasks yet")}</strong>
+      <p>${t("Поручи Алефу работу в чате или запиши задачу для себя.", "Give Aleph an assignment in chat or add a task for yourself.")}</p>
       <button class="button primary" data-action="chat">${t("Поручить в чате","Ask in chat")}</button>
       <button class="small-action" data-action="new-task">${t("Добавить задачу вручную","Add a task manually")}</button></div>` : ""}
     ${calendarSection() + routinesPanel()}`;
@@ -908,15 +919,18 @@ function projectsPage() {
     counts.set(id, (counts.get(id) || 0) + 1);
   }
 
-  return `<div class="project-index-action">${projectAdd("new-project", t("Новый проект","New project"))}</div>
-    <div class="panel project-list">${items.map(item => {
+  return `<div class="project-list">${items.map(item => {
     const count = counts.get(item.id) || 0;
-    return `<button class="project-row" data-action="view-project" data-id="${item.id}">
+    const current = item.id === active;
+    const context = current ? state.projects?.find(project => project.id === item.id)?.context.trim() : "";
+    return `<button class="project-row${current ? " current-project" : ""}" data-action="view-project" data-id="${item.id}">
       ${glyph(item.id ? "projects" : "person")}
-      <span class="setting-copy"><strong dir="auto">${e(item.name)}</strong>
-        ${count ? `<small>${t("В работе","Open tasks")} · ${count}</small>` : ""}</span>
-      ${item.id === active ? `<span class="live-project"><i class="signal-dot"></i>${t("В чате","In chat")}</span>` : ""}
-      <span class="tail">${icon("arrow")}</span></button>`;
+      <span class="setting-copy">
+        ${current ? `<span class="live-project"><i class="signal-dot"></i>${t("В чате","In chat")}</span>` : ""}
+        <strong dir="auto">${e(item.name)}</strong>
+        ${context ? `<span class="project-excerpt" dir="auto">${e(context)}</span>` : ""}
+        <small>${count ? t("В работе","Open tasks") + " · " + count : t("Нет открытых задач","No open tasks")}</small></span>
+      <span class="tail">${icon(current ? "right" : "arrow")}</span></button>`;
   }).join("")}</div>`;
 }
 
@@ -935,14 +949,14 @@ function projectPage(project?: Project) {
   const entries = projectEntries.get(id);
   const tasks = sorted(state.tasks.filter(task => (task.project_id || 0) === id));
   const done = tasks.filter(taskDone);
-  const open = tasks.filter(task => !taskDone(task));
+  const open = tasks.filter(task => !taskDone(task)).sort((a, b) => Number(executing(b)) - Number(executing(a)));
   const savedRow = settingRow("bookmark", t("Результаты", "Results"),
     t("Сохранённые ответы", "Saved answers"), "project-results", String(id));
-  if (!project) return `<div class="panel project-skill-link">${settingRow("skills", t("Скиллы", "Skills"),
-    t("Выбрать для этого проекта", "Choose for this workspace"), "project-skills", String(id))}${savedRow}</div>` + projectTasks(id, open, done);
+  if (!project) return projectTasks(id, open, done) + `<div class="panel project-skill-link">${settingRow("skills", t("Скиллы", "Skills"),
+    t("Выбрать для этого проекта", "Choose for this workspace"), "project-skills", String(id))}${savedRow}</div>`;
 
   const hasContext = !!project.context.trim();
-  return `<div class="panel project-configuration">
+  const configuration = `<section class="settings-block project-config-section"><h2 class="settings-title">${t("О проекте","Project details")}</h2><div class="panel project-configuration">
       <button class="project-context setting-row" data-action="project-context" data-id="${id}">
       ${glyph("document")}<span class="setting-copy">
         <strong>${t("Контекст и инструкции","Context and instructions")}</strong>
@@ -953,24 +967,25 @@ function projectPage(project?: Project) {
       ${settingRow("computer", t("Где выполняется проект", "Runs on"),
         project.computer_name || serverName(), "project-computer", String(id))}
       ${savedRow}
-    </div>
-    <div class="project-panes" role="group" aria-label="${t("Разделы проекта","Project sections")}">
+    </div></section>`;
+  return `<div class="project-panes" role="group" aria-label="${t("Разделы проекта","Project sections")}">
       ${([["tasks", t("Задачи","Tasks"), open.length], ["notes", t("Записи","Notes"), entries?.length],
           ["sources", t("Источники","Sources"), projectSources.get(id)?.length]] as const)
         .map(([key,label,count]) => `<button aria-pressed="${projectPane === key}" aria-controls="project-work"
           data-action="project-pane" data-id="${key}">${label}${count ? `<small>${count}</small>` : ""}</button>`).join("")}
     </div>
     <div id="project-work">${projectPane === "tasks" ? projectTasks(id, open, done, entries?.find(entry => entry.kind === "decision"))
-      : projectPane === "notes" ? projectNotes(id, entries) : sourcesPane(id)}</div>`;
+      : projectPane === "notes" ? projectNotes(id, entries) : sourcesPane(id)}</div>${configuration}`;
 }
 
 function projectTasks(id: number, open: Task[], done: Task[], decision?: ProjectEntry) {
   return `<section aria-labelledby="project-tasks-title">
-    <div class="project-section-head"><h2 id="project-tasks-title">${t("В работе","In progress")}</h2>
-      ${projectAdd("new-task", t("Добавить задачу","Add task"), id)}</div>
+    <div class="project-section-head"><h2 id="project-tasks-title">${t("Открытые задачи","Open tasks")}</h2>
+      ${open.length ? projectAdd("new-task", t("Добавить задачу","Add task"), id) : ""}</div>
     ${open.length ? `<div class="panel">${open.map(task => taskRow(task,false)).join("")}</div>` :
-      `<div class="project-empty panel">${glyph("home")}<div><strong>${t("Пока задач нет","No open tasks")}</strong>
-        <p>${t("Добавь задачу здесь или поручи её Алефу в чате.","Add a task here or ask Aleph in chat.")}</p></div></div>`}
+      `<div class="project-empty panel">${glyph(done.length ? "check" : "home")}<div><strong>${done.length ? t("Все задачи завершены","All tasks complete") : t("Пока задач нет","No tasks yet")}</strong>
+        <p>${done.length ? t("Готовые задачи собраны ниже.","Completed tasks are collected below.") : t("Здесь будут и твои задачи, и поручения Алефу.","Your tasks and Aleph’s assignments appear here.")}</p>
+        ${projectAdd("new-task", t("Добавить задачу","Add task"), id)}</div></div>`}
     ${done.length ? `<details class="project-done"${projectDoneOpen ? " open" : ""}>
       <summary>${t("Завершённые","Completed")}<small>${done.length}</small>${icon("arrow")}</summary>
       <div class="panel">${done.map(task => taskRow(task,false)).join("")}</div></details>` : ""}
@@ -1334,12 +1349,12 @@ function routinesPanel() {
     .join("");
   return `<section class="settings-block routine-block"><h2 class="settings-title">${t("Регулярные поручения", "Recurring tasks")}</h2><div class="panel">${rows}<button class="add-line" data-action="chat">${icon("plane")}${t("Изменить в чате", "Manage in chat")}</button></div></section>`;
 }
-function settingRow(symbol: IconName, label: string, detail?: string, action?: string, id?: string) {
+function settingRow(symbol: IconName, label: string, detail?: string, action?: string, id?: string, connection?: string) {
   const contents = `${glyph(symbol)}<span class="setting-copy"><strong>${e(label)}</strong>${
     detail ? `<span class="setting-detail" dir="auto">${e(detail)}</span>` : ""
   }</span>`;
   return action
-    ? `<button class="setting-row" data-action="${action}"${id ? ` data-id="${e(id)}"` : ""}>${contents}<span class="tail">${icon("arrow")}</span></button>`
+    ? `<button class="setting-row"${connection ? ` data-connection="${e(connection)}"` : ""} data-action="${action}"${id ? ` data-id="${e(id)}"` : ""}>${contents}<span class="tail">${icon("arrow")}</span></button>`
     : `<div class="setting-row">${contents}</div>`;
 }
 function settingsGroup(title: string, rows: string) {
@@ -1370,9 +1385,9 @@ function settingsPage() {
   const connections = serviceRows() + chatgptRow() + invite;
   return `<div class="settings-grid">
     ${settingsGroup(t("Ассистент", "Assistant"), modelRow() +
-      settingRow("edit", t("Персонализация ответов", "Personalize replies"), responseLabel, "reply-preferences") +
-      (bridge() ? "" : settingRow("skills", t("Скиллы", "Skills"),
-        t("Библиотека, создание и импорт", "Library, creation and import"), "skill-library")) +
+      settingRow("edit", t("Стиль ответов", "Reply preferences"), responseLabel, "reply-preferences") +
+      (bridge() ? "" : settingRow("skills", t("Библиотека скиллов", "Skill library"),
+        undefined, "skill-library")) +
       settingRow("bookmark", t("Личная память", "Personal memory"), enabledLabel(s.personal_memory !== false), "memory"))}
     ${settingsGroup(t("Приложение", "App"), settingRow("sun", t("Оформление", "Appearance"), themeName(visibleTheme()), "appearance") +
       settingRow("globe", t("Часовой пояс", "Time zone"), zone().replaceAll("_", " "), "timezone"))}
@@ -1637,7 +1652,7 @@ function appearanceSheet() {
     ${card("white")}${card("dark")}</div><p class="form-error" role="alert"></p>`);
 }
 function replyPreferencesSheet() {
-  openSheet(t("Персонализация ответов", "Personalize replies"), `<form id="reply-form">
+  openSheet(t("Стиль ответов", "Reply preferences"), `<form id="reply-form">
     ${settingChoices("reply_style", t("Длина ответа по умолчанию", "Default reply length"), replyStyleOptions(), state.settings.reply_style ?? "balanced")}
     ${bridge() ? "" : `<label class="field">${t("Личные инструкции", "Custom instructions")}
       <textarea name="assistant_instructions" dir="auto" rows="3" maxlength="600"
