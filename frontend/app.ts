@@ -270,11 +270,10 @@ function mountShell() {
           <header class="page-head">
             ${key === "projects" ? `<div class="project-backbar">
               <button class="small-action back-project" data-action="project-list">${icon("arrow")}${t("Все проекты","All projects")}</button>
-              <span class="live-project" hidden><i class="signal-dot"></i>${t("В чате","In chat")}</span>
             </div>` : ""}
             <img class="app-mark" src="${__ALEPH_MARK_URL__}" width="30" height="30" alt="Aleph" decoding="async">
             <h1 class="page-title" id="title-${key}" tabindex="-1" dir="auto">${label}</h1>
-            ${key === "projects" ? `<button class="project-chat-action" data-action="continue-project">${icon("plane")}${t("В чат","Open chat")}</button>` : ""}
+            ${key === "projects" ? `<button class="project-select-action" data-action="select-project">${icon("check")}<span></span></button>` : ""}
             ${key === "projects" && !bridge() ? projectAdd("new-project", t("Новый проект", "New project")) : ""}
             ${key === "home" ? '<p class="page-kicker"></p>' : ""}
           </header>
@@ -316,8 +315,10 @@ function renderView(view: View) {
       view.heading.textContent = title;
       if (page === view.key) document.title = title + " · Aleph";
     }
-    requiredElement(view.panel, ".live-project").hidden = !detail || id !== activeId();
-    requiredElement(view.panel, ".project-chat-action").dataset.id = detail ? String(id) : "";
+    const select = requiredElement<HTMLButtonElement>(view.panel, ".project-select-action");
+    select.disabled = !detail || id === activeId();
+    requiredElement(select, "span").textContent = detail && id === activeId()
+      ? t("Проект выбран", "Project selected") : t("Выбрать проект", "Select project");
   }
   const markup = view.key === "home" ? overview() : view.key === "projects" ? projectsPage() : settingsPage();
   if (view.markup === markup) return;
@@ -2135,10 +2136,12 @@ async function act(action: string, id?: string) {
       }, t("Источник удалён","Source removed"))) closeSheet();
       break;
     }
-    case "continue-project": {
-      const project_id = Number(id);
-      if (await write("/api/projects/active","PATCH",{project_id},
-        () => { state.active_project_id = project_id; }, "")) openChat();
+    case "select-project": {
+      const project_id = projectDetail;
+      if (project_id === null || project_id === activeId()) break;
+      await write("/api/projects/active", "PATCH", {project_id},
+        result => { state.active_project_id = result?.id ?? project_id; },
+        t("Выбран проект", "Selected project") + " · " + projectName(project_id));
       break;
     }
     case "new-entry":
