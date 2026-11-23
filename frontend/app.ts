@@ -206,7 +206,6 @@ interface Swipe {
   x: number;
   time: number;
   velocity: number;
-  frame: number;
 }
 
 let stage: HTMLElement | undefined;
@@ -216,7 +215,7 @@ let sizeObserver: ResizeObserver | undefined;
 let warmingViews = false;
 let trackWidth = 0, tabWidth = 0, suppressTap = false;
 let swipe: Swipe | undefined;
-let navigationFrame = 0;
+let navigationMotion: {panel: Animation; marker: Animation; from: number; to: number} | undefined;
 let navigationPosition = 0;
 let focusTarget: string | null = null;
 let refreshRunning = false;
@@ -320,38 +319,50 @@ function render() {
   }
 }
 
+function translateTabs(position: number) {
+  return `translate3d(${position * 100}%,0,0)`;
+}
+
 function paintNavigation(position: number) {
   navigationPosition = position;
-  const bounded = clamp(position, 0, views.length - 1);
-  track.style.transform = `translate3d(${-position * 100}%,0,0)`;
-  lens.style.transform = `translate3d(${(bounded + (position - bounded) * .35) * 100}%,0,0)`;
+  track.style.transform = translateTabs(-position);
+  lens.style.transform = translateTabs(position);
 }
 
 function stopNavigation() {
-  cancelAnimationFrame(navigationFrame);
-  navigationFrame = 0;
+  const motion = navigationMotion;
+  if (!motion) return;
+  // Sample the eased timeline once when a new gesture takes over. No layout read is needed.
+  const progress = motion.panel.effect?.getComputedTiming().progress ?? (motion.panel.playState === "finished" ? 1 : 0);
+  navigationMotion = undefined;
+  paintNavigation(motion.from + (motion.to - motion.from) * progress);
+  motion.panel.cancel();
+  motion.marker.cancel();
 }
 
 function settleNavigation(index: number, velocity: number) {
-  const distance = navigationPosition - index;
-  const started = performance.now();
-  // A critically damped spring preserves release velocity and settles without oscillating.
-  const stiffness = 18;
-  const impulse = velocity + stiffness * distance;
-  const tick = (now: number) => {
-    const elapsed = (now - started) / 1000;
-    const decay = Math.exp(-stiffness * elapsed);
-    const offset = (distance + impulse * elapsed) * decay;
-    const speed = (velocity - stiffness * impulse * elapsed) * decay;
-    if (reducedMotion.matches || elapsed > .45 || (Math.abs(offset) < .002 && Math.abs(speed) < .04)) {
-      paintNavigation(index);
-      navigationFrame = 0;
-      return;
-    }
-    paintNavigation(clamp(index + offset, -.055, views.length - 1 + .055));
-    navigationFrame = requestAnimationFrame(tick);
+  const from = navigationPosition;
+  const distance = index - from;
+  paintNavigation(index);
+  if (reducedMotion.matches || Math.abs(distance) < .002) return;
+  const duration = Math.min(320, 145 + 125 * Math.abs(distance));
+  // Match the release speed to the initial slope. Taps use the same glide from rest.
+  const y1 = velocity === 0 ? .65 : clamp(.22 * velocity * duration / (1000 * distance), 0, .9);
+  const timing: KeyframeAnimationOptions = {duration, easing: `cubic-bezier(.22,${y1},.26,1)`, fill: "backwards"};
+  const slide = (node: HTMLElement, start: number, end: number) =>
+    node.animate([{transform: translateTabs(start)}, {transform: translateTabs(end)}], timing);
+  const panel = slide(track, -from, -index);
+  const marker = slide(lens, from, index);
+  navigationMotion = {panel, marker, from, to: index};
+  panel.onfinish = () => {
+    if (navigationMotion?.panel === panel) navigationMotion = undefined;
   };
-  navigationFrame = requestAnimationFrame(tick);
+}
+
+function preparePages(from: number, to: number) {
+  const first = Math.max(0, Math.floor(Math.min(from, to)));
+  const last = Math.min(views.length - 1, Math.ceil(Math.max(from, to)));
+  for (let i = first; i <= last; i++) if (views[i].markup === undefined) renderView(views[i]);
 }
 
 function showPage(index: number, animate = true, velocity = 0) {
@@ -360,8 +371,10 @@ function showPage(index: number, animate = true, velocity = 0) {
   if (!previous || !current) return;
   stopNavigation();
   dock.classList.remove("is-tracking");
-  if (animate && !reducedMotion.matches && navigationPosition !== index) settleNavigation(index, velocity);
-  else paintNavigation(index);
+  if (animate) {
+    if (warmingViews) preparePages(navigationPosition, index);
+    settleNavigation(index, velocity);
+  } else paintNavigation(index);
   if (current !== previous) {
     if (current.markup === undefined) renderView(current);
     const transferFocus = previous.panel.contains(document.activeElement);
@@ -392,9 +405,8 @@ function navigate(id: string) {
 
 function resetSwipe() {
   if (!swipe) return;
-  const {frame, pointerId} = swipe;
+  const {pointerId} = swipe;
   swipe = undefined;
-  cancelAnimationFrame(frame);
   app.removeEventListener("touchmove", claimHorizontalTouch);
   if (app.hasPointerCapture?.(pointerId)) app.releasePointerCapture(pointerId);
 }
@@ -412,14 +424,12 @@ function swipePosition(gesture: Swipe, x: number) {
   return origin.position + (x - origin.x) / gesture.width * (gesture.onDock ? 1 : -1);
 }
 
-function drawSwipe() {
-  const gesture = swipe;
-  if (!gesture) return;
-  gesture.frame = 0;
+function drawSwipe(gesture: Swipe, x: number) {
   if (reducedMotion.matches) return;
-  const position = swipePosition(gesture, gesture.x);
+  const position = swipePosition(gesture, x);
   const bounded = clamp(position, 0, views.length - 1);
   const over = position - bounded;
+  if (warmingViews) preparePages(bounded, bounded);
   paintNavigation(bounded + over * .11 / (1 + Math.abs(over) * 1.6));
 }
 
@@ -438,7 +448,7 @@ function startSwipe(event: PointerEvent) {
   const current = activeView();
   if (!current) return;
   swipe = {pointerId: event.pointerId, onDock, width, index: current.index,
-    startX: event.clientX, startY: event.clientY, x: event.clientX, time: event.timeStamp, velocity: 0, frame: 0, origin: undefined};
+    startX: event.clientX, startY: event.clientY, x: event.clientX, time: event.timeStamp, velocity: 0, origin: undefined};
 }
 
 function claimHorizontalTouch(event: TouchEvent) {
@@ -451,13 +461,12 @@ function moveSwipe(event: PointerEvent) {
   if (!gesture.origin) {
     const dx = event.clientX - gesture.startX;
     const x = Math.abs(dx), y = Math.abs(event.clientY - gesture.startY);
-    if (Math.max(x, y) < 9) return;
+    if (Math.max(x, y) < 6) return;
     if (y >= x || (y > 18 && x < 1.35 * y)) { resetSwipe(); return; }
     if (x < 1.35 * y) return;
-    for (const view of views) if (view.markup === undefined) renderView(view);
-    gesture.origin = {position: navigationPosition, x: gesture.startX + Math.sign(dx) * 7};
-    suppressTap = true;
     stopNavigation();
+    gesture.origin = {position: navigationPosition, x: gesture.startX + Math.sign(dx) * 3};
+    suppressTap = true;
     if (gesture.onDock) dock.classList.add("is-tracking");
     // WebViews can absorb the next tap after an uncancelled horizontal fling.
     app.addEventListener("touchmove", claimHorizontalTouch, {passive: false});
@@ -468,7 +477,7 @@ function moveSwipe(event: PointerEvent) {
   gesture.velocity = elapsed > 100 ? 0 : gesture.velocity * .35 + instantaneous * .65;
   gesture.time = event.timeStamp;
   gesture.x = event.clientX;
-  if (!gesture.frame) gesture.frame = requestAnimationFrame(drawSwipe);
+  drawSwipe(gesture, gesture.x);
 }
 
 function releaseSwipe(event: PointerEvent) {
@@ -483,6 +492,7 @@ function releaseSwipe(event: PointerEvent) {
   const target = Math.round(projected + (gesture.onDock ? 0 : Math.sign(projected - gesture.index) * .11));
   const index = gesture.onDock ? clamp(target, 0, views.length - 1)
     : clamp(target, Math.max(0, gesture.index - 1), Math.min(views.length - 1, gesture.index + 1));
+  if (event.clientX !== gesture.x) drawSwipe(gesture, event.clientX);
   resetSwipe();
   showPage(index, true, velocity);
 }
@@ -492,6 +502,11 @@ window.addEventListener("pointermove", moveSwipe, {passive: true});
 window.addEventListener("pointerup", releaseSwipe);
 window.addEventListener("pointercancel", (event) => {
   if (swipe?.pointerId === event.pointerId) cancelSwipe();
+});
+reducedMotion.addEventListener("change", () => {
+  if (!reducedMotion.matches) return;
+  navigationMotion?.panel.finish();
+  navigationMotion?.marker.finish();
 });
 window.addEventListener("resize", cancelSwipe);
 window.addEventListener("blur", cancelSwipe);
