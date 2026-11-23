@@ -28,7 +28,7 @@ export function showIntroduction(t: Translate, onClose: () => void) {
     {
       name: t("Задачи", "Tasks"),
       title: t("Оставь поручение", "Leave it with Aleph"),
-      description: t("Попроси собрать обзор рынка к завтрашним девяти. Ход работы виден в задачах, а готовый разбор придёт в чат.",
+      description: t("Попроси Алефа прислать обзор рынка завтра в 9 утра. Статус поручения появится в разделе «Задачи», а готовый обзор придёт в чат.",
         "Ask for a market brief by nine tomorrow. Follow the work in Tasks and get the finished brief in your chat."),
       art: "task",
       sample: `<div class="intro-result"><span class="intro-tick">${icon("check")}</span><span>${t("Обзор рынка", "Market brief")}<small>${t("Готово к 09:00", "Ready by 09:00")}</small></span></div>`,
