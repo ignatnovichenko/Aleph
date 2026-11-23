@@ -146,7 +146,7 @@ a.setting-row { text-decoration: none; }
     -webkit-backdrop-filter: blur(11px) saturate(1.24); backdrop-filter: blur(11px) saturate(1.24);
   }
 }
-.dock-surface::before, .dock-lens-glass::before {
+.dock-surface::before {
   content: ""; position: absolute; inset: 0; border-radius: inherit; padding: 1px;
   background: conic-gradient(from -45deg, var(--glass-bright), transparent 20%, var(--glass-depth) 36%, var(--glass-bright) 53%, transparent 72%, var(--glass-depth) 88%, var(--glass-bright));
   -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
@@ -159,21 +159,11 @@ a.setting-row { text-decoration: none; }
 }
 .dock-lens-glass {
   inset: 0; border-radius: 27px; transition: scale 170ms var(--ease);
-  background:
-    radial-gradient(72% 90% at 1% -18%, var(--glass-bright), transparent 70%),
-    radial-gradient(71% 96% at 97% 123%, var(--glass-bright), transparent 75%),
-    radial-gradient(118% 92% at 48% 42%, transparent 45%, var(--lens-deep) 151%), var(--lens-body);
-  box-shadow: inset 0 1px 1px var(--glass-bright), inset -1px -1px 2px var(--lens-deep),
-    inset 0 -3px 6px var(--glass-refract), inset 0 0 0 1px var(--lens-highlight), 0 5px 12px -6px var(--glass-drop);
-}
-.dock-lens-glass::after {
-  content: ""; position: absolute; inset: 2px 4px; border-radius: inherit;
-  background: radial-gradient(83% 58% at 18% 6%, var(--lens-highlight), transparent 58%),
-    radial-gradient(87% 60% at 82% 105%, var(--lens-highlight), transparent 62%);
-  opacity: .25; transition: opacity 160ms ease, transform 210ms var(--ease);
+  background: transparent;
+  border: 1px solid var(--lens-rim);
+  box-shadow: inset 0 0 0 1px var(--lens-inner-rim);
 }
 .dock.is-tracking .dock-lens-glass { scale: 1.035 1.055; }
-.dock.is-tracking .dock-lens-glass::after { opacity: .6; transform: scale(1.02, 1.04); }
 
 :where([data-theme="dark"]) .dock {
   width: min(318px, 84%);
@@ -186,25 +176,7 @@ a.setting-row { text-decoration: none; }
 :where([data-theme="dark"]) .dock-surface::before {
   background: linear-gradient(165deg, #fff8ed26, transparent 35% 67%, #eae3dc16);
 }
-:where([data-theme="dark"]) .dock-lens-glass {
-  inset: 2px 6px; border-radius: 21px;
-  background:
-    radial-gradient(41% 81% at 14% 2%, #fffdf0ae, #fff9ee38 28%, transparent 84%),
-    radial-gradient(41% 81% at 86% 98%, #fffdf3bb, #fff9ef44 26%, transparent 84%),
-    linear-gradient(158deg, #f6f0ea10 0%, transparent 34% 48%, #f4eee91a),
-    #222122b8;
-  box-shadow: inset 0 0 0 1px #f2ebea1c, inset 0 0 5px #07070855, 0 3px 8px -3px #000b;
-}
-:where([data-theme="dark"]) .dock-lens-glass::before {
-  background:
-    radial-gradient(38% 104% at 15% 3%, #fff 0%, #fffdf1ed 22%, #f7f0e831 54%, transparent 86%),
-    radial-gradient(38% 104% at 85% 97%, #fff 0%, #fffdf1ed 22%, #f7f0e831 54%, transparent 86%);
-}
-:where([data-theme="dark"]) .dock-lens-glass::after {
-  background:
-    radial-gradient(30% 57% at 14% 0%, #fff9ed91, transparent 80%),
-    radial-gradient(30% 57% at 86% 100%, #fff9edaa, transparent 80%);
-}
+:where([data-theme="dark"]) .dock-lens-glass { inset: 2px 6px; border-radius: 21px; }
 
 .nav-item {
   position: relative; min-width: 0; min-height: 51px; border-radius: 27px;
@@ -219,8 +191,8 @@ a.setting-row { text-decoration: none; }
 .nav-item[aria-current] .icon { stroke-width: 1.9; }
 @media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
   .dock-surface { background: var(--paper); -webkit-backdrop-filter: none; backdrop-filter: none; }
-  .dock-lens-glass { background: var(--pressed); box-shadow: inset 0 0 0 1px var(--hint); }
-  .dock-surface::before, .dock-lens-glass::before, .dock-lens-glass::after { content: none; }
+  .dock-lens-glass { border-color: var(--hint); box-shadow: none; }
+  .dock-surface::before { content: none; }
 }
 
 .button {
@@ -305,12 +277,11 @@ dialog.closing { pointer-events: none; }
 }
 .theme-preview-dock::before {
   content: ""; position: absolute; inset: 1px auto 1px 1px; width: calc(100% / 3 - 2px); border-radius: 10px;
-  background: linear-gradient(145deg, var(--glass-bright), transparent), var(--lens-body);
+  box-shadow: inset 0 0 0 1px var(--lens-rim);
 }
 .theme-preview[data-preview="dark"] .theme-preview-dock { width: 87%; }
 .theme-preview[data-preview="dark"] .theme-preview-dock::before {
   inset-inline-start: 2px;
-  background: linear-gradient(140deg, #fff8ee86, #2d2b2b 30% 65%, #fff6e875);
 }
 .theme-preview-dock .icon { position: relative; width: 9px; height: 9px; }
 .theme-card-caption { display: flex; align-items: center; justify-content: space-between; gap: 4px; min-height: 30px;
