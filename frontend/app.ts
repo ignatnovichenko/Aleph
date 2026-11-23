@@ -825,7 +825,7 @@ function taskFolderBody(id: number, items: Task[]) {
     ${groups.done.length ? `<div class="task-tree-archive">
       <button class="task-archive-toggle" data-action="task-archive" data-id="${id}" aria-expanded="${archived}" aria-controls="task-archive-${id}">
         <span class="task-tree-chevron">${icon("arrow")}</span>${icon("check")}
-        <span>${t("Готово", "Completed")}</span><small>${groups.done.length}</small></button>
+        <span>${t("Готово", "Completed")}</span><small class="task-count">${groups.done.length}</small></button>
       <div id="task-archive-${id}" class="task-archive-body"${archived ? "" : " hidden inert"}>
         ${archived ? `<div class="task-archive-inner">${taskTreeRows(groups.done)}</div>` : ""}</div>
     </div>` : ""}
@@ -842,7 +842,8 @@ function taskFolder(id: number, items: Task[]) {
         aria-expanded="${open}" aria-controls="task-folder-${id}">
         <span class="task-tree-chevron">${icon("arrow")}</span>
         <span class="task-folder-icon">${icon(id ? "projects" : "person")}${id ? icon("folderOpen") : ""}</span>
-        <strong dir="auto">${e(name)}</strong><small>${items.length || ""}</small>
+        <strong dir="auto">${e(name)}</strong>
+        ${items.length ? `<small class="task-count">${items.length}</small>` : ""}
       </button>
       <button class="task-folder-add" data-action="new-task" data-id="${id}"
         aria-label="${e(t("Добавить задачу в папку «", "Add a task to “") + name + t("»", "”"))}">${icon("plus")}</button>

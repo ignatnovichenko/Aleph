@@ -394,7 +394,7 @@ button.pending, button[aria-busy="true"], .task-row.pending { opacity: .62; }
   flex: 1; min-width: 0; min-height: 54px; display: flex; align-items: center; gap: 8px;
   padding: 7px 0 7px 11px; text-align: start;
 }
-.task-folder-toggle strong { min-width: 0; flex: 1; overflow-wrap: anywhere; font-size: 15px; font-weight: 550; }
+.task-folder-toggle strong { min-width: 0; overflow-wrap: anywhere; font-size: 15px; font-weight: 550; }
 .task-tree-chevron { display: grid; place-items: center; width: 15px; color: var(--hint); flex: none; }
 .task-tree-chevron .icon { width: 13px; height: 13px; transition: transform .24s var(--ease), color .2s; }
 [aria-expanded="true"] > .task-tree-chevron .icon { transform: rotate(90deg); color: var(--text); }
@@ -406,7 +406,13 @@ button.pending, button[aria-busy="true"], .task-row.pending { opacity: .62; }
 [aria-expanded="true"] > .task-folder-icon .icon { color: var(--text); }
 [aria-expanded="true"] > .task-folder-icon .icon:first-child:not(:last-child) { opacity: 0; transform: translateY(-2px); }
 [aria-expanded="true"] > .task-folder-icon .icon + .icon { opacity: 1; transform: translateY(0); }
-.task-folder-toggle small, .task-archive-toggle small { color: var(--hint); font-size: 11px; font-variant-numeric: tabular-nums; }
+.task-count {
+  flex: none; display: inline-grid; place-items: center;
+  min-inline-size: 22px; block-size: 20px; padding-inline: 6px; border-radius: 7px;
+  background: var(--wash); color: var(--hint);
+  font: 450 11px/1 var(--mono); font-variant-numeric: tabular-nums;
+}
+[aria-expanded="true"] > .task-count { background: var(--pressed); color: var(--text); }
 .task-folder-add { flex: 0 0 44px; min-height: 44px; display: grid; place-items: center; color: var(--hint); }
 .task-folder:not(.expanded) .task-folder-add { visibility: hidden; }
 .task-folder-add .icon { width: 17px; height: 17px; }
@@ -422,7 +428,6 @@ button.pending, button[aria-busy="true"], .task-row.pending { opacity: .62; }
 .task-branch .task-toggle { margin-left: -3px; margin-right: -7px; }
 .task-archive-toggle { display: flex; align-items: center; width: 100%; min-height: 44px; gap: 7px; padding: 0 5px; text-align: start; color: var(--hint); font-size: 12px; }
 .task-archive-toggle > .icon { width: 15px; height: 15px; }
-.task-archive-toggle small { margin-left: auto; margin-right: 7px; }
 .task-archive-inner { margin-left: 16px; padding-left: 5px; border-inline-start: 1px solid var(--hair); }
 .task-folder-empty { padding: 8px; color: var(--hint); font-size: 12px; }
 .task-tree-first { margin-top: 14px; }
