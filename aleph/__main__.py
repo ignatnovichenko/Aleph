@@ -36,13 +36,22 @@ def secret(name, filename):
 
 async def update_menu(tg):
     current = ""
+    next_check = 0.0
+    loop = asyncio.get_running_loop()
     while True:
         try:
-            url = mini_app_url()
-            if url and url != current:
-                await tg.call("setChatMenuButton", menu_button={"type": "web_app", "text": "Aleph", "web_app": {"url": url}})
+            url = mini_app_url().rstrip("/")
+            if url and (url != current or loop.time() >= next_check):
+                menu = await tg.call("getChatMenuButton")
+                installed = (menu.get("web_app") or {}).get("url", "").rstrip("/")
+                if installed != url:
+                    await tg.call("setChatMenuButton", menu_button={"type": "web_app", "text": "Aleph", "web_app": {"url": url}})
+                    next_check = loop.time() + 90
+                    log.info("Requested Telegram Mini App menu update")
+                else:
+                    next_check = loop.time() + 600
+                    log.info("Telegram Mini App menu verified")
                 current = url
-                log.info("Telegram Mini App menu configured")
         except (OSError, ValueError, TelegramError) as exc:
             log.warning("Menu update failed (%s)", type(exc).__name__)
         await asyncio.sleep(30)
