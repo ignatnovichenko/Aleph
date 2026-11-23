@@ -1,4 +1,5 @@
 import { icon } from "./icons.js";
+import { showIntroduction } from "./introduction.js";
 import { revealMiniApp } from "./telegram.js";
 import { bindSheetMotion } from "./sheet-motion.js";
 import { moveTaskBranch } from "./task-tree-motion.js";
@@ -93,12 +94,14 @@ const navs = (): [Page, string][] => [
   ["projects", t("Проекты", "Projects")],
   ["settings", t("Настройки", "Settings")],
 ];
+let backFromIntro: (() => void) | undefined;
 function initTelegram() {
   const tg = webapp();
   if (!tg || sdkBound) return;
   sdkBound = true;
   revealMiniApp();
   tg.BackButton?.onClick(() => {
+    if (backFromIntro) return backFromIntro();
     if (sheet.open) {
       if (!pending) closeSheet();
     } else if (page === "projects" && projectDetail !== null) showProjectList();
@@ -112,7 +115,7 @@ function unlockSheetSwipes() {
   restoreTelegramSwipes = undefined;
 }
 function syncSheetSwipes() {
-  if (!sheet.open) {
+  if (!sheet.open && !backFromIntro) {
     unlockSheetSwipes();
     return;
   }
@@ -132,7 +135,7 @@ function syncBack() {
   syncSheetSwipes();
   const back = webapp()?.BackButton;
   if (!back || !webapp()?.isVersionAtLeast?.("6.1")) return;
-  if (sheet.open || page !== "home") back.show();
+  if (backFromIntro || sheet.open || page !== "home") back.show();
   else back.hide();
 }
 function setLanguage(code?: string) {
@@ -1819,6 +1822,24 @@ function openChat() {
   }
   window.open("https://t.me/AlephAgentBot", "_blank", "noopener,noreferrer");
 }
+async function claimIntroduction() {
+  // Direct links to a result and the keyboard shortcut to tasks open their destination immediately.
+  if (bridge() || initialView.has("task") || state.settings.intro_seen) return false;
+  if (demo) {
+    state.settings.intro_seen = true;
+    saveDemo(state);
+    return true;
+  }
+  if (state.settings.intro_seen !== false) return false;
+  try {
+    const claim = await request("/api/introduction", "POST", undefined, {timeoutMs: 3500});
+    return claim.show;
+  } catch {
+    // Keep the workspace available if this optional request fails.
+    return false;
+  }
+}
+
 async function load() {
   if (demo) {
     state = demoState(ru);
@@ -1830,6 +1851,7 @@ async function load() {
         "ru",
     );
   }
+  const introduce = !initialTaskOpened && await claimIntroduction();
   chatgpt = state.chatgpt_connection;
   state.feeds ??= [];
   state.settings.digest_time ??= "09:00";
@@ -1847,6 +1869,10 @@ async function load() {
     } else if (task) message(t("Задача не найдена","Task not found"));
   }
   render();
+  if (introduce) {
+    backFromIntro = showIntroduction(t, () => { backFromIntro = undefined; syncBack(); });
+    syncBack();
+  }
   if (state.model_configurable && !chatgpt && !bridge()) void syncChatGPT();
 }
 

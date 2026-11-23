@@ -62,6 +62,13 @@ class BackendAPI(unittest.IsolatedAsyncioTestCase):
             self.assertIn("feed_items", full)
             headlines.assert_called_once_with(1)
 
+    async def test_introduction_can_only_be_claimed_once_per_account(self):
+        self.assertEqual((await self.client.post("/api/introduction")).status, 401)
+        for uid, expected in [(1, True), (1, False), (2, True)]:
+            response = await self.client.post("/api/introduction", headers=self.headers(uid))
+            self.assertEqual(await response.json(), {"show": expected})
+            self.assertTrue(self.store.get_settings(uid)["intro_seen"])
+
     async def test_appearance_is_persisted_for_the_signed_user(self):
         headers = self.headers()
         self.assertEqual((await self.client.patch("/api/settings", json={"theme": "dark"})).status, 401)

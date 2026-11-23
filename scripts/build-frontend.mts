@@ -44,7 +44,7 @@ async function buildMainPage() {
       define: { __ALEPH_MARK_URL__: JSON.stringify(mark) },
       write: false,
     }),
-    Promise.all(["fonts.css", "tokens.css", "styles.css"].map(name => readFile(join(web, name), "utf8"))),
+    Promise.all(["fonts.css", "tokens.css", "styles.css", "introduction.css"].map(name => readFile(join(web, name), "utf8"))),
   ]);
   let styles = styleSources.join("\n");
   for (const [name, url] of assets) styles = styles.replaceAll(name, url);

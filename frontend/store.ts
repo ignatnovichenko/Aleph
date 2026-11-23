@@ -31,6 +31,7 @@ type Reads = {
 };
 
 export type Writes = {
+  "/api/introduction": {show: boolean};
   "/api/projects": Project;
   "/api/projects/active": Project;
   [path: `/api/projects/${number}`]: Project;

@@ -130,6 +130,7 @@ export type ThemeMode = "auto" | "white" | "dark";
 export type ReplyStyle = "short" | "balanced" | "detailed";
 
 export interface Settings {
+  intro_seen?: boolean;
   theme?: ThemeMode;
   reply_style?: ReplyStyle;
   assistant_instructions?: string;

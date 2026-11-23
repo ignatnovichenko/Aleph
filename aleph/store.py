@@ -134,6 +134,14 @@ class Store:
             if name not in user_columns:
                 self.db.execute(f"ALTER TABLE users ADD COLUMN {name} {definition}")
 
+        if "intro_seen" not in user_columns:
+            # Existing workspaces skip the introduction. New accounts start eligible.
+            with self.db:
+                self.db.execute("BEGIN IMMEDIATE")
+                if "intro_seen" not in {row["name"] for row in self.db.execute("PRAGMA table_info(users)")}:
+                    self.db.execute("ALTER TABLE users ADD COLUMN intro_seen INTEGER NOT NULL DEFAULT 0")
+                    self.db.execute("UPDATE users SET intro_seen=1")
+
         memory.initialize(self.db)
         projects.initialize(self.db)
         computers.initialize(self.db)
@@ -188,12 +196,16 @@ class Store:
 
     def get_settings(self, uid):
         row = self.db.execute("""SELECT initiative,focus,context_sources,proactive,timezone,quiet_start,quiet_end,digest_time,theme,
-            reply_style,assistant_instructions,personal_memory,daily_digest,timezone_confirmed
+            reply_style,assistant_instructions,personal_memory,daily_digest,timezone_confirmed,intro_seen
             FROM users WHERE id=?""", (uid,)).fetchone()
         if row is None:
             raise KeyError("Пользователь не найден.")
         return {**dict(row), **{name: bool(row[name]) for name in SETTING_FLAGS},
+                "intro_seen": bool(row["intro_seen"]),
                 "timezone_confirmed": bool(row["timezone_confirmed"] or row["timezone"] != "UTC")}
+
+    def claim_introduction(self, uid):
+        return self.db.execute("UPDATE users SET intro_seen=1 WHERE id=? AND intro_seen=0", (uid,)).rowcount == 1
 
     def patch_settings(self, uid, fields):
         allowed = {*SETTING_FLAGS, "initiative","focus", "quiet_start", "quiet_end", "digest_time", "timezone",

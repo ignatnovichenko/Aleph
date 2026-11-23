@@ -136,6 +136,9 @@ def install_api(app, store, token, model_key=None):
             return response
         return wrapped
 
+    async def open_introduction(request, user):
+        return web.json_response({"show": store.claim_introduction(user["id"])})
+
     async def state(request, user):
         uid = user["id"]
         compact = request.query.get("compact") == "1"
@@ -577,7 +580,7 @@ def install_api(app, store, token, model_key=None):
             result, code = {"error": "ChatGPT did not validate the connection."}, 503 if error.status in {0, 503} else 403
         return web.json_response(result, status=code, headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
 
-    routes = [("GET", "/api/state", state), ("POST", "/api/tasks", create),
+    routes = [("GET", "/api/state", state), ("POST", "/api/introduction", open_introduction), ("POST", "/api/tasks", create),
               ("PATCH", r"/api/tasks/{id:\d{1,18}}", update), ("PATCH", "/api/settings", settings),
               ("GET", r"/api/tasks/{id:\d{1,18}}/result", result),
               ("GET", "/api/memory", memories), ("DELETE", r"/api/memory/{id:\d{1,18}}", forget_memory),
